@@ -1,0 +1,180 @@
+@import "tailwindcss";
+
+/* ──────────────────────────────────────────────
+   Design Tokens — Tailwind v4 @theme
+   ────────────────────────────────────────────── */
+@theme {
+  /* Brand */
+  --color-brand: #0093C1;
+  --color-brand-dark: #007aa3;
+  --color-brand-green: #00A59B;
+
+  /* Accents */
+  --color-dark-blue: #014865;
+  --color-bright-blue: #00D4F0;
+  --color-bright-green: #30DAA2;
+  --color-warning: #FF8933;
+  --color-error: #EB4751;
+  --color-yellow-accent: #FFC94F;
+  --color-pink-accent: #E99385;
+  --color-purple-accent: #854591;
+
+  /* Surfaces */
+  --color-surface: #FFFFFF;
+  --color-surface-alt: #EEF0F0;
+  --color-input-bg: #EEF0F0;
+  --color-input-disabled: #D7D8DA;
+  --color-border: #D7D7DA;
+
+  /* Text / Ink */
+  --color-ink: #0C0E1F;
+  --color-ink-secondary: #494A57;
+  --color-ink-subtle: #AEAFB4;
+}
+
+/* ──────────────────────────────────────────────
+   Theme Overrides
+   Tailwind v4 generates: .bg-surface { background-color: var(--color-surface) }
+   Overriding the variable here updates ALL Tailwind utilities instantly.
+   ────────────────────────────────────────────── */
+
+/* ── Light ── */
+html[data-theme="light"] {
+  --color-surface:          #FFFFFF;
+  --color-surface-alt:      #F4F6F8;
+  --color-input-bg:         #ECEEF0;
+  --color-input-disabled:   #DDDFE2;
+  --color-border:           #CDD0D5;
+  --color-ink:              #111827;
+  --color-ink-secondary:    #374151;
+  --color-ink-subtle:       #9CA3AF;
+}
+
+/* ── Dark ── */
+html[data-theme="dark"] {
+  --color-surface:          #161b22;
+  --color-surface-alt:      #0d1117;
+  --color-input-bg:         #21262d;
+  --color-input-disabled:   #30363d;
+  --color-border:           #30363d;
+  --color-ink:              #e6edf3;
+  --color-ink-secondary:    #8b949e;
+  --color-ink-subtle:       #484f58;
+  --color-brand:            #58a6ff;
+  --color-brand-dark:       #388bfd;
+  --color-brand-green:      #3fb950;
+  --color-error:            #f85149;
+  --color-warning:          #d29922;
+}
+
+/* ── Glass ── */
+html[data-theme="glass"] {
+  /*
+   * iOS Liquid Glass — deep space background with subtle radial light blooms.
+   * Panels are dark-navy translucent glass (NOT white), revealed through backdrop blur.
+   * The top-edge inset box-shadow mimics the specular reflection of physical glass.
+   */
+
+  /* Deep cosmic background — like an iOS "dark" dynamic wallpaper */
+  background:
+    radial-gradient(ellipse 55% 40% at 12% 14%, rgba(48,  90, 210, 0.28) 0%, transparent 62%),
+    radial-gradient(ellipse 45% 50% at 88% 85%, rgba(95,  42, 190, 0.22) 0%, transparent 62%),
+    radial-gradient(ellipse 30% 35% at 55% 48%, rgba(0,   70, 170, 0.12) 0%, transparent 55%),
+    linear-gradient(170deg, #04070e 0%, #070c18 45%, #09112096 100%);
+  background-attachment: fixed;
+
+  /* Surfaces — dark-navy semi-transparent glass (NOT white) */
+  --color-surface:          rgba(16, 26, 58,  0.52);
+  --color-surface-alt:      rgba(8,  14, 32,  0.35);
+  --color-input-bg:         rgba(255, 255, 255, 0.07);
+  --color-input-disabled:   rgba(255, 255, 255, 0.03);
+  --color-border:           rgba(255, 255, 255, 0.12);
+
+  /* Text — crisp white on dark glass */
+  --color-ink:              rgba(255, 255, 255, 0.96);
+  --color-ink-secondary:    rgba(255, 255, 255, 0.65);
+  --color-ink-subtle:       rgba(255, 255, 255, 0.35);
+
+  /* Interactions — vivid cyan keeps brand identity and passes WCAG AA on dark glass */
+  --color-brand:            #00c8e8;
+  --color-brand-dark:       #00aacb;
+  --color-brand-green:      #34d399;
+  --color-error:            #ff7b7b;
+  --color-warning:          #fbbf24;
+}
+
+/*
+ * Glass theme — primary button: vivid cyan bg with near-black text for max contrast.
+ * Secondary / outline: subtle glass tint with white text.
+ */
+html[data-theme="glass"] .bg-brand {
+  color: #0a0e1a !important;   /* near-black text on cyan bg */
+}
+html[data-theme="glass"] .hover\:bg-brand-dark:hover {
+  color: #0a0e1a !important;
+}
+
+/* ── Glass material: backdrop blur + saturation + specular inset edge ── */
+html[data-theme="glass"] aside,
+html[data-theme="glass"] [data-glass-panel] {
+  position: relative;
+  overflow: hidden;
+  backdrop-filter: blur(24px) saturate(180%) brightness(1.06);
+  -webkit-backdrop-filter: blur(24px) saturate(180%) brightness(1.06);
+  box-shadow:
+    inset 0 1.5px 0   rgba(255, 255, 255, 0.22),  /* top specular edge  */
+    inset 1px 0 0     rgba(255, 255, 255, 0.06),   /* left edge glint    */
+    inset 0 -1px 0    rgba(0,   0,   0,   0.18),   /* bottom depth line  */
+    0 8px 32px        rgba(0,   0,   0,   0.55),   /* elevation shadow   */
+    0 1px 2px         rgba(0,   0,   0,   0.30);
+}
+
+/* Subtle top-gradient specular wash (light catching the glass rim) */
+html[data-theme="glass"] aside::before,
+html[data-theme="glass"] [data-glass-panel]::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 42%;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.09) 0%,
+    rgba(255, 255, 255, 0.02) 55%,
+    transparent 100%
+  );
+  pointer-events: none;
+  /* z below flex children but above aside background */
+  z-index: 0;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    background-color: var(--color-surface-alt);
+    color: var(--color-ink);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-ink-subtle);
+  }
+}

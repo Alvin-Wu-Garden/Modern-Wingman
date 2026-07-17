@@ -1,0 +1,8 @@
+{
+  "name": "wingman-jira-mcp",
+  "version": "1.0.3",
+  "description": "Self-hosted Jira MCP server for Modern Wingman.",
+  "mcpServers": [
+    ".mcp.json"
+  ]
+}

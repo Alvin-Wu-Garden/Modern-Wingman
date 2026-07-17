@@ -1,0 +1,19 @@
+{
+  "name": "modern-wingman",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Modern Wingman — AI Agent Desktop Tool",
+  "engines": {
+    "node": ">=24.13.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm -r --filter=@modern-wingman/desktop tauri dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "@modern-wingman/skills",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent skill definitions"
+}

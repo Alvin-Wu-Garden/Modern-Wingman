@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "platform": "win32-x64",
+  "updatePolicy": "release-only",
+  "runtimes": [
+    {
+      "id": "git-for-windows-mingit",
+      "version": "2.55.0.2",
+      "archive": "MinGit-2.55.0.2-64-bit.zip",
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.2/MinGit-2.55.0.2-64-bit.zip",
+      "sha256": "e3ea2944cea4b3fabcd69c7c1669ef69b1b66c05ac7806d81224d0abad2dec31",
+      "destination": "git",
+      "executable": "git/cmd/git.exe",
+      "license": "GPL-2.0-only"
+    },
+    {
+      "id": "apache-subversion-cli",
+      "version": "1.14.5-4",
+      "archive": "Apache-Subversion-1.14.5-4.zip",
+      "url": "https://www.visualsvn.com/files/Apache-Subversion-1.14.5-4.zip",
+      "sha256": "1801dc76910bf196948eaf4b4a9a8e0178e39da6a5339c11413b5e6dcb32e39d",
+      "destination": "svn",
+      "executable": "svn/bin/svn.exe",
+      "license": "Apache-2.0"
+    }
+  ]
+}

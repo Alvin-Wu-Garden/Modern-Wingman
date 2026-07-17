@@ -1,0 +1,13 @@
+[
+  {
+    "$schema": "../gen/schemas/windows-permission-schema.json",
+    "identifier": "main-capability",
+    "description": "Capability for the main application window",
+    "windows": ["main"],
+    "permissions": [
+      "core:default",
+      "shell:allow-open",
+      "dialog:allow-open"
+    ]
+  }
+]

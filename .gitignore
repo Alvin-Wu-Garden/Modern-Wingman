@@ -1,0 +1,47 @@
+# Node.js
+node_modules/
+dist/
+.turbo/
+*.tsbuildinfo
+
+# pnpm
+.pnpm-store/
+.pnpm-debug.log
+
+# Rust / Tauri
+target/
+apps/desktop/src-tauri/target/
+*.pdb
+
+# .NET
+**/bin/
+**/obj/
+*.user
+*.suo
+.vs/
+*.nupkg
+
+# Build outputs
+apps/desktop/dist/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+
+# Local runtime state and disposable verification output.
+*.db
+*.db-shm
+*.db-wal
+/db-backups/
+/temp/
+/apps/agent-service/publish-verification/

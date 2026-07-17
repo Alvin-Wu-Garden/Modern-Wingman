@@ -1,0 +1,92 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>AgentService</RootNamespace>
+    <AssemblyName>AgentService</AssemblyName>
+    <!--
+      CopilotSkipCliDownload 已移除：讓 SDK NuGet targets 在建置時自動下載相應平台的 CLI binary
+      並將其複製到 runtimes\{rid}\native\copilot.exe，輸出目錄包含所有環境依賴。
+      企業內網 SSL 問題無法讓 MSBuild DownloadFile 直接下載時，改用 CopilotCliBinaryPath
+      指向手動下載的 binary（等同於 CopilotSkipCliDownload + 手動提供）。
+    -->
+    <CopilotCliBinaryPath>$(MSBuildProjectDirectory)\tools\copilot-cli\win32-x64\copilot.exe</CopilotCliBinaryPath>
+
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="tools\**\*" />
+    <Content Remove="tools\vcs\**\*" />
+    <None Remove="tools\vcs\**\*" />
+    <Content Remove="tools\runtimes\**\*" />
+    <None Remove="tools\runtimes\**\*" />
+    <Compile Remove="tests\**\*" />
+    <Content Remove="tests\**\*" />
+    <None Remove="tests\**\*" />
+    <Compile Remove="modules\Marketplace\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="modules\Marketplace\Wingman.Marketplace.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="tools\whisper\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="tools\vcs\**\*" Exclude="tools\vcs\downloads\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="tools\runtimes\**\*" Exclude="tools\runtimes\downloads\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="THIRD-PARTY-NOTICES.md">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AgentService.UnitTests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="GitHub.Copilot.SDK" Version="1.0.3" />
+    <PackageReference Include="DiffPlex" Version="1.9.0" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.67.0" />
+    <PackageReference Include="Microsoft.Agents.AI" Version="1.9.0" />
+    <PackageReference Include="Microsoft.Agents.AI.GitHub.Copilot" Version="1.11.1-rc1" />
+    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.9.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.9.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.14.0" />
+    <PackageReference Include="Microsoft.Build.Locator" Version="1.7.8" />
+    <!-- Workspaces.MSBuild 4.14 pulls vulnerable 17.7.2 transitively. Pin a
+         patched line for restore resolution, while MSBuildLocator supplies the
+         installed SDK assemblies at runtime. -->
+    <PackageReference Include="Microsoft.Build" Version="17.14.28" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.Build.Framework" Version="17.14.28" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.Build.Tasks.Core" Version="17.14.28" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.Build.Utilities.Core" Version="17.14.28" ExcludeAssets="runtime" />
+    <!-- Override the vulnerable 9.x transitive dependency from Roslyn/MSBuild. -->
+    <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.10" NoWarn="NU1510" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.5.1" />
+    <PackageReference Include="Neo4j.Driver" Version="5.28.3" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.10.0" />
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="src\Host\Protos\health.proto" GrpcServices="Server" />
+    <Protobuf Include="src\Host\Protos\runs.proto" GrpcServices="Server" />
+  </ItemGroup>
+
+</Project>

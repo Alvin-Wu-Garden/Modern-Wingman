@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="cardBg" x1="96" y1="74" x2="414" y2="408" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#062033"/>
+      <stop offset="1" stop-color="#03131D"/>
+    </linearGradient>
+
+    <linearGradient id="mint" x1="108" y1="66" x2="430" y2="408" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#75F0D1"/>
+      <stop offset="1" stop-color="#52DDBD"/>
+    </linearGradient>
+
+    <linearGradient id="pillBg" x1="143" y1="351" x2="382" y2="401" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#064E3B"/>
+      <stop offset="1" stop-color="#07543E"/>
+    </linearGradient>
+
+    <radialGradient id="centerGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(256 217) rotate(90) scale(118)">
+      <stop stop-color="#0B6B4D" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#02241F" stop-opacity="0.85"/>
+    </radialGradient>
+
+    <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.45 0 0 0 0 0.95 0 0 0 0 0.82 0 0 0 0.55 0"/>
+      <feBlend in="SourceGraphic" mode="screen"/>
+    </filter>
+
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000814" flood-opacity="0.45"/>
+    </filter>
+
+    <style>
+      .mono { font-family: "Cascadia Mono", "Consolas", "Menlo", monospace; font-weight: 800; }
+      .sans { font-family: "Inter", "Segoe UI", "Arial", sans-serif; font-weight: 800; }
+    </style>
+  </defs>
+
+  <rect width="512" height="512" fill="#07112A"/>
+
+  <g filter="url(#shadow)">
+    <rect x="58" y="34" width="396" height="396" rx="50" fill="url(#cardBg)" stroke="url(#mint)" stroke-width="8"/>
+
+    <circle cx="256" cy="178" r="78" fill="url(#centerGlow)" stroke="url(#mint)" stroke-width="8" filter="url(#softGlow)"/>
+    <path d="M256 130V226" stroke="#B9F8DF" stroke-width="17" stroke-linecap="round"/>
+    <path d="M208 178H304" stroke="#B9F8DF" stroke-width="17" stroke-linecap="round"/>
+
+    <rect x="144" y="334" width="224" height="58" rx="29" fill="url(#pillBg)" stroke="#0A8C67" stroke-width="4"/>
+    <text x="256" y="371" fill="#C9FFE7" font-size="34" text-anchor="middle" class="mono">/v1/chat</text>
+  </g>
+
+  <text x="256" y="484" fill="#D9FFE8" font-size="38" text-anchor="middle" class="sans">Custom Endpoint</text>
+</svg>

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "jira": {
+      "runtime": {
+        "kind": "node",
+        "version": ">=18"
+      },
+      "entrypoint": "vendor/mcp-jira-server/build/index.js",
+      "env": {
+        "JIRA_BASE_URL": "REPLACE_WITH_YOUR_JIRA_BASE_URL",
+        "JIRA_PAT": "REPLACE_WITH_YOUR_API_KEY"
+      }
+    }
+  }
+}
