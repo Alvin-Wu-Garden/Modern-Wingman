@@ -4,6 +4,11 @@ import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
 const host = process.env.TAURI_DEV_HOST
+const devPort = Number.parseInt(process.env.WINGMAN_DEV_PORT ?? '4173', 10)
+
+if (!Number.isInteger(devPort) || devPort < 1 || devPort > 65534) {
+  throw new Error(`Invalid WINGMAN_DEV_PORT: ${process.env.WINGMAN_DEV_PORT}`)
+}
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -14,10 +19,10 @@ export default defineConfig({
   },
   clearScreen: false,
   server: {
-    port: 1777,
+    port: devPort,
     strictPort: true,
-    host: host || '127.0.0.1',   // 1420 is in Windows excluded port range; 1777 is free
-    hmr: host ? { protocol: 'ws', host, port: 1421 } : undefined,
+    host: host || '127.0.0.1',
+    hmr: host ? { protocol: 'ws', host, port: devPort + 1 } : undefined,
     watch: {
       ignored: ['**/src-tauri/**'],
     },
