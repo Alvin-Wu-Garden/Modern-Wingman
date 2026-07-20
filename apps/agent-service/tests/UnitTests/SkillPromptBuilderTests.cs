@@ -40,15 +40,4 @@ public sealed class SkillPromptBuilderTests
         // Progressive disclosure：不含全文
         Assert.DoesNotContain("content-of-pdf", prompt);
     }
-
-    [Fact]
-    public void ReadSkillTool_HasCorrectName()
-    {
-        var provider = new FakeSkillProvider([
-            new SkillDefinition { Name = "pdf", Description = "d", SkillFilePath = "x" },
-        ]);
-
-        var tool = SkillPromptBuilder.CreateReadSkillTool(provider);
-        Assert.Equal("read_skill", tool.Name);
-    }
 }

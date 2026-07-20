@@ -34,12 +34,12 @@ public sealed class CopilotAgentFactory(
                 context.Mode,
                 context.WorkspacePath,
                 context.RunId),
-            Tools = [WingmanToolAdapter.Create(toolRegistry,context)],
+            Tools = [.. WingmanToolAdapter.CreateTools(toolRegistry, context)],
             SystemMessage = new SystemMessageConfig
             {
                 Mode = SystemMessageMode.Append,
                 // Skills 清單以 progressive disclosure 附加於指示之後
-                Content = "\n" + context.Instructions + context.SkillsPrompt + pluginRuntime.BuildContextPrompt() + WingmanToolAdapter.BuildPrompt(toolRegistry),
+                Content = "\n" + context.Instructions + context.SkillsPrompt + pluginRuntime.BuildContextPrompt(),
             },
         };
 

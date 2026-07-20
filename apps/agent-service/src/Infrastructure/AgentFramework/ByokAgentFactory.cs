@@ -32,20 +32,18 @@ public sealed class ByokAgentFactory(
             return null;
         }
 
-        // Skills：instructions 注入清單 + read_skill 工具（progressive disclosure）
-        var tools = new List<AITool>();
-        if (skillProvider.ListSkills().Count > 0)
-        {
-            tools.Add(SkillPromptBuilder.CreateReadSkillTool(skillProvider));
-        }
-        tools.Add(WingmanToolAdapter.Create(toolRegistry,context));
+        // read_skill is part of the provider-neutral registry. Expose every
+        // registered capability as its own standard function with its own schema.
+        var tools = WingmanToolAdapter.CreateTools(toolRegistry, context)
+            .Cast<AITool>()
+            .ToList();
 
         var agent = new ChatClientAgent(chatClient, new ChatClientAgentOptions
         {
             Name = "WingmanAgent",
             ChatOptions = new ChatOptions
             {
-                Instructions = context.Instructions + context.SkillsPrompt + pluginRuntime.BuildContextPrompt() + WingmanToolAdapter.BuildPrompt(toolRegistry),
+                Instructions = context.Instructions + context.SkillsPrompt + pluginRuntime.BuildContextPrompt(),
                 Tools = tools.Count > 0 ? tools : null,
             },
         });

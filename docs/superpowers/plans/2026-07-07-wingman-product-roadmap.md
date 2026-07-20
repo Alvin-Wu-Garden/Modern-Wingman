@@ -193,13 +193,12 @@ Modern Wingman 是類 Codex 的桌面 AI Agent（React 19 + Tauri 2 + .NET 10 + 
 
 ---
 
-## 5. CLI（P4）
+## 5. 桌面版產品邊界
 
-- `wingman-cli`（Rust，與桌面版共用 library crate）：`skills list/install/sync/unsync`、`agents list`、`mcp list`
-- 驗收：
-  - [x] CLI 與桌面 App 共用同一 SQLite/中央庫（`src/bin/wingman_cli.rs`）
-  - [x] `--json` 輸出供腳本/agent 使用
-  - [x] E2E 驗證：`skills install` → `skills sync ... wingman`（junction 建立成功）→ `unsync`（清理成功）
+- 2026-07-20 決定 Modern Wingman 僅提供 Tauri 桌面 UI，不再提供獨立
+  `wingman-cli`。
+- Skills、Agents 與 MCP 管理統一由桌面 UI 操作，Rust library 只供 Tauri
+  desktop binary 使用。
 
 ---
 
@@ -210,7 +209,7 @@ Modern Wingman 是類 Codex 的桌面 AI Agent（React 19 + Tauri 2 + .NET 10 + 
 | M1 | WS1 完成 | ✅ 2026-07-07 全數通過 |
 | M2 | WS2 完成 | ✅ 2026-07-07 全數通過 |
 | M3 | WS3 完成 | ✅ 2026-07-07 程式碼層全數通過（Neo4j 執行期需環境驗證） |
-| M4 | WS4 + CLI 完成 | ✅ 2026-07-07 全數通過（CLI E2E 驗證成功） |
+| M4 | WS4 + 桌面整合完成 | ✅ 2026-07-20 桌面版產品邊界確認 |
 
 ## 7. 最終驗收紀錄（2026-07-07）
 

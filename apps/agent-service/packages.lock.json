@@ -89,6 +89,12 @@
           "OpenTelemetry.Api": "1.15.3"
         }
       },
+      "Microsoft.Agents.AI.Workflows.Generators": {
+        "type": "Direct",
+        "requested": "[1.13.0, )",
+        "resolved": "1.13.0",
+        "contentHash": "mMzi2bi+rHbbQ+voAccK3NuM3L1UCXqWVP7GoKEHORpG/R6zjrxe3utelXSjVPDFzh9JmpttNj0vEOo8ztpIRw=="
+      },
       "Microsoft.Build": {
         "type": "Direct",
         "requested": "[17.14.28, )",

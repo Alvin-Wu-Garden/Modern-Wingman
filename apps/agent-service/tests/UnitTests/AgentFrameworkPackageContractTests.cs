@@ -20,6 +20,9 @@ public sealed class AgentFrameworkPackageContractTests
     {
         Assert.Equal(new Version(1, 13, 0, 0), typeof(AIAgent).Assembly.GetName().Version);
         Assert.Equal(new Version(1, 13, 0, 0), typeof(AgentWorkflowBuilder).Assembly.GetName().Version);
+        Assert.Equal(new Version(1, 13, 0, 0), typeof(MessageHandlerAttribute).Assembly.GetName().Version);
+        Assert.Equal(new Version(1, 13, 0, 0), typeof(InProcessExecution).Assembly.GetName().Version);
+        Assert.Same(typeof(AgentWorkflowBuilder).Assembly, typeof(WorkflowOutputEvent).Assembly);
         Assert.Equal(new Version(10, 8, 0, 0), typeof(IChatClient).Assembly.GetName().Version);
         Assert.Equal(new Version(10, 8, 0, 0), Assembly.Load("Microsoft.Extensions.AI.Evaluation").GetName().Version);
         Assert.Equal(new Version(2, 12, 0, 0), typeof(OpenAIClient).Assembly.GetName().Version);

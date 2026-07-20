@@ -1,12 +1,10 @@
 using System.Text;
 using AgentService.Application.Contracts;
-using Microsoft.Extensions.AI;
-using AgentService.Infrastructure.Tools;
 
 namespace AgentService.Infrastructure.Skills;
 
 /// <summary>
-/// 將 skills 轉為 progressive-disclosure 提示片段與 read_skill 工具。
+/// 將 skills 轉為 progressive-disclosure 提示片段。
 ///
 /// 原則（Claude Code / Codex 已驗證做法）：
 ///   - system prompt 只列出 name + description（省 context）
@@ -31,20 +29,5 @@ public static class SkillPromptBuilder
             sb.AppendLine($"- **{skill.Name}**: {skill.Description}");
         }
         return sb.ToString();
-    }
-
-    /// <summary>建立 read_skill AIFunction 工具（掛入 ChatOptions.Tools）。</summary>
-    public static AIFunction CreateReadSkillTool(ISkillProvider provider)
-    {
-        return AIFunctionFactory.Create(
-            async (string name, CancellationToken ct) =>
-            {
-                var content = await provider.ReadSkillContentAsync(name, ct);
-                return content is null
-                    ? $"找不到名為 '{name}' 的 skill。可用清單: " + string.Join(", ", provider.ListSkills().Select(s => s.Name))
-                    : UntrustedContent.Wrap($"skill:{name}", content);
-            },
-            name: "read_skill",
-            description: "讀取指定 skill 的完整 SKILL.md 內容。當任務符合可用 Skills 清單中某技能的描述時呼叫。");
     }
 }
