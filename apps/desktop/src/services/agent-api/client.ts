@@ -45,6 +45,17 @@ export interface ProviderKeyStatus {
   hasStoredKey: boolean
   storedBaseUrl: string | null
   sortOrder: number
+  runtimeStatus: CopilotRuntimeStatus | null
+}
+
+export interface CopilotRuntimeStatus {
+  state: 'not_configured' | 'validating' | 'configured' | 'invalid'
+  isAuthenticated: boolean
+  login: string | null
+  authType: string | null
+  copilotPlan: string | null
+  modelCount: number | null
+  error: string | null
 }
 export interface AttachmentReference { path:string; name:string; mediaType:string|null }
 
@@ -276,7 +287,10 @@ export async function setProviderKey(profileId: string, apiKey: string): Promise
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ apiKey }),
   })
-  if (!res.ok) throw new Error(`setProviderKey: ${res.status}`)
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { error?: string } | null
+    throw new Error(body?.error ?? `setProviderKey: ${res.status}`)
+  }
 }
 
 export async function deleteProviderKey(profileId: string): Promise<void> {

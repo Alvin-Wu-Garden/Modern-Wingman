@@ -34,11 +34,9 @@ public static class DatabasePathResolver
         if (rootName.Equals("apps", StringComparison.OrdinalIgnoreCase))
             return Path.Combine(root, "wingman_dev.db");
 
-        var appsDir = Path.Combine(root, "apps");
-        if (Directory.Exists(appsDir))
-            return Path.Combine(appsDir, "wingman_dev.db");
-
-        return Path.GetFullPath(Path.Combine(root, "wingman_dev.db"));
+        // Content root 為 repository root 時，開發資料庫固定放在 apps/。
+        // 不以 Directory.Exists 判斷，讓首次啟動與測試環境套用相同規則。
+        return Path.GetFullPath(Path.Combine(root, "apps", "wingman_dev.db"));
     }
 
     public static string GetProductionDatabasePath()

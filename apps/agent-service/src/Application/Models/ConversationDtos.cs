@@ -41,7 +41,20 @@ public sealed record ProviderKeyStatusDto(
     /// <summary>DB 中的自訂 BaseUrl（僅 custom-byok 使用）。</summary>
     string? StoredBaseUrl = null,
     /// <summary>目前套用的排序位置。</summary>
-    int SortOrder = 0
+    int SortOrder = 0,
+    /// <summary>Copilot PAT runtime 狀態；其他 provider 為 null。</summary>
+    CopilotRuntimeStatusDto? RuntimeStatus = null
+);
+
+/// <summary>不含任何憑證的 bundled Copilot runtime 狀態。</summary>
+public sealed record CopilotRuntimeStatusDto(
+    string State,
+    bool IsAuthenticated,
+    string? Login = null,
+    string? AuthType = null,
+    string? CopilotPlan = null,
+    int? ModelCount = null,
+    string? Error = null
 );
 
 public sealed record SetApiKeyRequest(string ApiKey);

@@ -4,8 +4,10 @@ import { ProviderBrandIcon } from '@/components/ui/provider-brand-icon'
 import { cn } from '@/lib/utils'
 import {
   listProviders,
+  getProviderKeyStatus,
   listProviderModels,
   type ProviderInfo,
+  type ProviderKeyStatus,
   type ModelGroup,
 } from '@/services/agent-api/client'
 
@@ -14,6 +16,27 @@ interface Props {
   selectedModel: string | null
   onProviderChange: (providerId: string | null) => void
   onModelChange: (model: string | null) => void
+}
+
+const PREFERRED_MODEL_ID = 'claude-sonnet-4.6'
+const LATEST_OPENAI_MODEL_ID = 'gpt-5.6'
+
+function isVerifiedProvider(provider: ProviderInfo, status: ProviderKeyStatus | null): boolean {
+  if (!status) return false
+
+  // Copilot 的「已設定」不代表可用，必須通過 bundled runtime 的實際認證。
+  if (provider.kind === 'CopilotDefault') return status.runtimeStatus?.isAuthenticated === true
+
+  // 其餘 BYOK 供應商沒有常駐 runtime 認證狀態，因此以設定頁已配置的金鑰或環境變數判定可用。
+  return status.hasStoredKey || status.hasEnvVar
+}
+
+function selectDefaultModel(groups: ModelGroup[], provider: ProviderInfo | undefined): string | null {
+  const models = groups.flatMap((group) => group.models)
+  if (models.includes(PREFERRED_MODEL_ID)) return PREFERRED_MODEL_ID
+  if (provider?.id === 'openai-byok' && models.includes(LATEST_OPENAI_MODEL_ID)) return LATEST_OPENAI_MODEL_ID
+  if (provider?.modelId && models.includes(provider.modelId)) return provider.modelId
+  return models[0] ?? null
 }
 
 export function ProviderModelPicker({
@@ -30,10 +53,37 @@ export function ProviderModelPicker({
   const providerRef = useRef<HTMLDivElement>(null)
   const modelRef = useRef<HTMLDivElement>(null)
 
-  /* Load providers on mount */
+  /* 首次載入時依設定頁排序，預選第一個已驗證可用的供應商。 */
   useEffect(() => {
-    listProviders().then(setProviders).catch(() => {})
-  }, [])
+    // 已有選擇且清單已載入時不重新查詢；新對話把選擇清為 null 才會重新初始化。
+    if (selectedProviderId && providers.length > 0) return
+
+    let cancelled = false
+
+    void (async () => {
+      try {
+        const loadedProviders = await listProviders()
+        const statuses = await Promise.all(
+          loadedProviders.map(async (provider) => {
+            try { return await getProviderKeyStatus(provider.id) }
+            catch { return null }
+          }),
+        )
+        if (cancelled) return
+
+        setProviders(loadedProviders)
+        if (!selectedProviderId) {
+          const firstVerified = loadedProviders.find((provider, index) =>
+            isVerifiedProvider(provider, statuses[index] ?? null))
+          if (firstVerified) onProviderChange(firstVerified.id)
+        }
+      } catch {
+        if (!cancelled) setProviders([])
+      }
+    })()
+
+    return () => { cancelled = true }
+  }, [onProviderChange, providers.length, selectedProviderId])
 
   /* Close dropdowns when clicking outside */
   useEffect(() => {
@@ -50,14 +100,16 @@ export function ProviderModelPicker({
     if (!selectedProviderId) { setModelGroups([]); return }
 
     setLoadingModels(true)
-    onModelChange(null)
 
     listProviderModels(selectedProviderId)
-      .then(setModelGroups)
+      .then((groups) => {
+        setModelGroups(groups)
+        onModelChange(selectDefaultModel(groups, providers.find((provider) => provider.id === selectedProviderId)))
+      })
       .catch(() => setModelGroups([]))
       .finally(() => setLoadingModels(false))
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedProviderId])
+  }, [selectedProviderId, providers])
 
   const selectedProvider = providers.find((p) => p.id === selectedProviderId)
 
@@ -69,7 +121,7 @@ export function ProviderModelPicker({
           type="button"
           onClick={() => setProviderOpen((o) => !o)}
           className={cn(
-            'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium',
+            'flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium',
             'border border-border bg-surface hover:bg-surface-alt transition-colors',
             'focus:outline-none focus:ring-2 focus:ring-brand/40',
           )}
@@ -109,7 +161,7 @@ export function ProviderModelPicker({
             onClick={() => setModelOpen((o) => !o)}
             disabled={loadingModels}
             className={cn(
-              'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium',
+              'flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium',
               'border border-border bg-surface hover:bg-surface-alt transition-colors',
               'focus:outline-none focus:ring-2 focus:ring-brand/40',
             )}

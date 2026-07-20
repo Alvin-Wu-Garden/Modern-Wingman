@@ -105,6 +105,13 @@ export function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // 刪除最後一個對話後，避免保留沒有內容可顯示的對話頁。
+  useEffect(() => {
+    if (activeView === 'chat' && !activeConversationId && !isLoadingList) {
+      setActiveView('home')
+    }
+  }, [activeConversationId, activeView, isLoadingList])
+
   /* ── Close context menu on click-outside or Escape ── */
   useEffect(() => {
     if (!ctxMenu) return
@@ -154,6 +161,9 @@ export function ChatPage() {
   }, [isStreaming, activeConversationId, startNewConversation, send, selectedProviderId, selectedModel, agentMode,selectedProjectId,includeUncommittedChanges])
 
   const handleNewChat = useCallback(async () => {
+    // 每次建立新對話都重新依設定頁排序選擇供應商，不能沿用上一個對話的選擇。
+    setSelectedProviderId(null)
+    setSelectedModel(null)
     await startNewConversation()
     setActiveView('chat')
   }, [startNewConversation])

@@ -21,8 +21,6 @@ import {
   Bot,
   ChevronDown,
   ChevronUp,
-  Eye,
-  EyeOff,
   GripVertical,
   Key,
   ListChecks,
@@ -209,8 +207,8 @@ interface ProviderRowProps {
   status: ProviderKeyStatus | undefined
   keyInput: string
   baseUrlInput: string
-  keyVisible: boolean
   saving: boolean
+  deleting: boolean
   validation: ValidationState
   expanded: boolean
   onToggleExpanded: () => void
@@ -218,7 +216,6 @@ interface ProviderRowProps {
   onBaseUrlChange: (val: string) => void
   onKeyBlur: () => void
   onBaseUrlBlur: () => void
-  onToggleVisible: () => void
   onSaveKey: () => void
   onDeleteKey: () => void
 }
@@ -237,6 +234,7 @@ function SortableProviderRow(props: ProviderRowProps) {
   const isCustom = props.provider.id === 'custom-byok'
   const hasEnvVar = props.status?.hasEnvVar ?? false
   const hasStoredKey = props.status?.hasStoredKey ?? false
+  const copilotStatus = props.status?.runtimeStatus
   const isGithub = props.provider.providerType === 'github' || props.provider.id.includes('github')
 
   // 有金鑰時以 dots 顯示，點擊才切換為可編輯
@@ -248,10 +246,18 @@ function SortableProviderRow(props: ProviderRowProps) {
   const expanded = props.expanded
   const setExpanded = (_: boolean | ((prev: boolean) => boolean)) => props.onToggleExpanded()
 
-  // 決定 header icon：驗證失敗 → 紅X；已儲存/驗證通過 → 綠勾；其餘 → 灰鑰匙
+  // 決定 header icon：驗證失敗 → 紅X；已驗證可用 → 綠勾；其餘 → 灰鑰匙
   const iconCls = 'w-3.5 h-3.5 shrink-0'
   let HeaderIcon: React.ReactNode
-  if (!isCopilotDefault) {
+  if (isCopilotDefault) {
+    if (copilotStatus?.state === 'invalid') {
+      HeaderIcon = <X className={`${iconCls} text-red-400`} />
+    } else if (copilotStatus?.isAuthenticated) {
+      HeaderIcon = <Check className={`${iconCls} text-brand-green`} />
+    } else {
+      HeaderIcon = <Key className={`${iconCls} text-ink-subtle`} />
+    }
+  } else {
     const v = props.validation
     if (typeof v === 'object' && !v.valid) {
       HeaderIcon = <X className={`${iconCls} text-red-400`} />
@@ -260,9 +266,6 @@ function SortableProviderRow(props: ProviderRowProps) {
     } else {
       HeaderIcon = <Key className={`${iconCls} text-ink-subtle`} />
     }
-  } else {
-    // CopilotDefault 永遠已啟用 → 綠勾
-    HeaderIcon = <Check className={`${iconCls} text-brand-green`} />
   }
 
   return (
@@ -288,11 +291,6 @@ function SortableProviderRow(props: ProviderRowProps) {
         {HeaderIcon}
         <ProviderBrandIcon provider={props.provider} />
         <span className="text-sm font-medium text-ink flex-1">{props.provider.displayName}</span>
-        {isCopilotDefault && (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-brand-green/10 text-brand-green font-medium">
-            已啟用 ✓
-          </span>
-        )}
         {!isCopilotDefault && hasEnvVar && (
           <span className="text-xs px-2 py-0.5 rounded-full bg-brand/10 text-brand font-medium">
             環境變數
@@ -334,8 +332,8 @@ function SortableProviderRow(props: ProviderRowProps) {
       <div className="space-y-1.5">
         {isCopilotDefault && (
           <p className="text-xs text-ink-subtle leading-relaxed">
-            GitHub PAT（選填）— 填入後不需本機 Copilot CLI 登入。需含{' '}
-            <code className="font-mono bg-surface-alt px-1 rounded">copilot</code>{' '}權限。
+            GitHub fine-grained PAT。只支援 <code className="font-mono bg-surface-alt px-1 rounded">github_pat_</code>；
+            需在 Account permissions 勾選 <code className="font-mono bg-surface-alt px-1 rounded">Copilot Requests</code>。
           </p>
         )}
           {hasEnvVar ? (
@@ -359,47 +357,42 @@ function SortableProviderRow(props: ProviderRowProps) {
                       type="text"
                       value="••••••••••••••••"
                       readOnly
+                      disabled={props.deleting}
                       onFocus={() => { setIsEditing(true); props.onKeyChange('') }}
-                      className="w-full rounded-xl border border-border bg-surface-alt px-3 py-2 text-sm text-ink-subtle cursor-text focus:outline-none focus:ring-2 focus:ring-brand/40"
+                      className="w-full rounded-xl border border-border bg-surface-alt px-3 py-2 text-sm text-ink-subtle cursor-text focus:outline-none focus:ring-2 focus:ring-brand/40 disabled:cursor-not-allowed disabled:opacity-60"
                     />
                   ) : (
                     <>
                       <input
-                        type={props.keyVisible ? 'text' : 'password'}
+                        type="password"
                         value={props.keyInput}
                         onChange={(e) => props.onKeyChange(e.target.value)}
                         onBlur={props.onKeyBlur}
+                        disabled={props.saving || props.deleting}
                         placeholder={
                           isCopilotDefault
-                            ? 'ghp_… 或 github_pat_…'
+                            ? 'github_pat_…'
                             : props.provider.id.includes('openrouter')
                               ? 'sk-or-v1-…'
                               : 'sk-…'
                         }
-                        className="w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 pr-10"
+                        className="w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 disabled:cursor-not-allowed disabled:opacity-60"
                       />
-                      <button
-                        type="button"
-                        onClick={props.onToggleVisible}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-subtle hover:text-ink"
-                      >
-                        {props.keyVisible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
                     </>
                   )}
                 </div>
                 {showStoredDots ? (
-                  <Button size="sm" variant="ghost" onClick={props.onDeleteKey} className="text-red-400 hover:text-red-500 shrink-0">
-                    移除
+                  <Button size="sm" variant="ghost" onClick={props.onDeleteKey} disabled={props.deleting} className="text-red-400 hover:text-red-500 shrink-0">
+                    {props.deleting ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> 移除中…</> : '移除'}
                   </Button>
                 ) : (
                   <>
-                    <Button size="sm" onClick={props.onSaveKey} disabled={!props.keyInput.trim() || props.saving} className="shrink-0">
-                      {props.saving ? '儲存中…' : '儲存'}
+                    <Button size="sm" onClick={props.onSaveKey} disabled={!props.keyInput.trim() || props.saving || props.deleting} className="shrink-0">
+                      {props.saving ? '驗證中…' : isCopilotDefault ? '驗證並儲存' : '儲存'}
                     </Button>
                     {hasStoredKey && (
-                      <Button size="sm" variant="ghost" onClick={props.onDeleteKey} className="text-red-400 hover:text-red-500 shrink-0">
-                        移除
+                      <Button size="sm" variant="ghost" onClick={props.onDeleteKey} disabled={props.deleting || props.saving} className="text-red-400 hover:text-red-500 shrink-0">
+                        {props.deleting ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> 移除中…</> : '移除'}
                       </Button>
                     )}
                   </>
@@ -409,6 +402,26 @@ function SortableProviderRow(props: ProviderRowProps) {
             </div>
           )}
         </div>
+        {isCopilotDefault && (
+          <div className="rounded-lg bg-surface-alt/70 px-3 py-2 text-xs text-ink-secondary leading-relaxed space-y-1">
+            {!hasStoredKey && !copilotStatus?.error && <>
+              <p className="font-medium text-ink">建立 PAT 時請確認：</p>
+              <ul className="list-disc pl-4 space-y-0.5">
+                <li>Resource owner 選擇個人帳號。</li>
+                <li>Account permissions 勾選 Copilot Requests。</li>
+                <li>帳號具備可用的 GitHub Copilot 權限。</li>
+              </ul>
+            </>}
+            {copilotStatus?.state === 'validating' && <p>正在驗證 Copilot Requests…</p>}
+            {copilotStatus?.isAuthenticated && <>
+              <p className="font-medium text-brand-green">✓ Copilot Requests：已驗證</p>
+              {copilotStatus.login && <p>GitHub 帳號：{copilotStatus.login}</p>}
+              {copilotStatus.authType && <p>認證來源：{copilotStatus.authType}</p>}
+              {copilotStatus.modelCount !== null && copilotStatus.modelCount !== undefined && <p>可用模型：{copilotStatus.modelCount} 個</p>}
+            </>}
+            {copilotStatus?.state === 'invalid' && <p className="text-red-400">✕ {copilotStatus.error ?? 'PAT 無法使用 Copilot Requests。'}</p>}
+          </div>
+        )}
         </div>
       )}
     </div>
@@ -455,8 +468,8 @@ export function SettingsPage() {
   const [keyStatuses, setKeyStatuses] = useState<Record<string, ProviderKeyStatus>>({})
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({})
   const [baseUrlInputs, setBaseUrlInputs] = useState<Record<string, string>>({})
-  const [keyVisible, setKeyVisible] = useState<Record<string, boolean>>({})
   const [keySaving, setKeySaving] = useState<Record<string, boolean>>({})
+  const [keyDeleting, setKeyDeleting] = useState<Record<string, boolean>>({})
   const [validations, setValidations] = useState<Record<string, ValidationState>>({})
   const [githubPatValidation, setGithubPatValidation] = useState<ValidationState>('idle')
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({})
@@ -498,8 +511,9 @@ export function SettingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  /* ── Validate key on blur；驗證通過自動儲存 ── */
+  /* ── BYOK key validation on blur；Copilot PAT 僅透過「驗證並儲存」處理 ── */
   const handleKeyBlur = useCallback(async (provider: ProviderInfo) => {
+    if (provider.kind === 'CopilotDefault') return
     const key = keyInputs[provider.id]?.trim()
     if (!key) return
     setValidations((s) => ({ ...s, [provider.id]: 'validating' }))
@@ -520,24 +534,37 @@ export function SettingsPage() {
   }, [keyInputs, baseUrlInputs, loadProviders])
 
   /* ── Save key ── */
-  const handleSaveKey = useCallback(async (profileId: string) => {
-    const key = keyInputs[profileId]?.trim()
+  const handleSaveKey = useCallback(async (provider: ProviderInfo) => {
+    const key = keyInputs[provider.id]?.trim()
     if (!key) return
-    setKeySaving((s) => ({ ...s, [profileId]: true }))
+    setKeySaving((s) => ({ ...s, [provider.id]: true }))
     try {
-      await setProviderKey(profileId, key)
-      setKeyInputs((s) => ({ ...s, [profileId]: '' }))
+      await setProviderKey(provider.id, key)
+      setKeyInputs((s) => ({ ...s, [provider.id]: '' }))
+      setValidations((s) => ({ ...s, [provider.id]: { valid: true } }))
       await loadProviders()
+    } catch (error) {
+      setValidations((s) => ({ ...s, [provider.id]: { valid: false, error: error instanceof Error ? error.message : String(error) } }))
     } finally {
-      setKeySaving((s) => ({ ...s, [profileId]: false }))
+      setKeySaving((s) => ({ ...s, [provider.id]: false }))
     }
   }, [keyInputs, loadProviders])
 
   /* ── Delete key ── */
   const handleDeleteKey = useCallback(async (profileId: string) => {
-    await deleteProviderKey(profileId)
-    setValidations((s) => ({ ...s, [profileId]: 'idle' }))
-    await loadProviders()
+    setKeyDeleting((s) => ({ ...s, [profileId]: true }))
+    try {
+      await deleteProviderKey(profileId)
+      setValidations((s) => ({ ...s, [profileId]: 'idle' }))
+      await loadProviders()
+    } catch (error) {
+      setValidations((s) => ({
+        ...s,
+        [profileId]: { valid: false, error: error instanceof Error ? error.message : '移除金鑰失敗。' },
+      }))
+    } finally {
+      setKeyDeleting((s) => ({ ...s, [profileId]: false }))
+    }
   }, [loadProviders])
 
   /* ── BaseURL blur → save ── */
@@ -552,10 +579,19 @@ export function SettingsPage() {
     if (!over || active.id === over.id) return
     const oldIndex = providers.findIndex((p) => p.id === active.id)
     const newIndex = providers.findIndex((p) => p.id === over.id)
+    if (oldIndex < 0 || newIndex < 0) return
+    const previous = providers
     const reordered = arrayMove(providers, oldIndex, newIndex)
     setProviders(reordered)
-    await reorderProviders(reordered.map((p) => p.id))
-  }, [providers])
+    try {
+      await reorderProviders(reordered.map((p) => p.id))
+      // 重新從 Agent Service 讀回，確保畫面排序與新對話的預設排序完全一致。
+      await loadProviders()
+    } catch {
+      // 寫入失敗時不保留只存在畫面上的假排序。
+      setProviders(previous)
+    }
+  }, [providers, loadProviders])
 
   /* ── GitHub PAT blur ── */
   const handleGithubPatBlur = useCallback(async () => {
@@ -682,8 +718,8 @@ export function SettingsPage() {
                     status={keyStatuses[provider.id]}
                     keyInput={keyInputs[provider.id] ?? ''}
                     baseUrlInput={baseUrlInputs[provider.id] ?? ''}
-                    keyVisible={keyVisible[provider.id] ?? false}
                     saving={keySaving[provider.id] ?? false}
+                    deleting={keyDeleting[provider.id] ?? false}
                     validation={validations[provider.id] ?? 'idle'}
                     expanded={expandedRows[provider.id] ?? false}
                     onToggleExpanded={() => setExpandedRows((s) => ({ ...s, [provider.id]: !s[provider.id] }))}
@@ -691,8 +727,7 @@ export function SettingsPage() {
                     onBaseUrlChange={(v) => setBaseUrlInputs((s) => ({ ...s, [provider.id]: v }))}
                     onKeyBlur={() => handleKeyBlur(provider)}
                     onBaseUrlBlur={() => handleBaseUrlBlur(provider.id)}
-                    onToggleVisible={() => setKeyVisible((s) => ({ ...s, [provider.id]: !s[provider.id] }))}
-                    onSaveKey={() => handleSaveKey(provider.id)}
+                    onSaveKey={() => handleSaveKey(provider)}
                     onDeleteKey={() => handleDeleteKey(provider.id)}
                   />
                 ))}

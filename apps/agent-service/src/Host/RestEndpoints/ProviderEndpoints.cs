@@ -70,6 +70,7 @@ public static class ProviderEndpoints
         string id,
         IModelProviderService providerService,
         IProviderSettingStore settingStore,
+        CopilotClientService copilotClientService,
         CancellationToken ct)
     {
         var profile = providerService.ListProfiles().FirstOrDefault(p => p.Id == id);
@@ -79,13 +80,28 @@ public static class ProviderEndpoints
         var hasStoredKey = !hasEnvVar && settingStore.GetApiKey(id) is not null;
         var dbSetting = await settingStore.GetAsync(id, ct);
 
+        CopilotRuntimeStatusDto? runtimeStatus = null;
+        if (profile.Kind == ProviderKind.CopilotDefault)
+        {
+            var runtime = copilotClientService.GetRuntimeStatus();
+            runtimeStatus = new CopilotRuntimeStatusDto(
+                runtime.State,
+                runtime.IsAuthenticated,
+                runtime.Login,
+                runtime.AuthType,
+                runtime.CopilotPlan,
+                runtime.ModelCount,
+                runtime.Error);
+        }
+
         return Results.Ok(new ProviderKeyStatusDto(
             id,
             profile.DisplayName,
             hasEnvVar,
             hasStoredKey,
             StoredBaseUrl: dbSetting?.BaseUrl,
-            SortOrder: dbSetting?.SortOrder ?? 0));
+            SortOrder: dbSetting?.SortOrder ?? 0,
+            RuntimeStatus: runtimeStatus));
     }
 
     private static async Task<IResult> ListModels(
@@ -158,6 +174,7 @@ public static class ProviderEndpoints
         new("o4-mini",            "o4-mini",            "o-series"),
         new("claude-sonnet-4",    "Claude Sonnet 4",    "claude"),
         new("claude-sonnet-4-5",  "Claude Sonnet 4.5",  "claude"),
+        new("claude-sonnet-4.6",  "Claude Sonnet 4.6",  "claude"),
         new("gemini-2.0-flash",   "Gemini 2.0 Flash",   "gemini"),
         new("gemini-2.5-pro",     "Gemini 2.5 Pro",     "gemini"),
     ];
@@ -237,6 +254,7 @@ public static class ProviderEndpoints
             ],
             _ =>
             [
+                new("gpt-5.6",        "GPT-5.6",        "gpt-5"),
                 new("gpt-4.1",        "GPT-4.1",       "gpt-4"),
                 new("gpt-4o",         "GPT-4o",        "gpt-4"),
                 new("gpt-4o-mini",    "GPT-4o mini",   "gpt-4"),
@@ -251,6 +269,7 @@ public static class ProviderEndpoints
             ? modelId[(modelId.LastIndexOf('/') + 1)..]
             : modelId;
 
+        if (normalized.StartsWith("gpt-5", StringComparison.OrdinalIgnoreCase)) return "gpt-5";
         if (normalized.StartsWith("gpt-4", StringComparison.OrdinalIgnoreCase)) return "gpt-4";
         if (normalized.StartsWith("gpt-3", StringComparison.OrdinalIgnoreCase)) return "gpt-3.5";
         if (normalized.StartsWith("o1", StringComparison.OrdinalIgnoreCase) ||
@@ -311,11 +330,44 @@ public static class ProviderEndpoints
         var profile = providerService.ListProfiles().FirstOrDefault(p => p.Id == id);
         if (profile is null) return Results.NotFound();
 
-        await settingStore.SetApiKeyAsync(id, request.ApiKey, ct);
-
-        // CopilotDefault：PAT 儲存後立即重啟 SDK，不需重啟 AgentService
         if (profile.Kind == ProviderKind.CopilotDefault)
-            await copilotClientService.RestartWithTokenAsync(request.ApiKey, ct);
+        {
+            var validation = await copilotClientService.ValidatePatAsync(request.ApiKey, ct);
+            if (!validation.IsAuthenticated)
+                return Results.BadRequest(new { error = validation.Error ?? "GitHub PAT 無法使用 Copilot Requests。" });
+
+            // 先驗證新 PAT，再更新持久化設定，避免無效輸入覆蓋既有可用 PAT。
+            var previousApiKey = settingStore.GetApiKey(id);
+            await settingStore.SetApiKeyAsync(id, request.ApiKey, ct);
+
+            try
+            {
+                await copilotClientService.RestartWithTokenAsync(request.ApiKey, ct);
+            }
+            catch
+            {
+                if (previousApiKey is null) await settingStore.RemoveApiKeyAsync(id, ct);
+                else await settingStore.SetApiKeyAsync(id, previousApiKey, ct);
+
+                try { await copilotClientService.RestartWithTokenAsync(previousApiKey, ct); }
+                catch { /* 回復舊 Client 失敗時，由 runtime status 顯示診斷訊息。 */ }
+
+                return Results.BadRequest(new { error = "PAT 已驗證，但啟用 bundled Copilot runtime 時失敗。請重新嘗試。" });
+            }
+
+            await audit.RecordAsync(
+                new AuditEventWrite(
+                    EventType: "provider_api_key_saved",
+                    TargetType: "provider",
+                    TargetId: id,
+                    Action: "update",
+                    DetailsJson: ProviderAuditDetails(profile, new { KeyStored = true, Authentication = "fine_grained_pat" })),
+                CancellationToken.None);
+
+            return Results.NoContent();
+        }
+
+        await settingStore.SetApiKeyAsync(id, request.ApiKey, ct);
 
         await audit.RecordAsync(
             new AuditEventWrite(
@@ -339,7 +391,7 @@ public static class ProviderEndpoints
     {
         await settingStore.RemoveApiKeyAsync(id, ct);
 
-        // CopilotDefault：PAT 移除後重啟 SDK，改回本機 Copilot 登入
+        // PAT-only：PAT 移除後停止 runtime，不回退至本機 Copilot / gh 登入。
         var profile = providerService.ListProfiles().FirstOrDefault(p => p.Id == id);
         if (profile?.Kind == ProviderKind.CopilotDefault)
             await copilotClientService.RestartWithTokenAsync(null, ct);
@@ -434,9 +486,9 @@ public static class ProviderEndpoints
                 _ => await ValidateOpenAiCompatibleKey(http, request.ApiKey, request.BaseUrl, ct),
             };
         }
-        catch (Exception ex)
+        catch
         {
-            return Results.Ok(new ValidateKeyResult(Valid: false, Error: ex.Message));
+            return Results.Ok(new ValidateKeyResult(Valid: false, Error: "驗證金鑰時發生連線或服務錯誤。"));
         }
     }
 
