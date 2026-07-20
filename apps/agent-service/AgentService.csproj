@@ -6,6 +6,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>AgentService</RootNamespace>
     <AssemblyName>AgentService</AssemblyName>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <!-- Lock the resolved dependency graph so a future restore cannot silently
+         select a different Agent Framework/Copilot combination. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <!--
       CopilotSkipCliDownload 已移除：讓 SDK NuGet targets 在建置時自動下載相應平台的 CLI binary
       並將其複製到 runtimes\{rid}\native\copilot.exe，輸出目錄包含所有環境依賴。
@@ -56,13 +60,16 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="GitHub.Copilot.SDK" Version="1.0.3" />
+    <!-- The Copilot adapter RC supplies its exact SDK dependency.  Do not add a
+         newer direct SDK reference: 1.13.0-rc1 is compiled against assembly
+         1.0.0.0 and newer strongly-named SDK assemblies are not binary-compatible. -->
     <PackageReference Include="DiffPlex" Version="1.9.0" />
     <PackageReference Include="Grpc.AspNetCore" Version="2.67.0" />
-    <PackageReference Include="Microsoft.Agents.AI" Version="1.9.0" />
-    <PackageReference Include="Microsoft.Agents.AI.GitHub.Copilot" Version="1.11.1-rc1" />
-    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.9.0" />
-    <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.9.0" />
+    <PackageReference Include="Microsoft.Agents.AI" Version="1.13.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="1.13.0" />
+    <PackageReference Include="Microsoft.Agents.AI.GitHub.Copilot" Version="1.13.0-rc1" />
+    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.13.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.13.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.14.0" />
     <PackageReference Include="Microsoft.Build.Locator" Version="1.7.8" />
@@ -78,10 +85,15 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
-    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.5.1" />
+    <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.0" />
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.8.0" />
+    <PackageReference Include="Microsoft.Extensions.AI.Evaluation" Version="10.8.0" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.8.0" />
     <PackageReference Include="Neo4j.Driver" Version="5.28.3" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.10.0" />
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
+    <PackageReference Include="OpenAI" Version="2.12.0" />
+    <PackageReference Include="System.ClientModel" Version="1.14.0" />
   </ItemGroup>
 
   <ItemGroup>

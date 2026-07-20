@@ -25,6 +25,7 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable
     private readonly SemaphoreSlim _clientGate = new(1, 1);
     private Task? _startupTask;
     private volatile bool _ready;
+    private int _disposed;
     private CopilotRuntimeStatus _status = CopilotRuntimeStatus.NotConfigured();
 
     public CopilotClientService(
@@ -151,6 +152,7 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        if (Volatile.Read(ref _disposed) != 0) return;
         _lifetime.Cancel();
         if (_startupTask is not null)
         {
@@ -171,6 +173,7 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _lifetime.Cancel();
         await _clientGate.WaitAsync();
         try { await StopClientInternalAsync(); }

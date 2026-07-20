@@ -277,3 +277,6 @@ using (var scope = app.Services.CreateScope())
 app.MapAgentEndpoints();
 
 app.Run();
+
+// Exposes the minimal-host entry point to the isolated in-memory host tests.
+public partial class Program;

@@ -48,6 +48,18 @@ public sealed class CopilotClientServiceTests
         Assert.Contains("[REDACTED]", safe);
     }
 
+    [Fact]
+    public async Task DisposeAsync_IsIdempotentDuringHostShutdown()
+    {
+        var service = new CopilotClientService(
+            Options.Create(new AgentServiceOptions()),
+            new TestProviderSettingStore(apiKey: null),
+            NullLogger<CopilotClientService>.Instance);
+
+        await service.DisposeAsync();
+        await service.DisposeAsync();
+    }
+
     private sealed class TestProviderSettingStore(string? apiKey) : IProviderSettingStore
     {
         public string? GetApiKey(string profileId) => profileId == "copilot-default" ? apiKey : null;

@@ -35,7 +35,6 @@ import { browseSvn, listGitBranches, listVcsProfiles, type VcsProfile } from '@/
 import {
   getProjectImportProgress,
   getProjectIndexDiagnostics,
-  type ProjectChangeTarget,
   type ProjectClarificationAnswer,
   type ProjectImportProgress,
   type ProjectIndexDiagnostics,
@@ -311,8 +310,6 @@ export function ProjectsPage() {
   } = useProjectsStore()
 
   const [question, setQuestion] = useState('')
-  const [analysisTargetKind, setAnalysisTargetKind] = useState<ProjectChangeTarget['kind']>('NaturalLanguage')
-  const [analysisTargetValue, setAnalysisTargetValue] = useState('')
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null)
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [agentMode,setAgentMode]=useState<AgentMode>(defaultAgentMode)
@@ -421,10 +418,7 @@ export function ProjectsPage() {
 
   const handleAsk = async (q: string) => {
     if (!activeProjectId || !q.trim() || querying) return
-    const targets = analysisTargetKind !== 'NaturalLanguage' && analysisTargetValue.trim()
-      ? [{ kind: analysisTargetKind, value: analysisTargetValue.trim(), source: 'desktop' }]
-      : undefined
-    await ask(activeProjectId, q.trim(), selectedProviderId, selectedModel,agentMode,{ targets })
+    await ask(activeProjectId, q.trim(), selectedProviderId, selectedModel, agentMode)
   }
 
   const handleClarifications = async (sessionId: string, answers: ProjectClarificationAnswer[]) => {
@@ -675,34 +669,6 @@ export function ProjectsPage() {
                   )}
                 </div>
                 <RunTimeline events={projectTimeline} />
-                <div className="mx-6 mb-2 rounded-xl border border-border bg-surface-alt p-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <label className="text-xs font-medium text-ink" htmlFor="project-analysis-target-kind">分析目標</label>
-                    <select
-                      id="project-analysis-target-kind"
-                      value={analysisTargetKind}
-                      onChange={(event) => setAnalysisTargetKind(event.target.value as ProjectChangeTarget['kind'])}
-                      className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-brand/30"
-                    >
-                      <option value="NaturalLanguage">自然語言概念</option>
-                      <option value="File">檔案</option>
-                      <option value="Symbol">Symbol</option>
-                      <option value="Route">Route</option>
-                      <option value="GitDiff">Git diff</option>
-                      <option value="ErrorLog">錯誤 log</option>
-                    </select>
-                    {analysisTargetKind !== 'NaturalLanguage' && (
-                      <textarea
-                        value={analysisTargetValue}
-                        onChange={(event) => setAnalysisTargetValue(event.target.value)}
-                        rows={analysisTargetKind === 'GitDiff' || analysisTargetKind === 'ErrorLog' ? 3 : 1}
-                        className="min-w-64 flex-1 resize-y rounded-lg border border-border bg-surface px-2.5 py-1.5 font-mono text-xs text-ink focus:outline-none focus:ring-2 focus:ring-brand/30"
-                        placeholder={analysisTargetKind === 'File' ? 'src/Orders/OrderService.cs' : analysisTargetKind === 'Route' ? 'POST /api/orders' : `貼上或輸入 ${analysisTargetKind}`}
-                      />
-                    )}
-                  </div>
-                  <p className="mt-1.5 text-[11px] text-ink-subtle">指定目標可避免名稱猜測；Git diff 與錯誤 log 只用於本次分析。</p>
-                </div>
                 <MessageComposer
                   selectedProviderId={selectedProviderId}
                   selectedModel={selectedModel}
