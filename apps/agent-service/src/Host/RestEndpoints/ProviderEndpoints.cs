@@ -15,9 +15,7 @@ namespace AgentService.Host.RestEndpoints;
 /// GET    /api/providers/{id}/models          → 列出該 provider 可用的模型
 /// PUT    /api/providers/{id}/key             → 儲存 API Key
 /// DELETE /api/providers/{id}/key             → 移除 API Key
-/// PUT    /api/providers/{id}/base-url        → 儲存 BaseUrl（custom-byok 使用）
 /// PUT    /api/providers/reorder              → 批次更新排序
-/// POST   /api/providers/validate-key         → 後端代理驗證 API Key（繞過 WebView2 SSL 限制）
 /// </summary>
 public static class ProviderEndpoints
 {
@@ -30,9 +28,10 @@ public static class ProviderEndpoints
         group.MapGet("/{id}/models", ListModels);
         group.MapPut("/{id}/key", SetKey);
         group.MapDelete("/{id}/key", DeleteKey);
-        group.MapPut("/{id}/base-url", SetBaseUrl);
         group.MapPut("/reorder", Reorder);
-        group.MapPost("/validate-key", ValidateKey);
+        // Dedicated endpoint for the Skills library's GitHub PAT.
+        // AI provider credentials are validated and saved atomically by PUT /{id}/key.
+        group.MapPost("/validate-key", ValidateGitHubAccessToken);
 
         return app;
     }
@@ -319,8 +318,7 @@ public static class ProviderEndpoints
         string id,
         SetApiKeyRequest request,
         IModelProviderService providerService,
-        IProviderSettingStore settingStore,
-        CopilotClientService copilotClientService,
+        IProviderCredentialService credentialService,
         IAuditEventRecorder audit,
         CancellationToken ct)
     {
@@ -330,44 +328,14 @@ public static class ProviderEndpoints
         var profile = providerService.ListProfiles().FirstOrDefault(p => p.Id == id);
         if (profile is null) return Results.NotFound();
 
-        if (profile.Kind == ProviderKind.CopilotDefault)
-        {
-            var validation = await copilotClientService.ValidatePatAsync(request.ApiKey, ct);
-            if (!validation.IsAuthenticated)
-                return Results.BadRequest(new { error = validation.Error ?? "GitHub PAT 無法使用 Copilot Requests。" });
+        var result = await credentialService.ValidateAndSaveAsync(
+            profile,
+            request.ApiKey,
+            request.BaseUrl ?? profile.BaseUrl,
+            ct);
 
-            // 先驗證新 PAT，再更新持久化設定，避免無效輸入覆蓋既有可用 PAT。
-            var previousApiKey = settingStore.GetApiKey(id);
-            await settingStore.SetApiKeyAsync(id, request.ApiKey, ct);
-
-            try
-            {
-                await copilotClientService.RestartWithTokenAsync(request.ApiKey, ct);
-            }
-            catch
-            {
-                if (previousApiKey is null) await settingStore.RemoveApiKeyAsync(id, ct);
-                else await settingStore.SetApiKeyAsync(id, previousApiKey, ct);
-
-                try { await copilotClientService.RestartWithTokenAsync(previousApiKey, ct); }
-                catch { /* 回復舊 Client 失敗時，由 runtime status 顯示診斷訊息。 */ }
-
-                return Results.BadRequest(new { error = "PAT 已驗證，但啟用 bundled Copilot runtime 時失敗。請重新嘗試。" });
-            }
-
-            await audit.RecordAsync(
-                new AuditEventWrite(
-                    EventType: "provider_api_key_saved",
-                    TargetType: "provider",
-                    TargetId: id,
-                    Action: "update",
-                    DetailsJson: ProviderAuditDetails(profile, new { KeyStored = true, Authentication = "fine_grained_pat" })),
-                CancellationToken.None);
-
-            return Results.NoContent();
-        }
-
-        await settingStore.SetApiKeyAsync(id, request.ApiKey, ct);
+        if (!result.IsValid)
+            return Results.Ok(result);
 
         await audit.RecordAsync(
             new AuditEventWrite(
@@ -375,10 +343,16 @@ public static class ProviderEndpoints
                 TargetType: "provider",
                 TargetId: id,
                 Action: "update",
-                DetailsJson: ProviderAuditDetails(profile, new { KeyStored = true })),
+                DetailsJson: ProviderAuditDetails(profile, new
+                {
+                    KeyStored = true,
+                    Authentication = profile.Kind == ProviderKind.CopilotDefault
+                        ? "fine_grained_pat"
+                        : "api_key",
+                })),
             CancellationToken.None);
 
-        return Results.NoContent();
+        return Results.Ok(result);
     }
 
     private static async Task<IResult> DeleteKey(
@@ -408,34 +382,6 @@ public static class ProviderEndpoints
         return Results.NoContent();
     }
 
-    private static async Task<IResult> SetBaseUrl(
-        string id,
-        SetBaseUrlRequest request,
-        IModelProviderService providerService,
-        IProviderSettingStore settingStore,
-        IAuditEventRecorder audit,
-        CancellationToken ct)
-    {
-        var profile = providerService.ListProfiles().FirstOrDefault(p => p.Id == id);
-        if (profile is null) return Results.NotFound();
-
-        var before = await settingStore.GetAsync(id, ct);
-        await settingStore.SetBaseUrlAsync(id, request.BaseUrl, ct);
-        await audit.RecordAsync(
-            new AuditEventWrite(
-                EventType: "provider_base_url_changed",
-                TargetType: "provider",
-                TargetId: id,
-                Action: "update",
-                DetailsJson: ProviderAuditDetails(profile, new
-                {
-                    BeforeHost = ExtractHost(before?.BaseUrl ?? profile.BaseUrl),
-                    AfterHost = ExtractHost(request.BaseUrl ?? profile.BaseUrl),
-                })),
-            CancellationToken.None);
-        return Results.NoContent();
-    }
-
     private static async Task<IResult> Reorder(
         ReorderProvidersRequest request,
         IProviderSettingStore settingStore,
@@ -461,88 +407,40 @@ public static class ProviderEndpoints
         return Results.NoContent();
     }
 
-    // ─── API Key 後端代理驗證 ──────────────────────────────────────────────────
-
-    /// <summary>
-    /// 後端代理呼叫外部 API 驗證金鑰，避免前端 WebView2 的 SSL/CRL 問題。
-    /// </summary>
-    private static async Task<IResult> ValidateKey(
-        ValidateKeyRequest request,
+    private static async Task<IResult> ValidateGitHubAccessToken(
+        ValidateGithubAccessTokenRequest request,
         IHttpClientFactory httpClientFactory,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.ApiKey))
             return Results.BadRequest("ApiKey 不可為空。");
 
-        var http = httpClientFactory.CreateClient("key-validator");
-
         try
         {
-            return (request.ProviderType?.ToLowerInvariant()) switch
-            {
-                "github" => await ValidateGithubKey(http, request.ApiKey, ct),
-                "anthropic" => await ValidateAnthropicKey(http, request.ApiKey, ct),
-                "azure" => await ValidateAzureKey(http, request.ApiKey, request.BaseUrl, ct),
-                _ => await ValidateOpenAiCompatibleKey(http, request.ApiKey, request.BaseUrl, ct),
-            };
+            var http = httpClientFactory.CreateClient("key-validator");
+            using var message = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/user");
+            message.Headers.Authorization = new("Bearer", request.ApiKey);
+            message.Headers.Add("Accept", "application/vnd.github+json");
+            using var response = await http.SendAsync(
+                message,
+                HttpCompletionOption.ResponseHeadersRead,
+                ct);
+            if (!response.IsSuccessStatusCode)
+                return Results.Ok(new ValidateGithubAccessTokenResult(false, $"HTTP {(int)response.StatusCode}"));
+
+            var scopes = response.Headers.TryGetValues("x-oauth-scopes", out var values)
+                ? string.Join(", ", values)
+                : "";
+            return Results.Ok(new ValidateGithubAccessTokenResult(true, Scopes: scopes));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
-            return Results.Ok(new ValidateKeyResult(Valid: false, Error: "驗證金鑰時發生連線或服務錯誤。"));
+            return Results.Ok(new ValidateGithubAccessTokenResult(false, "驗證 GitHub PAT 時發生連線或服務錯誤。"));
         }
-    }
-
-    private static async Task<IResult> ValidateGithubKey(
-        HttpClient http, string apiKey, CancellationToken ct)
-    {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/user");
-        req.Headers.Add("Authorization", $"token {apiKey}");
-        req.Headers.Add("Accept", "application/vnd.github+json");
-        using var res = await http.SendAsync(req, ct);
-        if (!res.IsSuccessStatusCode)
-            return Results.Ok(new ValidateKeyResult(false, $"HTTP {(int)res.StatusCode}"));
-        var scopes = res.Headers.TryGetValues("x-oauth-scopes", out var vals)
-            ? string.Join(", ", vals) : "";
-        return Results.Ok(new ValidateKeyResult(true, Scopes: scopes));
-    }
-
-    private static async Task<IResult> ValidateAnthropicKey(
-        HttpClient http, string apiKey, CancellationToken ct)
-    {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "https://api.anthropic.com/v1/models");
-        req.Headers.Add("x-api-key", apiKey);
-        req.Headers.Add("anthropic-version", "2023-06-01");
-        using var res = await http.SendAsync(req, ct);
-        return Results.Ok(new ValidateKeyResult(
-            res.IsSuccessStatusCode,
-            res.IsSuccessStatusCode ? null : $"HTTP {(int)res.StatusCode}"));
-    }
-
-    private static async Task<IResult> ValidateAzureKey(
-        HttpClient http, string apiKey, string? baseUrl, CancellationToken ct)
-    {
-        var b = (baseUrl ?? "").TrimEnd('/');
-        if (string.IsNullOrWhiteSpace(b))
-            return Results.Ok(new ValidateKeyResult(false, "需要 Base URL"));
-        using var req = new HttpRequestMessage(HttpMethod.Get,
-            $"{b}/openai/models?api-version=2024-10-21");
-        req.Headers.Add("api-key", apiKey);
-        using var res = await http.SendAsync(req, ct);
-        return Results.Ok(new ValidateKeyResult(
-            res.IsSuccessStatusCode,
-            res.IsSuccessStatusCode ? null : $"HTTP {(int)res.StatusCode}"));
-    }
-
-    private static async Task<IResult> ValidateOpenAiCompatibleKey(
-        HttpClient http, string apiKey, string? baseUrl, CancellationToken ct)
-    {
-        var b = (baseUrl ?? "https://api.openai.com/v1").TrimEnd('/');
-        using var req = new HttpRequestMessage(HttpMethod.Get, $"{b}/models");
-        req.Headers.Add("Authorization", $"Bearer {apiKey}");
-        using var res = await http.SendAsync(req, ct);
-        return Results.Ok(new ValidateKeyResult(
-            res.IsSuccessStatusCode,
-            res.IsSuccessStatusCode ? null : $"HTTP {(int)res.StatusCode}"));
     }
 
     private sealed record OpenRouterModelsResponse(

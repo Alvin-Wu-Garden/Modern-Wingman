@@ -66,7 +66,11 @@ public sealed class ProviderSettingStore : IProviderSettingStore
         return entity?.ApiKey;
     }
 
-    public async Task SetApiKeyAsync(string profileId, string apiKey, CancellationToken ct = default)
+    public async Task SetValidatedCredentialAsync(
+        string profileId,
+        string apiKey,
+        string? baseUrl,
+        CancellationToken ct = default)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
         var entity = await db.ProviderSettings.FindAsync([profileId], ct);
@@ -79,7 +83,9 @@ public sealed class ProviderSettingStore : IProviderSettingStore
             };
             db.ProviderSettings.Add(entity);
         }
+
         entity.ApiKey = apiKey;
+        entity.BaseUrl = string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl.Trim();
         entity.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
     }
@@ -90,26 +96,6 @@ public sealed class ProviderSettingStore : IProviderSettingStore
         var entity = await db.ProviderSettings.FindAsync([profileId], ct);
         if (entity is null) return;
         entity.ApiKey = null;
-        entity.UpdatedAt = DateTimeOffset.UtcNow;
-        await db.SaveChangesAsync(ct);
-    }
-
-    // ── BaseUrl ───────────────────────────────────────────────────────────────
-
-    public async Task SetBaseUrlAsync(string profileId, string? baseUrl, CancellationToken ct = default)
-    {
-        await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        var entity = await db.ProviderSettings.FindAsync([profileId], ct);
-        if (entity is null)
-        {
-            entity = new ProviderSettingEntity
-            {
-                ProfileId = profileId,
-                SortOrder = await NextSortOrderAsync(db, ct),
-            };
-            db.ProviderSettings.Add(entity);
-        }
-        entity.BaseUrl = string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl.Trim();
         entity.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
     }

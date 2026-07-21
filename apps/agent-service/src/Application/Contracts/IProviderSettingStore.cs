@@ -25,14 +25,18 @@ public interface IProviderSettingStore
     /// <summary>傳回是否存在環境變數（true = 前端顯示 disabled masked input）。</summary>
     bool HasEnvVar(string profileId);
 
-    /// <summary>儲存 API Key（覆蓋舊值）。</summary>
-    Task SetApiKeyAsync(string profileId, string apiKey, CancellationToken ct = default);
+    /// <summary>
+    /// 原子儲存已經由真實供應商驗證成功的 API Key 與其 Base URL。
+    /// 驗證流程不得以此方法暫存候選 Key。
+    /// </summary>
+    Task SetValidatedCredentialAsync(
+        string profileId,
+        string apiKey,
+        string? baseUrl,
+        CancellationToken ct = default);
 
     /// <summary>移除 DB 中儲存的 API Key。</summary>
     Task RemoveApiKeyAsync(string profileId, CancellationToken ct = default);
-
-    /// <summary>儲存 BaseUrl 覆蓋值。</summary>
-    Task SetBaseUrlAsync(string profileId, string? baseUrl, CancellationToken ct = default);
 
     /// <summary>批次更新排序（傳入 profileId → sortOrder 的對應）。</summary>
     Task ReorderAsync(IReadOnlyList<(string ProfileId, int SortOrder)> order, CancellationToken ct = default);

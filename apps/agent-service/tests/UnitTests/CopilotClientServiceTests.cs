@@ -68,9 +68,8 @@ public sealed class CopilotClientServiceTests
             Task.FromResult<IReadOnlyList<ProviderSettingEntity>>([]);
         public Task<ProviderSettingEntity?> GetAsync(string profileId, CancellationToken ct = default) =>
             Task.FromResult<ProviderSettingEntity?>(null);
-        public Task SetApiKeyAsync(string profileId, string value, CancellationToken ct = default) => Task.CompletedTask;
+        public Task SetValidatedCredentialAsync(string profileId, string value, string? baseUrl, CancellationToken ct = default) => Task.CompletedTask;
         public Task RemoveApiKeyAsync(string profileId, CancellationToken ct = default) => Task.CompletedTask;
-        public Task SetBaseUrlAsync(string profileId, string? baseUrl, CancellationToken ct = default) => Task.CompletedTask;
         public Task ReorderAsync(IReadOnlyList<(string ProfileId, int SortOrder)> order, CancellationToken ct = default) => Task.CompletedTask;
         public Task EnsureSeedAsync(IReadOnlyList<string> profileIds, CancellationToken ct = default) => Task.CompletedTask;
     }

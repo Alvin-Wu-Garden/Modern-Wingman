@@ -41,7 +41,7 @@ public static class ServiceRegistration
         // Enum 序列化為字串（"CopilotDefault" 而非 0），讓前端 kind === 'CopilotDefault' 正確比對
         services.ConfigureHttpJsonOptions(opts =>
             opts.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
-        // ── HttpClient（供 validate-key 端點代理外部 API 驗證）────────────────
+        // ── HttpClient（供 Provider 與 Skills GitHub PAT 後端驗證）─────────────
         // CheckCertificateRevocationList = false：繞過企業環境 CRL/OCSP 查詢失敗問題
         services.AddHttpClient("key-validator", client =>
             {
@@ -80,11 +80,16 @@ public static class ServiceRegistration
 
         // ── Copilot CLI 生命週期（Singleton Hosted Service）───────────────────
         services.AddSingleton<CopilotClientService>();
+        services.AddSingleton<ICopilotCredentialRuntime>(
+            sp => sp.GetRequiredService<CopilotClientService>());
         services.AddHostedService(sp => sp.GetRequiredService<CopilotClientService>());
 
         // ── BYOK Provider ─────────────────────────────────────────────────────
         services.AddSingleton<ProviderConfigResolver>();
         services.AddSingleton<IModelProviderService, ModelProviderService>();
+        services.AddSingleton<IProviderApiKeyValidator, CopilotApiKeyValidator>();
+        services.AddSingleton<IProviderApiKeyValidator, HttpProviderApiKeyValidator>();
+        services.AddSingleton<IProviderCredentialService, ProviderCredentialService>();
         services.AddSingleton<ILlmTelemetryRecorder, LlmTelemetryRecorder>();
         services.AddSingleton<IAuditEventRecorder, AuditEventRecorder>();
         services.AddSingleton<ISensitiveDataRedactor, SensitiveDataRedactor>();

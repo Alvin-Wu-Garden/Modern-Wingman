@@ -1,4 +1,5 @@
 using AgentService.Application.Contracts;
+using AgentService.Application.Models;
 using GitHub.Copilot;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -15,7 +16,7 @@ namespace AgentService.Infrastructure.Providers;
 /// - 多 session 透過同一個 Client 建立（CLI 支援多 session）
 /// - 工作區切換透過 system prompt 注入，不需重啟 Client
 /// </summary>
-public sealed class CopilotClientService : IHostedService, IAsyncDisposable
+public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICopilotCredentialRuntime
 {
     private readonly AgentServiceOptions _options;
     private readonly IProviderSettingStore _settingStore;
@@ -82,7 +83,7 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable
         var status = await BuildStatusAsync(_client, githubToken, ct);
         SetStatus(status);
         if (!status.IsAuthenticated)
-            throw new InvalidOperationException(status.Error ?? "GitHub PAT 無法使用 Copilot Requests。");
+            throw new InvalidOperationException(status.Error ?? "GitHub PAT 無法使用 GitHub Copilot。");
 
         _logger.LogInformation("Bundled Copilot runtime 已完成 PAT 驗證 (帳號: {Login})。", status.Login);
     }
@@ -146,6 +147,16 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable
                 await validationClient.DisposeAsync();
             }
         }
+    }
+
+    async Task<ApiKeyValidationResult> ICopilotCredentialRuntime.ValidateAsync(
+        string githubToken,
+        CancellationToken ct)
+    {
+        var status = await ValidatePatAsync(githubToken, ct);
+        return status.IsAuthenticated
+            ? ApiKeyValidationResult.Valid()
+            : ApiKeyValidationResult.Invalid(status.Error ?? "GitHub PAT 無法使用 Copilot。");
     }
 
     public CopilotRuntimeStatus GetRuntimeStatus() => Volatile.Read(ref _status);

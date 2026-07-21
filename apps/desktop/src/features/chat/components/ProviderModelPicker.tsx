@@ -21,13 +21,9 @@ interface Props {
 const PREFERRED_MODEL_ID = 'claude-sonnet-4.6'
 const LATEST_OPENAI_MODEL_ID = 'gpt-5.6'
 
-function isVerifiedProvider(provider: ProviderInfo, status: ProviderKeyStatus | null): boolean {
+function isVerifiedProvider(status: ProviderKeyStatus | null): boolean {
   if (!status) return false
-
-  // Copilot 的「已設定」不代表可用，必須通過 bundled runtime 的實際認證。
-  if (provider.kind === 'CopilotDefault') return status.runtimeStatus?.isAuthenticated === true
-
-  // 其餘 BYOK 供應商沒有常駐 runtime 認證狀態，因此以設定頁已配置的金鑰或環境變數判定可用。
+  // 設定頁只會把後端真實驗證成功的 Key 寫入 DB；後續 runtime 錯誤不自動改動設定。
   return status.hasStoredKey || status.hasEnvVar
 }
 
@@ -73,8 +69,8 @@ export function ProviderModelPicker({
 
         setProviders(loadedProviders)
         if (!selectedProviderId) {
-          const firstVerified = loadedProviders.find((provider, index) =>
-            isVerifiedProvider(provider, statuses[index] ?? null))
+          const firstVerified = loadedProviders.find((_provider, index) =>
+            isVerifiedProvider(statuses[index] ?? null))
           if (firstVerified) onProviderChange(firstVerified.id)
         }
       } catch {

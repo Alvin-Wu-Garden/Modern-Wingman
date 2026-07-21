@@ -46,9 +46,8 @@ import {
   getProviderKeyStatus,
   setProviderKey,
   deleteProviderKey,
-  setProviderBaseUrl,
   reorderProviders,
-  validateKeyViaBackend,
+  validateGithubPatViaBackend,
   type ProviderInfo,
   type ProviderKeyStatus,
   type KeyValidationResult,
@@ -169,10 +168,23 @@ function SettingsSection({
 }
 
 /* ── Validation badge ── */
-type ValidationState = 'idle' | 'validating' | KeyValidationResult
+type ValidationState = 'idle' | 'format-valid' | 'validating' | KeyValidationResult
+
+function validateProviderKeyFormat(provider: ProviderInfo, apiKey: string): KeyValidationResult {
+  if (!apiKey || /\s/.test(apiKey)) {
+    return { valid: false, error: 'API Key 不可為空或包含空白。' }
+  }
+  if (provider.kind === 'CopilotDefault' && !/^github_pat_[A-Za-z0-9_]+$/.test(apiKey)) {
+    return { valid: false, error: 'GitHub Copilot 只支援 github_pat_ 開頭的 fine-grained PAT。' }
+  }
+  return { valid: true }
+}
 
 function ValidationBadge({ state, isGithub }: { state: ValidationState; isGithub?: boolean }) {
   if (state === 'idle') return null
+  if (state === 'format-valid') {
+    return <span className="text-xs text-ink-subtle">格式正確，尚未驗證</span>
+  }
   if (state === 'validating') {
     return (
       <span className="flex items-center gap-1 text-xs text-ink-subtle">
@@ -215,7 +227,6 @@ interface ProviderRowProps {
   onKeyChange: (val: string) => void
   onBaseUrlChange: (val: string) => void
   onKeyBlur: () => void
-  onBaseUrlBlur: () => void
   onSaveKey: () => void
   onDeleteKey: () => void
 }
@@ -246,26 +257,16 @@ function SortableProviderRow(props: ProviderRowProps) {
   const expanded = props.expanded
   const setExpanded = (_: boolean | ((prev: boolean) => boolean)) => props.onToggleExpanded()
 
-  // 決定 header icon：驗證失敗 → 紅X；已驗證可用 → 綠勾；其餘 → 灰鑰匙
+  // DB 只會保存驗證成功的 Key；runtime 後續失效不會自動改動已儲存設定。
   const iconCls = 'w-3.5 h-3.5 shrink-0'
   let HeaderIcon: React.ReactNode
-  if (isCopilotDefault) {
-    if (copilotStatus?.state === 'invalid') {
-      HeaderIcon = <X className={`${iconCls} text-red-400`} />
-    } else if (copilotStatus?.isAuthenticated) {
-      HeaderIcon = <Check className={`${iconCls} text-brand-green`} />
-    } else {
-      HeaderIcon = <Key className={`${iconCls} text-ink-subtle`} />
-    }
+  const validation = props.validation
+  if (hasStoredKey || hasEnvVar || (typeof validation === 'object' && validation.valid)) {
+    HeaderIcon = <Check className={`${iconCls} text-brand-green`} />
+  } else if (typeof validation === 'object' && !validation.valid) {
+    HeaderIcon = <X className={`${iconCls} text-red-400`} />
   } else {
-    const v = props.validation
-    if (typeof v === 'object' && !v.valid) {
-      HeaderIcon = <X className={`${iconCls} text-red-400`} />
-    } else if ((typeof v === 'object' && v.valid) || hasStoredKey || hasEnvVar) {
-      HeaderIcon = <Check className={`${iconCls} text-brand-green`} />
-    } else {
-      HeaderIcon = <Key className={`${iconCls} text-ink-subtle`} />
-    }
+    HeaderIcon = <Key className={`${iconCls} text-ink-subtle`} />
   }
 
   return (
@@ -321,7 +322,6 @@ function SortableProviderRow(props: ProviderRowProps) {
             type="text"
             value={props.baseUrlInput}
             onChange={(e) => props.onBaseUrlChange(e.target.value)}
-            onBlur={props.onBaseUrlBlur}
             placeholder="http://localhost:11434/v1"
             className="w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"
           />
@@ -333,7 +333,7 @@ function SortableProviderRow(props: ProviderRowProps) {
         {isCopilotDefault && (
           <p className="text-xs text-ink-subtle leading-relaxed">
             GitHub fine-grained PAT。只支援 <code className="font-mono bg-surface-alt px-1 rounded">github_pat_</code>；
-            需在 Account permissions 勾選 <code className="font-mono bg-surface-alt px-1 rounded">Copilot Requests</code>。
+            需在 Account permissions 勾選 <code className="font-mono bg-surface-alt px-1 rounded">Models</code>。
           </p>
         )}
           {hasEnvVar ? (
@@ -408,18 +408,18 @@ function SortableProviderRow(props: ProviderRowProps) {
               <p className="font-medium text-ink">建立 PAT 時請確認：</p>
               <ul className="list-disc pl-4 space-y-0.5">
                 <li>Resource owner 選擇個人帳號。</li>
-                <li>Account permissions 勾選 Copilot Requests。</li>
+                <li>Account permissions 勾選 Models。</li>
                 <li>帳號具備可用的 GitHub Copilot 權限。</li>
               </ul>
             </>}
-            {copilotStatus?.state === 'validating' && <p>正在驗證 Copilot Requests…</p>}
+            {copilotStatus?.state === 'validating' && <p>正在透過 Copilot SDK 驗證 PAT…</p>}
             {copilotStatus?.isAuthenticated && <>
-              <p className="font-medium text-brand-green">✓ Copilot Requests：已驗證</p>
+              <p className="font-medium text-brand-green">✓ GitHub Copilot：已驗證</p>
               {copilotStatus.login && <p>GitHub 帳號：{copilotStatus.login}</p>}
               {copilotStatus.authType && <p>認證來源：{copilotStatus.authType}</p>}
               {copilotStatus.modelCount !== null && copilotStatus.modelCount !== undefined && <p>可用模型：{copilotStatus.modelCount} 個</p>}
             </>}
-            {copilotStatus?.state === 'invalid' && <p className="text-red-400">✕ {copilotStatus.error ?? 'PAT 無法使用 Copilot Requests。'}</p>}
+            {copilotStatus?.state === 'invalid' && <p className="text-red-400">✕ {copilotStatus.error ?? 'PAT 無法使用 GitHub Copilot。'}</p>}
           </div>
         )}
         </div>
@@ -511,44 +511,39 @@ export function SettingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  /* ── BYOK key validation on blur；Copilot PAT 僅透過「驗證並儲存」處理 ── */
-  const handleKeyBlur = useCallback(async (provider: ProviderInfo) => {
-    if (provider.kind === 'CopilotDefault') return
+  /* ── Blur 僅做本機格式初篩；真實驗證統一由後端 PUT /key 執行 ── */
+  const handleKeyBlur = useCallback((provider: ProviderInfo) => {
     const key = keyInputs[provider.id]?.trim()
     if (!key) return
-    setValidations((s) => ({ ...s, [provider.id]: 'validating' }))
-    const pt = provider.providerType ?? 'openai'
-    const storedBase = baseUrlInputs[provider.id] || provider.baseUrl || undefined
-    const result = await validateKeyViaBackend(pt, key, storedBase)
-    setValidations((s) => ({ ...s, [provider.id]: result }))
-    if (result.valid) {
-      setKeySaving((s) => ({ ...s, [provider.id]: true }))
-      try {
-        await setProviderKey(provider.id, key)
-        setKeyInputs((s) => ({ ...s, [provider.id]: '' }))
-        await loadProviders()
-      } finally {
-        setKeySaving((s) => ({ ...s, [provider.id]: false }))
-      }
-    }
-  }, [keyInputs, baseUrlInputs, loadProviders])
+    const format = validateProviderKeyFormat(provider, key)
+    setValidations((s) => ({ ...s, [provider.id]: format.valid ? 'format-valid' : format }))
+  }, [keyInputs])
 
   /* ── Save key ── */
   const handleSaveKey = useCallback(async (provider: ProviderInfo) => {
     const key = keyInputs[provider.id]?.trim()
     if (!key) return
+    const format = validateProviderKeyFormat(provider, key)
+    if (!format.valid) {
+      setValidations((s) => ({ ...s, [provider.id]: format }))
+      return
+    }
     setKeySaving((s) => ({ ...s, [provider.id]: true }))
+    setValidations((s) => ({ ...s, [provider.id]: 'validating' }))
     try {
-      await setProviderKey(provider.id, key)
-      setKeyInputs((s) => ({ ...s, [provider.id]: '' }))
-      setValidations((s) => ({ ...s, [provider.id]: { valid: true } }))
-      await loadProviders()
+      const baseUrl = baseUrlInputs[provider.id] || provider.baseUrl || null
+      const result = await setProviderKey(provider.id, key, baseUrl)
+      setValidations((s) => ({ ...s, [provider.id]: result }))
+      if (result.valid) {
+        setKeyInputs((s) => ({ ...s, [provider.id]: '' }))
+        await loadProviders()
+      }
     } catch (error) {
       setValidations((s) => ({ ...s, [provider.id]: { valid: false, error: error instanceof Error ? error.message : String(error) } }))
     } finally {
       setKeySaving((s) => ({ ...s, [provider.id]: false }))
     }
-  }, [keyInputs, loadProviders])
+  }, [keyInputs, baseUrlInputs, loadProviders])
 
   /* ── Delete key ── */
   const handleDeleteKey = useCallback(async (profileId: string) => {
@@ -566,12 +561,6 @@ export function SettingsPage() {
       setKeyDeleting((s) => ({ ...s, [profileId]: false }))
     }
   }, [loadProviders])
-
-  /* ── BaseURL blur → save ── */
-  const handleBaseUrlBlur = useCallback(async (profileId: string) => {
-    const url = baseUrlInputs[profileId]?.trim() ?? null
-    await setProviderBaseUrl(profileId, url || null)
-  }, [baseUrlInputs])
 
   /* ── Drag end → reorder ── */
   const handleDragEnd = useCallback(async (event: DragEndEvent) => {
@@ -598,7 +587,7 @@ export function SettingsPage() {
     const pat = githubPat.trim()
     if (!pat) { setGithubPatValidation('idle'); return }
     setGithubPatValidation('validating')
-    const result = await validateKeyViaBackend('github', pat)
+    const result = await validateGithubPatViaBackend(pat)
     setGithubPatValidation(result)
   }, [githubPat])
 
@@ -723,10 +712,12 @@ export function SettingsPage() {
                     validation={validations[provider.id] ?? 'idle'}
                     expanded={expandedRows[provider.id] ?? false}
                     onToggleExpanded={() => setExpandedRows((s) => ({ ...s, [provider.id]: !s[provider.id] }))}
-                    onKeyChange={(v) => setKeyInputs((s) => ({ ...s, [provider.id]: v }))}
+                    onKeyChange={(v) => {
+                      setKeyInputs((s) => ({ ...s, [provider.id]: v }))
+                      setValidations((s) => ({ ...s, [provider.id]: 'idle' }))
+                    }}
                     onBaseUrlChange={(v) => setBaseUrlInputs((s) => ({ ...s, [provider.id]: v }))}
                     onKeyBlur={() => handleKeyBlur(provider)}
-                    onBaseUrlBlur={() => handleBaseUrlBlur(provider.id)}
                     onSaveKey={() => handleSaveKey(provider)}
                     onDeleteKey={() => handleDeleteKey(provider.id)}
                   />

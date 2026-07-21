@@ -281,30 +281,30 @@ export async function getProviderKeyStatus(profileId: string): Promise<ProviderK
   return res.json()
 }
 
-export async function setProviderKey(profileId: string, apiKey: string): Promise<void> {
+export async function setProviderKey(
+  profileId: string,
+  apiKey: string,
+  baseUrl?: string | null,
+): Promise<KeyValidationResult> {
   const res = await fetch(`${BASE_URL}/api/providers/${profileId}/key`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey }),
+    body: JSON.stringify({ apiKey, baseUrl: baseUrl ?? null }),
   })
   if (!res.ok) {
     const body = await res.json().catch(() => null) as { error?: string } | null
     throw new Error(body?.error ?? `setProviderKey: ${res.status}`)
+  }
+  const result = await res.json() as { status: 'valid' | 'invalid'; message?: string }
+  return {
+    valid: result.status === 'valid',
+    error: result.status === 'invalid' ? result.message : undefined,
   }
 }
 
 export async function deleteProviderKey(profileId: string): Promise<void> {
   const res = await fetch(`${BASE_URL}/api/providers/${profileId}/key`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`deleteProviderKey: ${res.status}`)
-}
-
-export async function setProviderBaseUrl(profileId: string, baseUrl: string | null): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/providers/${profileId}/base-url`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ baseUrl }),
-  })
-  if (!res.ok) throw new Error(`setProviderBaseUrl: ${res.status}`)
 }
 
 export async function reorderProviders(profileIds: string[]): Promise<void> {
@@ -325,96 +325,17 @@ export interface KeyValidationResult {
   error?: string
 }
 
-/**
- * 透過後端代理驗證 API Key，避免 Tauri WebView2 的 SSL/CRL 限制。
- * providerType: "openai" | "anthropic" | "azure" | "github"
- */
-export async function validateKeyViaBackend(
-  providerType: string,
-  apiKey: string,
-  baseUrl?: string | null,
-): Promise<KeyValidationResult> {
+/** 透過後端代理驗證 Skills 功能使用的 GitHub PAT。 */
+export async function validateGithubPatViaBackend(apiKey: string): Promise<KeyValidationResult> {
   try {
     const res = await fetch(`${BASE_URL}/api/providers/validate-key`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ providerType, apiKey, baseUrl: baseUrl ?? null }),
+      body: JSON.stringify({ apiKey }),
     })
     if (!res.ok) return { valid: false, error: `HTTP ${res.status}` }
     const data = await res.json() as { valid: boolean; error?: string; scopes?: string }
     return { valid: data.valid, error: data.error, scopes: data.scopes }
-  } catch (e) {
-    return { valid: false, error: String(e) }
-  }
-}
-
-/**
- * @deprecated 改用 validateKeyViaBackend — 直接從 WebView2 發請求在企業環境會遇到 SSL 問題。
- */
-export async function validateOpenAiKey(
-  apiKey: string,
-  baseUrl = 'https://api.openai.com/v1',
-): Promise<KeyValidationResult> {
-  try {
-    const res = await fetch(`${baseUrl.replace(/\/$/, '')}/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    })
-    return { valid: res.ok }
-  } catch (e) {
-    return { valid: false, error: String(e) }
-  }
-}
-
-/**
- * Validate an Anthropic API key by calling /v1/models.
- */
-export async function validateAnthropicKey(apiKey: string): Promise<KeyValidationResult> {
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/models', {
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-    })
-    return { valid: res.ok }
-  } catch (e) {
-    return { valid: false, error: String(e) }
-  }
-}
-
-/**
- * Validate an Azure OpenAI key.
- * The baseUrl should be the full resource URL, e.g. https://<resource>.openai.azure.com
- */
-export async function validateAzureKey(
-  apiKey: string,
-  baseUrl: string,
-  apiVersion = '2024-10-21',
-): Promise<KeyValidationResult> {
-  try {
-    const url = `${baseUrl.replace(/\/$/, '')}/openai/models?api-version=${apiVersion}`
-    const res = await fetch(url, { headers: { 'api-key': apiKey } })
-    return { valid: res.ok }
-  } catch (e) {
-    return { valid: false, error: String(e) }
-  }
-}
-
-/**
- * Validate a GitHub Personal Access Token and return the granted scopes.
- * Uses the GitHub REST API meta endpoint which returns x-oauth-scopes header.
- */
-export async function validateGithubPat(pat: string): Promise<KeyValidationResult> {
-  try {
-    const res = await fetch('https://api.github.com/user', {
-      headers: {
-        Authorization: `token ${pat}`,
-        Accept: 'application/vnd.github+json',
-      },
-    })
-    if (!res.ok) return { valid: false, error: `HTTP ${res.status}` }
-    const scopes = res.headers.get('x-oauth-scopes') ?? ''
-    return { valid: true, scopes }
   } catch (e) {
     return { valid: false, error: String(e) }
   }

@@ -57,13 +57,21 @@ public sealed record CopilotRuntimeStatusDto(
     string? Error = null
 );
 
-public sealed record SetApiKeyRequest(string ApiKey);
-
-/// <summary>PUT /api/providers/{id}/base-url 的 request body。</summary>
-public sealed record SetBaseUrlRequest(string? BaseUrl);
+public sealed record SetApiKeyRequest(string ApiKey, string? BaseUrl = null);
 
 /// <summary>PUT /api/providers/reorder 的 request body — profileId 陣列，index 即為新順序。</summary>
 public sealed record ReorderProvidersRequest(List<string> Order);
+
+/// <summary>
+/// Request used by the Skills library to validate its GitHub PAT.
+/// AI provider credentials use PUT /api/providers/{id}/key instead.
+/// </summary>
+public sealed record ValidateGithubAccessTokenRequest(string ApiKey);
+
+public sealed record ValidateGithubAccessTokenResult(
+    bool Valid,
+    string? Error = null,
+    string? Scopes = null);
 
 /// <summary>
 /// 單一模型資訊（GET /api/providers/{id}/models 回傳的陣列元素）。
@@ -73,24 +81,5 @@ public sealed record ProviderModelDto(
     string DisplayName,
     /// <summary>分組標籤，例如 "gpt-4"、"claude-3"。</summary>
     string Group
-);
-
-/// <summary>
-/// POST /api/providers/validate-key 的 request body。
-/// 由後端代為呼叫外部 API 驗證，避免 WebView2 SSL 問題。
-/// </summary>
-public sealed record ValidateKeyRequest(
-    /// <summary>"openai" | "anthropic" | "azure" | "github"</summary>
-    string ProviderType,
-    string ApiKey,
-    string? BaseUrl = null
-);
-
-/// <summary>POST /api/providers/validate-key 的回傳結果。</summary>
-public sealed record ValidateKeyResult(
-    bool Valid,
-    string? Error = null,
-    /// <summary>GitHub PAT 專用：x-oauth-scopes 標頭值。</summary>
-    string? Scopes = null
 );
 
