@@ -382,6 +382,11 @@ public sealed class ProjectIndexService(
                     rawGraph.Edges.Add(edge);
             }
             var nodeKeys = rawGraph.Nodes.Select(node => node.Key).ToHashSet(StringComparer.Ordinal);
+            // ORM adapters emit candidate SerializesTo edges from request-contract:/response-contract:
+            // nodes that only materialise when a code analyser finds an endpoint using that type.
+            // Strip edges whose endpoints are absent before canonicalization.
+            rawGraph.Edges.RemoveAll(edge =>
+                !nodeKeys.Contains(edge.SourceKey) || !nodeKeys.Contains(edge.TargetKey));
             var edgeKeys = rawGraph.Edges
                 .Select(edge => $"{edge.SourceKey}\0{edge.Kind}\0{edge.TargetKey}")
                 .ToHashSet(StringComparer.Ordinal);
@@ -764,6 +769,12 @@ public sealed class ProjectIndexService(
             .ToHashSet(StringComparer.Ordinal);
         var basePublished = GraphSnapshotCanonicalizer.ToAnalysisResult(activeSnapshot);
         var baseNodesByKey = basePublished.Nodes.ToDictionary(node => node.Key, StringComparer.Ordinal);
+        // Strip candidate edges (e.g. request-contract: SerializesTo) whose endpoints exist in
+        // neither the fragment nor the last published snapshot, so they don't trigger a full
+        // rebuild via the fallback path below.
+        raw.Edges.RemoveAll(edge =>
+            (!fragmentNodeKeys.Contains(edge.SourceKey) && !baseNodesByKey.ContainsKey(edge.SourceKey)) ||
+            (!fragmentNodeKeys.Contains(edge.TargetKey) && !baseNodesByKey.ContainsKey(edge.TargetKey)));
         foreach (var key in raw.Edges
             .SelectMany(edge => new[] { edge.SourceKey, edge.TargetKey })
             .Where(key => !fragmentNodeKeys.Contains(key))

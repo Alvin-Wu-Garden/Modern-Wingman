@@ -49,16 +49,24 @@ public sealed class Neo4jCodeGraphStore : ICodeGraphStore, IAsyncDisposable
         @"(?<![\p{L}\p{N}_])\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*)?(?:\{[^()]*\}\s*)?\)",
         RegexOptions.Compiled);
 
-    private readonly IDriver _driver;
+    private readonly IDriver? _driver;
     private readonly Neo4jOptions _options;
     private readonly ILogger<Neo4jCodeGraphStore> _logger;
     private readonly SemaphoreSlim _schemaGate = new(1, 1);
     private bool _schemaReady;
 
-    public Neo4jCodeGraphStore(IOptions<Neo4jOptions> options, ILogger<Neo4jCodeGraphStore> logger)
+    public Neo4jCodeGraphStore(
+        IOptions<Neo4jOptions> options,
+        IOptions<Neo4jLifecycleOptions> lifecycleOptions,
+        ILogger<Neo4jCodeGraphStore> logger)
     {
         _options = options.Value;
         _logger = logger;
+        if (string.Equals(lifecycleOptions.Value.Mode, "disabled", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation("Neo4j 已停用（Mode=disabled），跳過 driver 初始化。");
+            return;
+        }
         _driver = GraphDatabase.Driver(
             _options.Uri,
             AuthTokens.Basic(_options.Username, _options.Password),
@@ -70,15 +78,16 @@ public sealed class Neo4jCodeGraphStore : ICodeGraphStore, IAsyncDisposable
     }
 
     private IAsyncSession OpenSession() =>
-        _driver.AsyncSession(o => o.WithDatabase(_options.Database));
+        (_driver ?? throw new InvalidOperationException("Neo4j driver 未初始化（Mode=disabled）")).AsyncSession(o => o.WithDatabase(_options.Database));
 
     private IAsyncSession OpenReadSession() =>
-        _driver.AsyncSession(o => o
+        (_driver ?? throw new InvalidOperationException("Neo4j driver 未初始化（Mode=disabled）")).AsyncSession(o => o
             .WithDatabase(_options.Database)
             .WithDefaultAccessMode(AccessMode.Read));
 
     public async Task<bool> PingAsync(CancellationToken ct = default)
     {
+        if (_driver is null) return false;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(
             Math.Clamp(_options.ConnectionTimeoutSeconds, 1, 30)));
@@ -2337,5 +2346,9 @@ public sealed class Neo4jCodeGraphStore : ICodeGraphStore, IAsyncDisposable
         return escaped.ToString();
     }
 
-    public async ValueTask DisposeAsync() => await _driver.DisposeAsync();
+    public async ValueTask DisposeAsync()
+    {
+        if (_driver is not null)
+            await _driver.DisposeAsync();
+    }
 }

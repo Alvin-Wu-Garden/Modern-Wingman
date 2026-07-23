@@ -55,6 +55,20 @@ public sealed class Neo4jLifecycleService(
     private static string WingmanNeo4jRoot => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".wingman", "neo4j");
 
+    internal static string GetEffectiveOfflinePackageDir(Neo4jLifecycleOptions options) =>
+        string.IsNullOrWhiteSpace(options.OfflinePackageDir)
+            ? Path.Combine(WingmanNeo4jRoot, "packages")
+            : Environment.ExpandEnvironmentVariables(options.OfflinePackageDir);
+
+    internal static string GetOfflinePackageGuidance(Neo4jLifecycleOptions options)
+    {
+        var offlineDir = GetEffectiveOfflinePackageDir(options);
+        return
+            $"請將離線安裝包放入 {offlineDir}；" +
+            "檔名需符合 neo4j-community*.zip 與 jre*.zip，" +
+            "或設定 Neo4jLifecycle:OfflinePackageDir 指向實際目錄。";
+    }
+
     /// <summary>目前狀態，供前端顯示。</summary>
     public string Status { get; private set; } = "stopped";
 
@@ -69,6 +83,13 @@ public sealed class Neo4jLifecycleService(
         IProgress<string>? progress = null, CancellationToken ct = default)
     {
         LastError = null;
+
+        // disabled 模式：完全停用 Neo4j，不嘗試任何連線。
+        if (string.Equals(_options.Mode, "disabled", StringComparison.OrdinalIgnoreCase))
+        {
+            Status = "disabled";
+            return false;
+        }
 
         // external 是唯一允許連線到非 Wingman-owned Neo4j 的模式。
         if (_options.Mode == "external")
@@ -158,6 +179,7 @@ public sealed class Neo4jLifecycleService(
         }
 
         Directory.CreateDirectory(root);
+        Directory.CreateDirectory(GetEffectiveOfflinePackageDir(_options));
 
         // Neo4j zip
         if (homeDir is null)
@@ -197,7 +219,8 @@ public sealed class Neo4jLifecycleService(
         string namePrefix, string url, string root, CancellationToken ct)
     {
         // 離線包
-        if (_options.OfflinePackageDir is { } offlineDir && Directory.Exists(offlineDir))
+        var offlineDir = GetEffectiveOfflinePackageDir(_options);
+        if (Directory.Exists(offlineDir))
         {
             var offline = Directory.EnumerateFiles(offlineDir, $"{namePrefix}*.zip").FirstOrDefault();
             if (offline is not null)
@@ -225,6 +248,7 @@ public sealed class Neo4jLifecycleService(
         {
             logger.LogError(ex,
                 "下載失敗。企業無外網環境請將安裝包放入離線目錄並設定 Neo4jLifecycle:OfflinePackageDir");
+            LastError = $"無法取得 {namePrefix} 安裝包。{GetOfflinePackageGuidance(_options)}";
             try { File.Delete(target); } catch { /* best effort */ }
             return null;
         }

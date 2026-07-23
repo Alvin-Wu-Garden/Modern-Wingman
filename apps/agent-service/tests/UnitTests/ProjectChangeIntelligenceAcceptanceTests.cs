@@ -429,6 +429,61 @@ public sealed class ProjectIndexAcceptanceTests : IDisposable
         Assert.True(process.ExitCode == 0, process.StandardError.ReadToEnd());
     }
 
+    [Fact]
+    public async Task FullIndex_DanglingSerializesToEdgeFromOrmAdapterIsStrippedAndDoesNotThrow()
+    {
+        // OrmDataArtifactAdapter emits request-contract: / response-contract: SerializesTo edges
+        // whose source nodes are only created by the C# framework extractor when an endpoint
+        // actually uses the mapped type. ProjectIndexService must strip them before
+        // canonicalization; this test guards against regression of that contract.
+        var csFile = Path.Combine(_root, "UserProfile.cs");
+        await File.WriteAllTextAsync(csFile, "[Table(\"userprofileforward\")] class UserProfile { }");
+
+        var table = new CodeNode
+        {
+            Key = "table:default.userprofileforward",
+            Kind = CodeNodeKind.Table,
+            Name = "userprofileforward",
+            Language = "csharp",
+            SourceKind = GraphSourceKind.Heuristic,
+            Confidence = GraphConfidence.Heuristic,
+            ContentHash = "hash",
+        };
+        var danglingEdge = new CodeEdge
+        {
+            SourceKey = "request-contract:APEX.RMTaskManagerWeb.Models.UserProfile",
+            TargetKey = "table:default.userprofileforward",
+            Kind = CodeEdgeKind.SerializesTo,
+            SourceKind = GraphSourceKind.Heuristic,
+            Confidence = GraphConfidence.Heuristic,
+            ContentHash = "hash",
+        };
+        var ormResult = new CodeAnalysisResult();
+        ormResult.Nodes.Add(table);
+        ormResult.Edges.Add(danglingEdge);
+
+        var project = Project(_root, "v0");
+        var repository = new MemoryProjectRepository(project);
+        var manifests = new MemoryManifestStore(null, null);
+        var graph = new MemoryGraphStore(null);
+        await using var lifecycle = Lifecycle(graph);
+        var service = Service(repository, manifests, graph, lifecycle,
+            new OrmResultAnalyzer(ormResult));
+
+        // Must complete without InvalidOperationException about a dangling edge.
+        var ex = await Record.ExceptionAsync(() => service.IndexProjectAsync(project.Id));
+        Assert.Null(ex);
+        Assert.Equal(1, graph.ReplaceCallCount);
+    }
+
+    private sealed class OrmResultAnalyzer(CodeAnalysisResult result) : ICodeAnalyzer
+    {
+        public string Language => "csharp";
+        public IReadOnlyList<string> FileExtensions => [".cs"];
+        public Task<CodeAnalysisResult> AnalyzeAsync(string projectRoot, IReadOnlyList<string> files, CancellationToken ct = default) =>
+            Task.FromResult(result);
+    }
+
     private sealed class EmptyAnalyzer : ICodeAnalyzer
     {
         public string Language => "csharp";

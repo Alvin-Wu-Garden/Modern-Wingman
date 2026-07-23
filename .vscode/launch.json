@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug AgentService",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-agent-service",
+      "program": "${workspaceFolder}/apps/agent-service/bin/Debug/net10.0/AgentService.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/apps/agent-service",
+      "stopAtEntry": false,
+      "justMyCode": true,
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "ASPNETCORE_URLS": "http://localhost:5200"
+      },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Attach to AgentService (已在執行)",
+      "type": "coreclr",
+      "request": "attach",
+      "processName": "AgentService"
+    }
+  ]
+}

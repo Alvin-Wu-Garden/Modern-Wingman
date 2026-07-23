@@ -10,6 +10,20 @@ namespace AgentService.UnitTests;
 public sealed class Neo4jLifecycleLockTests
 {
     [Fact]
+    public void OfflinePackageGuidance_UsesDefaultPackageDirectoryWhenNotConfigured()
+    {
+        var options = new Neo4jLifecycleOptions { OfflinePackageDir = null };
+
+        var directory = Neo4jLifecycleService.GetEffectiveOfflinePackageDir(options);
+        var guidance = Neo4jLifecycleService.GetOfflinePackageGuidance(options);
+
+        Assert.EndsWith(Path.Combine(".wingman", "neo4j", "packages"), directory, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(directory, guidance, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("neo4j-community*.zip", guidance, StringComparison.Ordinal);
+        Assert.Contains("jre*.zip", guidance, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task CrossProcessFileLock_CanCrossAwaitAndIsReleasedByDispose()
     {
         await using (var first = await Neo4jLifecycleService.AcquireCrossProcessLockAsync(CancellationToken.None))
