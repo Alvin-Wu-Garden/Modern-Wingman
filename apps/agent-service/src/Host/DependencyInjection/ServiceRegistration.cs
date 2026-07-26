@@ -4,8 +4,6 @@ using AgentService.Host.RestEndpoints;
 using AgentService.Infrastructure.AgentFramework;
 using AgentService.Infrastructure.ChangeIntelligence;
 using AgentService.Infrastructure.ChangeIntelligence.DataIntelligence;
-using AgentService.Infrastructure.CodeAnalysis;
-using AgentService.Infrastructure.CodeGraph;
 using AgentService.Infrastructure.Changes;
 using AgentService.Infrastructure.Orchestration;
 using AgentService.Infrastructure.Mcp;
@@ -20,6 +18,7 @@ using AgentService.Infrastructure.Tools;
 using AgentService.Infrastructure.Workflow;
 using AgentService.Infrastructure.VersionControl;
 using AgentService.Infrastructure.Marketplace;
+using AgentService.Modules.GraphRAG;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json.Serialization;
 
@@ -177,26 +176,11 @@ public static class ServiceRegistration
         services.AddSingleton<IRunReplayGuard, RunReplayGuard>();
         services.AddSingleton<IAgentHookDispatcher, AgentHookDispatcher>();
 
-        // ── WS3: 企業程式碼解析（分析器 Strategy / Neo4j / GraphRAG）──────────
-        services.Configure<Neo4jOptions>(configuration.GetSection(Neo4jOptions.SectionName));
-        services.Configure<Neo4jLifecycleOptions>(configuration.GetSection(Neo4jLifecycleOptions.SectionName));
-        services.Configure<ProjectIndexOptimizationOptions>(
-            configuration.GetSection(ProjectIndexOptimizationOptions.SectionName));
-        services.AddHttpClient("neo4j-download", client => client.Timeout = TimeSpan.FromMinutes(15))
-            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
-            {
-                CheckCertificateRevocationList = false,
-            });
+        // ── GraphRAG V3：四種節點、九種關係、單一無 profile 模組 ─────────────
         services.AddHttpClient("mcp", client => client.Timeout = TimeSpan.FromMinutes(2));
 
-        services.AddSingleton<ICodeAnalyzer, RoslynCodeAnalyzer>();
-        services.AddSingleton<ICodeAnalyzer, JavaCodeAnalyzer>();
-        services.AddSingleton<ICodeGraphStore, Neo4jCodeGraphStore>();
-        services.AddSingleton<Neo4jLifecycleService>();
         services.AddSingleton<IProjectRepository, ProjectRepository>();
         services.AddSingleton<IProjectIndexManifestStore, ProjectIndexManifestStore>();
-        services.AddSingleton<ProjectIndexService>();
-        services.AddHostedService<ProjectIndexWatcherService>();
         services.AddSingleton<IChangeIntentClassifier, DeterministicChangeIntentClassifier>();
         services.AddSingleton<IChangeBriefBuilder, ChangeBriefBuilder>();
         services.AddSingleton<IClarificationPlanner, DeterministicClarificationPlanner>();
@@ -207,17 +191,11 @@ public static class ServiceRegistration
         services.AddSingleton<ProjectEvidencePlanner>();
         services.AddSingleton<IReadOnlyDatabaseQueryPlanValidator, StrictReadOnlyDatabaseQueryPlanValidator>();
         services.AddSingleton<IDatabaseRuntimeEvidenceRequestValidator, DatabaseRuntimeEvidenceRequestValidator>();
-        services.AddSingleton<IDataArtifactAdapter, SqlDataArtifactAdapter>();
-        services.AddSingleton<IDataArtifactAdapter, OrmDataArtifactAdapter>();
-        services.AddSingleton<IDataSchemaExtractor, DataSchemaExtractor>();
         services.AddSingleton<IDomainGlossaryStore, DomainGlossarySqliteStore>();
         services.AddSingleton<IDatabaseRuntimeEvidenceCoordinator, McpDatabaseRuntimeEvidenceProvider>();
         services.AddSingleton<ProjectDataEvidencePlanner>();
         services.AddSingleton<ILlmCompletionService, CopilotCompletionService>();
-        services.AddSingleton<GraphRagService>();
-        services.AddSingleton<RepoMapService>();
-        services.AddSingleton<AgentsMdGenerator>();
-        services.AddSingleton<ImpactAnalysisService>();
+        services.AddGraphRagV3(configuration);
 
         // ── Speech-to-Text：本機 whisper.cpp（企業內網離線優先）──────────────
         services.Configure<SpeechToTextOptions>(

@@ -139,26 +139,43 @@ export interface IndexProgress {
   percent: number
 }
 
-export interface GraphHit {
-  key: string
+export interface GraphRagNode {
+  id: string
   kind: string
+  role: string
   name: string
-  signature: string | null
+  searchableText: string
+  language: string
+  technology: string | null
+  state: string
+  aliases: string[]
   filePath: string | null
   startLine: number | null
-  score: number
+  endLine: number | null
+  attributes: Record<string, string>
 }
 
-export interface ImpactPathDto {
-  chain: GraphHit[]
+export interface ScoredGraphNode {
+  node: GraphRagNode
+  score: number
+  depth: number
+  seed: boolean
+}
+
+export interface GraphRagRelationship {
+  id: string
+  sourceId: string
+  kind: string
+  targetId: string
 }
 
 export interface ImpactResult {
-  target: GraphHit | null
-  callChains: ImpactPathDto[]
-  affectedMethods: GraphHit[]
+  target: ScoredGraphNode | null
+  affectedNodes: ScoredGraphNode[]
+  relationships: GraphRagRelationship[]
   affectedFiles: string[]
   suggestedTestFilters: string[]
+  truncated: boolean
 }
 
 /**
@@ -438,8 +455,8 @@ const normalizeProjectQueryResult = (value: unknown): ProjectQueryResult => {
 export interface CodeGraphVisualNode {
   id: string
   kind: string
+  role: string
   name: string
-  signature: string | null
   filePath: string | null
   startLine: number | null
   endLine: number | null

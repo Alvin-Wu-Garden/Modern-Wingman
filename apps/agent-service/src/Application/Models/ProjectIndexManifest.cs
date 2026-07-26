@@ -16,7 +16,8 @@ public sealed record IndexedFileManifest(
     string ContentHash,
     string Status = "Indexed",
     string? Reason = null,
-    DateTimeOffset? LastWriteAt = null);
+    DateTimeOffset? LastWriteAt = null,
+    string? DeclarationHash = null);
 
 /// <summary>
 /// An immutable description of one indexing attempt.  A failed attempt is kept for

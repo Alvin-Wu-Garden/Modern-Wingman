@@ -57,7 +57,7 @@ interface KnowledgeGraphPageProps {
 interface GraphStyleSettings {
   nodeColors: Record<string, string>
   relationColors: Record<string, string>
-  caption: 'name' | 'signature' | 'kind'
+  caption: 'name' | 'role' | 'kind'
   halo: boolean
 }
 
@@ -77,10 +77,10 @@ const VIEW_TABS: { value: ViewMode; icon: LucideIcon; label: string }[] = [
   { value: 'raw', icon: Braces, label: 'Raw' },
 ]
 
-const DEFAULT_QUERY = `MATCH (n:CodeNode {projectId: $projectId})
-OPTIONAL MATCH (n)-[r]->(m:CodeNode {projectId: $projectId})
+const DEFAULT_QUERY = `MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})
+OPTIONAL MATCH (n)-[r]->(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})
 RETURN n, r, m
-LIMIT 100`
+LIMIT $limit`
 
 const styleKey = (projectId: string) => `modern-wingman:knowledge-graph:${projectId}:styles`
 
@@ -109,10 +109,15 @@ function loadStyles(projectId: string, schema?: CodeGraphSchema): GraphStyleSett
     const raw = localStorage.getItem(styleKey(projectId))
     if (!raw) return fallback
     const saved = JSON.parse(raw) as Partial<GraphStyleSettings>
+    const caption = saved.caption === 'name' ||
+      saved.caption === 'role' ||
+      saved.caption === 'kind'
+      ? saved.caption
+      : fallback.caption
     return {
       nodeColors: { ...fallback.nodeColors, ...(saved.nodeColors ?? {}) },
       relationColors: { ...fallback.relationColors, ...(saved.relationColors ?? {}) },
-      caption: saved.caption ?? fallback.caption,
+      caption,
       halo: saved.halo ?? fallback.halo,
     }
   } catch {
@@ -167,12 +172,12 @@ function renderValue(value: unknown) {
 }
 
 function linkLayoutDistance(link: GraphLink, densityScale: number) {
-  const base = link.type === 'CONTAINS'
+  const base = link.type === 'ROUTES_TO' || link.type === 'HANDLES'
     ? 150
     : link.type === 'CALLS'
       ? 220
-      : link.type === 'IMPLEMENTS' || link.type === 'INHERITS'
-        ? 200
+      : link.type === 'READS' || link.type === 'WRITES'
+        ? 190
         : 185
   return base * densityScale
 }
@@ -366,7 +371,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     const found = graph.nodes.find((node) => (
       node.name.toLowerCase().includes(keyword) ||
       node.id.toLowerCase().includes(keyword) ||
-      (node.signature?.toLowerCase().includes(keyword) ?? false) ||
+      node.role.toLowerCase().includes(keyword) ||
       (node.filePath?.toLowerCase().includes(keyword) ?? false)
     )) as GraphNode | undefined
     if (!found) {
@@ -429,8 +434,8 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
         : 1.15
     const shouldDrawLabel = selected || hovered || globalScale > labelZoomThreshold
     if (shouldDrawLabel) {
-      const label = styles.caption === 'signature'
-        ? graphNode.signature || graphNode.name
+      const label = styles.caption === 'role'
+        ? graphNode.role
         : styles.caption === 'kind'
           ? graphNode.kind
           : graphNode.name
@@ -679,7 +684,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                   className="mt-1 w-full rounded-lg border border-white/10 bg-[#111827] px-2 py-1.5 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/30"
                 >
                   <option value="name">Name</option>
-                  <option value="signature">Signature</option>
+                  <option value="role">Role</option>
                   <option value="kind">Kind</option>
                 </select>
               </label>
@@ -852,11 +857,9 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                         <p className="text-sm font-semibold text-white break-words">{selectedNode.name}</p>
                         <p className="text-xs text-cyan-200 mt-1">{selectedNode.kind}</p>
                       </div>
-                      {selectedNode.signature && (
-                        <code className="block rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] leading-relaxed text-white/70 break-words">
-                          {selectedNode.signature}
-                        </code>
-                      )}
+                      <code className="block rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] leading-relaxed text-white/70 break-words">
+                        {selectedNode.role}
+                      </code>
                       {selectedNode.filePath && (
                         <p className="text-[11px] text-white/45 font-mono break-words">
                           {selectedNode.filePath}{selectedNode.startLine ? `:${selectedNode.startLine}` : ''}

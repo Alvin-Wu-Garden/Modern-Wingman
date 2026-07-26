@@ -1,7 +1,7 @@
 using System.Text;
 using AgentService.Application.Contracts;
 using AgentService.Application.Models;
-using AgentService.Infrastructure.CodeGraph;
+using AgentService.Modules.GraphRAG;
 using Microsoft.Agents.AI.Workflows;
 using Microsoft.Extensions.Logging;
 
@@ -9,8 +9,7 @@ namespace AgentService.Infrastructure.Workflow;
 
 internal sealed partial class ExploreExecutor(
     IRunEventBus eventBus,
-    RepoMapService repoMapService,
-    GraphRagService graphRagService,
+    GraphRetrievalService graphRagService,
     ILogger logger) : Executor("Explore")
 {
     [MessageHandler]
@@ -36,13 +35,13 @@ internal sealed partial class ExploreExecutor(
         {
             try
             {
-                promptContext.AppendLine(await repoMapService.GenerateAsync(
+                promptContext.AppendLine(await graphRagService.GenerateRepoMapAsync(
                     request.ProjectId,
                     1024,
                     cancellationToken));
                 promptContext.AppendLine();
 
-                var knowHow = await graphRagService.QueryAsync(
+                var knowHow = await graphRagService.AnswerAsync(
                     request.ProjectId,
                     $"與以下任務相關的模組、類別與注意事項：{request.Task}",
                     cancellationToken);
@@ -106,7 +105,7 @@ internal sealed partial class PlanExecutor(
 
 internal sealed partial class ImpactExecutor(
     IRunEventBus eventBus,
-    ImpactAnalysisService impactAnalysisService,
+    GraphRetrievalService impactAnalysisService,
     ILogger logger) : Executor("Impact")
 {
     [MessageHandler]
@@ -126,18 +125,18 @@ internal sealed partial class ImpactExecutor(
         var promptContext = new StringBuilder(input.Context);
         try
         {
-            var impact = await impactAnalysisService.AnalyzeAsync(
+            var impact = await impactAnalysisService.AnalyzeImpactAsync(
                 request.ProjectId,
                 request.Task,
                 3,
                 cancellationToken);
-            if (impact.Target is not null && impact.AffectedMethods.Count > 0)
+            if (impact.Target is not null && impact.AffectedNodes.Count > 0)
             {
                 promptContext.AppendLine("# ⚠ 影響分析（修改時務必確認不破壞以下呼叫者）");
-                foreach (var method in impact.AffectedMethods.Take(15))
+                foreach (var affected in impact.AffectedNodes.Take(15))
                 {
                     promptContext.AppendLine(
-                        $"- {method.Signature ?? method.Name}（{method.FilePath}:{method.StartLine}）");
+                        $"- {affected.Node.Role}: {affected.Node.Name}（{affected.Node.FilePath}:{affected.Node.StartLine}）");
                 }
                 promptContext.AppendLine();
             }

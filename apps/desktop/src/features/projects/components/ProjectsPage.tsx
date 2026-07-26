@@ -714,10 +714,13 @@ export function ProjectsPage() {
                       <div className="rounded-2xl border border-border bg-surface p-4">
                         <p className="text-xs text-ink-subtle">分析目標</p>
                         <p className="text-sm font-mono font-medium text-ink mt-1">
-                          {impactResult.target.signature ?? impactResult.target.name}
+                          {impactResult.target.node.name}
                         </p>
                         <p className="text-xs text-ink-subtle mt-0.5">
-                          {impactResult.target.filePath}:{impactResult.target.startLine}
+                          {impactResult.target.node.role}
+                          {impactResult.target.node.filePath
+                            ? ` — ${impactResult.target.node.filePath}:${impactResult.target.node.startLine ?? '?'}`
+                            : ''}
                         </p>
                       </div>
 
@@ -728,12 +731,18 @@ export function ProjectsPage() {
                       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                         <div className="rounded-2xl border border-border bg-surface p-4">
                           <p className="text-sm font-semibold text-ink mb-2">
-                            受影響方法（{impactResult.affectedMethods.length}）
+                            受影響節點（{impactResult.affectedNodes.length}）
                           </p>
                           <div className="space-y-1 max-h-64 overflow-y-auto">
-                            {impactResult.affectedMethods.map((m) => (
-                              <p key={m.key} className="text-xs font-mono text-ink-secondary truncate">
-                                {m.name} <span className="text-ink-subtle">— {m.filePath}:{m.startLine}</span>
+                            {impactResult.affectedNodes.map((item) => (
+                              <p key={item.node.id} className="text-xs font-mono text-ink-secondary truncate">
+                                {item.node.name}{' '}
+                                <span className="text-ink-subtle">
+                                  — {item.node.role}
+                                  {item.node.filePath
+                                    ? ` ${item.node.filePath}:${item.node.startLine ?? '?'}`
+                                    : ''}
+                                </span>
                               </p>
                             ))}
                           </div>

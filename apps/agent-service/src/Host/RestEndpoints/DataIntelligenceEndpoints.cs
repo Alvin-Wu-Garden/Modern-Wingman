@@ -1,6 +1,6 @@
 using AgentService.Application.Contracts;
 using AgentService.Application.Models;
-using AgentService.Infrastructure.CodeGraph;
+using AgentService.Modules.GraphRAG;
 
 namespace AgentService.Host.RestEndpoints;
 
@@ -50,18 +50,47 @@ public static class DataIntelligenceEndpoints
         catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
     }
 
-    private static async Task<IResult> ScanStaticData(string projectId, IProjectRepository projects, ProjectIndexService indexService, CancellationToken ct)
+    private static async Task<IResult> ScanStaticData(string projectId, IProjectRepository projects, GraphIndexingService indexService, CancellationToken ct)
     {
         var project = await projects.GetAsync(projectId, ct);
         if (project is null) return Results.NotFound();
         await indexService.IndexProjectAsync(projectId, ct);
-        var result = indexService.GetLastDataScanReport(projectId)
-            ?? new DataScanReport(0, 0, [], ["資料結構掃描未產生報告。"], [], []);
+        var snapshot = indexService.GetActiveSnapshotForDiagnostics(projectId);
+        var dataNodes = snapshot?.Nodes
+            .Where(node => node.Kind == GraphNodeKind.Data)
+            .ToList() ?? [];
+        var dataEdges = snapshot?.Edges
+            .Where(edge => edge.Kind is GraphEdgeKind.Reads or GraphEdgeKind.Writes or
+                GraphEdgeKind.MapsTo or GraphEdgeKind.DependsOn)
+            .ToList() ?? [];
         return Results.Ok(new
         {
-            nodeCount = result.NodeCount, edgeCount = result.EdgeCount,
-            diagnostics = result.Diagnostics, capabilityGaps = result.CapabilityGaps,
-            scannedFiles = result.ScannedFiles, skippedFiles = result.SkippedFiles,
+            nodeCount = dataNodes.Count,
+            edgeCount = dataEdges.Count,
+            diagnostics = snapshot?.Diagnostics ??
+                (IReadOnlyList<GraphDiagnostic>)
+                [
+                    new(
+                        "DATA_SCAN_EMPTY",
+                        GraphDiagnosticSeverity.Warning,
+                        project.RootPath,
+                        "資料結構掃描未產生報告。",
+                        true),
+                ],
+            capabilityGaps = snapshot?.CapabilityGaps ?? Array.Empty<string>(),
+            scannedFiles = snapshot?.Artifacts
+                .Where(artifact => artifact.Kind is "sql" or "database")
+                .Select(artifact => artifact.Path)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToList() ?? [],
+            skippedFiles = snapshot?.Artifacts
+                .Where(artifact => !string.Equals(
+                    artifact.Status, "indexed", StringComparison.OrdinalIgnoreCase))
+                .Select(artifact => artifact.Path)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToList() ?? [],
         });
     }
 

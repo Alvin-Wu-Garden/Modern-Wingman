@@ -3,7 +3,7 @@ using AgentService.Host.DependencyInjection;
 using AgentService.Infrastructure.Persistence;
 using AgentService.Infrastructure.Providers;
 using AgentService.Infrastructure.Marketplace;
-using AgentService.Infrastructure.CodeGraph;
+using AgentService.Modules.GraphRAG;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -12,7 +12,7 @@ var builder = WebApplication.CreateBuilder(args);
 // The bundled local Neo4j password is user-scoped DPAPI data, never a committed secret.
 builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
 {
-    ["Neo4j:Password"] = LocalNeo4jCredentialStore.Resolve(builder.Configuration),
+    ["Neo4j:Password"] = GraphRagNeo4jCredentialStore.Resolve(builder.Configuration),
 });
 
 builder.Services.AddAgentServices(builder.Configuration, builder.Environment);

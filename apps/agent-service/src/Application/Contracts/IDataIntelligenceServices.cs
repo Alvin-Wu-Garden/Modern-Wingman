@@ -2,26 +2,6 @@ using AgentService.Application.Models;
 
 namespace AgentService.Application.Contracts;
 
-public interface IDataArtifactAdapter
-{
-    string Id { get; }
-    string Version { get; }
-    bool CanAnalyze(DataArtifact artifact);
-    DataExtractionResult Analyze(DataArtifact artifact);
-}
-
-/// <summary>Aggregates static data artifacts into the same canonical graph used by code analysis.</summary>
-public interface IDataSchemaExtractor
-{
-    Task<DataExtractionResult> ExtractAsync(string workspaceRoot, CancellationToken cancellationToken = default);
-
-    Task<DataExtractionResult> ExtractFilesAsync(
-        string workspaceRoot,
-        IReadOnlyList<string> files,
-        CancellationToken cancellationToken = default) =>
-        ExtractAsync(workspaceRoot, cancellationToken);
-}
-
 public interface IDomainGlossaryStore
 {
     Task<IReadOnlyList<DomainGlossaryEntry>> ListAsync(string projectId, GlossaryProposalStatus? status = null, CancellationToken cancellationToken = default);

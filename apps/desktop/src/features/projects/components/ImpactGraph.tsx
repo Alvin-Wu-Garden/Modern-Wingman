@@ -21,8 +21,8 @@ const COL_GAP = 220
 const ROW_GAP = 60
 
 /**
- * 受影響呼叫鏈視覺化（P2）— 輕量 SVG 分層佈局，無第三方相依。
- * 目標在最右，呼叫者依距離往左分層。
+ * GraphRAG V3 影響關係視覺化。V3 的修改單位是 type/file/data node，
+ * 不再假裝回傳 method call chain；depth 直接來自 bounded Local Search。
  */
 export function ImpactGraph({ result }: { result: ImpactResult }) {
   const { nodes, edges, width, height } = useMemo(() => {
@@ -30,23 +30,16 @@ export function ImpactGraph({ result }: { result: ImpactResult }) {
 
     // 距離目標的最短層數（chain 末端 = 目標）
     const depthMap = new Map<string, number>()
-    depthMap.set(result.target.key, 0)
+    depthMap.set(result.target.node.id, 0)
     const edgeSet = new Map<string, LayoutEdge>()
 
-    for (const path of result.callChains) {
-      const chain = path.chain
-      // chain: [最外層 caller, ..., target]
-      for (let i = 0; i < chain.length; i++) {
-        const depth = chain.length - 1 - i
-        const key = chain[i].key
-        const prev = depthMap.get(key)
-        if (prev === undefined || depth < prev) depthMap.set(key, depth)
-        if (i < chain.length - 1) {
-          const id = `${chain[i].key}→${chain[i + 1].key}`
-          edgeSet.set(id, { from: chain[i].key, to: chain[i + 1].key })
-        }
-      }
-    }
+    for (const item of result.affectedNodes)
+      depthMap.set(item.node.id, item.depth)
+    for (const relationship of result.relationships)
+      edgeSet.set(relationship.id, {
+        from: relationship.sourceId,
+        to: relationship.targetId,
+      })
 
     // 依層分組（限 3 層、每層 8 個，避免爆炸）
     const byDepth = new Map<number, string[]>()
@@ -59,7 +52,10 @@ export function ImpactGraph({ result }: { result: ImpactResult }) {
 
     const maxDepth = Math.max(...byDepth.keys())
     const infoMap = new Map(
-      [result.target, ...result.affectedMethods].map((n) => [n.key, n]),
+      [result.target, ...result.affectedNodes].map((item) => [
+        item.node.id,
+        item.node,
+      ]),
     )
 
     const layoutNodes: LayoutNode[] = []
@@ -147,7 +143,7 @@ export function ImpactGraph({ result }: { result: ImpactResult }) {
         ))}
       </svg>
       <p className="text-xs text-ink-subtle mt-2">
-        紅色 = 修改目標，箭頭方向 = 呼叫方向（左側呼叫者受影響）
+        紅色 = 修改目標，箭頭方向 = GraphRAG 關係方向
       </p>
     </div>
   )

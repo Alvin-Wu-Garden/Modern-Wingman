@@ -35,8 +35,6 @@ public sealed class WorkflowIntegrationTests : IDisposable
         var workflow = new ExplorePlanCodeVerifyWorkflow(
             events,
             null!,
-            null!,
-            null!,
             new VerificationService(NullLogger<VerificationService>.Instance),
             new FixedLlm(),
             executor,
@@ -160,8 +158,6 @@ public sealed class WorkflowIntegrationTests : IDisposable
         CapturingEventBus events,
         IWorkflowCodeExecutor executor) => new(
         events,
-        null!,
-        null!,
         null!,
         new VerificationService(NullLogger<VerificationService>.Instance),
         new FixedLlm(),

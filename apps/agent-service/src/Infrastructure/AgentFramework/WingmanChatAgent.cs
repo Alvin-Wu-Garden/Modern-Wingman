@@ -6,7 +6,7 @@ using AgentService.Application.Models;
 using AgentService.Domain.Models;
 using AgentService.Infrastructure.Skills;
 using AgentService.Infrastructure.ChangeIntelligence;
-using AgentService.Infrastructure.CodeGraph;
+using AgentService.Modules.GraphRAG;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
@@ -29,7 +29,7 @@ public sealed class WingmanChatAgent(
     ISkillProvider skillProvider,
     IContextAssembler contextAssembler,
     IProjectRepository projectRepository,
-    ProjectIndexService projectIndexService,
+    GraphIndexingService projectIndexService,
     IChangeBriefBuilder changeBriefBuilder,
     ProjectEvidencePlanner evidencePlanner,
     ILogger<WingmanChatAgent> logger)

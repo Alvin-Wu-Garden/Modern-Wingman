@@ -1,36 +1,4 @@
-using AgentService.Domain.Models;
-
 namespace AgentService.Application.Models;
-
-public sealed record DataArtifact(string FilePath, string RelativePath, string Content, string ContentHash);
-
-public sealed record DataExtractionDiagnostic(
-    string FilePath,
-    string AdapterId,
-    string Severity,
-    string Message);
-
-public sealed record DataArtifactScanRecord(
-    string Path,
-    string Technology,
-    string Status,
-    string? Reason,
-    string ContentHash);
-
-public sealed record DataExtractionResult(
-    CodeAnalysisResult Graph,
-    IReadOnlyList<DataExtractionDiagnostic> Diagnostics,
-    IReadOnlyList<string> CapabilityGaps,
-    IReadOnlyList<DataArtifactScanRecord>? ScannedFiles = null,
-    IReadOnlyList<DataArtifactScanRecord>? SkippedFiles = null);
-
-public sealed record DataScanReport(
-    int NodeCount,
-    int EdgeCount,
-    IReadOnlyList<DataExtractionDiagnostic> Diagnostics,
-    IReadOnlyList<string> CapabilityGaps,
-    IReadOnlyList<DataArtifactScanRecord> ScannedFiles,
-    IReadOnlyList<DataArtifactScanRecord> SkippedFiles);
 
 public enum GlossaryProposalStatus { Proposed, Confirmed, Rejected }
 

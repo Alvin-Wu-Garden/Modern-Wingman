@@ -2,7 +2,7 @@ using AgentService.Application.Contracts;
 using AgentService.Application.Models;
 using AgentService.Domain.Models;
 using AgentService.Infrastructure.ChangeIntelligence;
-using AgentService.Infrastructure.CodeGraph;
+using AgentService.Modules.GraphRAG;
 using Neo4j.Driver;
 
 namespace AgentService.Host.RestEndpoints;
@@ -295,8 +295,8 @@ public static class ProjectEndpoints
     private static async Task<IResult> DeleteProject(
         string id,
         IProjectRepository repo,
-        ICodeGraphStore graphStore,
-        ProjectIndexService indexService,
+        IGraphStore graphStore,
+        GraphIndexingService indexService,
         CancellationToken ct)
     {
         try
@@ -314,7 +314,7 @@ public static class ProjectEndpoints
 
     private static async Task<IResult> StartIndex(
         string id,
-        ProjectIndexService indexService,
+        GraphIndexingService indexService,
         IRunExecutionQueue executionQueue,
         CancellationToken ct)
     {
@@ -325,13 +325,13 @@ public static class ProjectEndpoints
     }
 
     private static async Task<IResult> IncrementalIndex(
-        string id, ProjectIndexService indexService, CancellationToken ct)
+        string id, GraphIndexingService indexService, CancellationToken ct)
     {
         var project = await indexService.IncrementalIndexAsync(id, ct);
         return Results.Ok(new { changed = project is not null, project });
     }
 
-    private static IResult GetProgress(string id, ProjectIndexService indexService)
+    private static IResult GetProgress(string id, GraphIndexingService indexService)
     {
         var progress = indexService.GetProgress(id);
         return progress is null
@@ -341,8 +341,8 @@ public static class ProjectEndpoints
 
     private static async Task<IResult> BuildSummaries(
         string id,
-        GraphRagService graphRag,
-        Neo4jLifecycleService neo4jLifecycle,
+        GraphRetrievalService graphRag,
+        INeo4jRuntime neo4jLifecycle,
         IRunExecutionQueue executionQueue,
         CancellationToken ct)
     {
@@ -356,7 +356,7 @@ public static class ProjectEndpoints
         return Results.Accepted($"/api/projects/{id}/summaries/progress");
     }
 
-    private static IResult GetSummaryProgress(string id, GraphRagService graphRag) =>
+    private static IResult GetSummaryProgress(string id, GraphRetrievalService graphRag) =>
         Results.Ok(graphRag.GetEnrichmentStatus(id));
 
     private static async Task<IResult> Query(
@@ -365,12 +365,12 @@ public static class ProjectEndpoints
         IProjectRepository projects,
         IContextAssembler contextAssembler,
         IRunRepository runs,
-        GraphRagService graphRag,
+        GraphRetrievalService graphRag,
         IChangeAnalysisSessionService sessionService,
         IChangeImplementationPlanBuilder implementationPlanBuilder,
         ProjectEvidencePlanner evidencePlanner,
-        ProjectIndexService indexService,
-        Neo4jLifecycleService neo4jLifecycle,
+        GraphIndexingService indexService,
+        INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
         var project=await projects.GetAsync(id,ct);if(project is null)return Results.NotFound();
@@ -417,19 +417,19 @@ public static class ProjectEndpoints
                 + FormatPlanForPrompt(implementationPlan);
             var answer = request.Mode?.ToLowerInvariant() switch
             {
-                "global" => await graphRag.GlobalSearchAsync(
+                "global" => await graphRag.AnswerGlobalAsync(
                     id,
                     question,
                     ct,
                     providerProfileId: request.ProviderProfileId,
                     modelId: request.ModelId),
-                "local" => await graphRag.LocalSearchAsync(
+                "local" => await graphRag.AnswerLocalAsync(
                     id,
                     question,
                     ct,
                     providerProfileId: request.ProviderProfileId,
                     modelId: request.ModelId),
-                _ => await graphRag.QueryAsync(
+                _ => await graphRag.AnswerAsync(
                     id,
                     question,
                     ct,
@@ -484,35 +484,35 @@ public static class ProjectEndpoints
     private static async Task<IResult> Impact(
         string id,
         ImpactRequest request,
-        ImpactAnalysisService impactService,
-        Neo4jLifecycleService neo4jLifecycle,
+        GraphRetrievalService impactService,
+        INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
         if (!await EnsureGraphAvailableAsync(neo4jLifecycle, ct))
             return GraphUnavailable(neo4jLifecycle);
 
-        var result = await impactService.AnalyzeAsync(id, request.Symbol, request.MaxDepth ?? 3, ct);
+        var result = await impactService.AnalyzeImpactAsync(id, request.Symbol, request.MaxDepth ?? 3, ct);
         return Results.Ok(result);
     }
 
     private static async Task<IResult> GetRepoMap(
         string id,
-        RepoMapService repoMapService,
-        Neo4jLifecycleService neo4jLifecycle,
+        GraphRetrievalService repoMapService,
+        INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
         if (!await EnsureGraphAvailableAsync(neo4jLifecycle, ct))
             return GraphUnavailable(neo4jLifecycle);
 
-        var map = await repoMapService.GenerateAsync(id, 1024, ct);
+        var map = await repoMapService.GenerateRepoMapAsync(id, 1024, ct);
         return Results.Ok(new { map });
     }
 
     private static async Task<IResult> GetGraphSchema(
         string id,
         IProjectRepository repo,
-        ICodeGraphStore graphStore,
-        Neo4jLifecycleService neo4jLifecycle,
+        IGraphStore graphStore,
+        INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
         var readiness = await EnsureProjectGraphReadyAsync(id, repo, neo4jLifecycle, ct);
@@ -534,8 +534,8 @@ public static class ProjectEndpoints
         string? kinds,
         string? relations,
         IProjectRepository repo,
-        ICodeGraphStore graphStore,
-        Neo4jLifecycleService neo4jLifecycle,
+        IGraphStore graphStore,
+        INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
         var readiness = await EnsureProjectGraphReadyAsync(id, repo, neo4jLifecycle, ct);
@@ -561,8 +561,8 @@ public static class ProjectEndpoints
         string id,
         GraphQueryRequest request,
         IProjectRepository repo,
-        ICodeGraphStore graphStore,
-        Neo4jLifecycleService neo4jLifecycle,
+        IGraphStore graphStore,
+        INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
         var readiness = await EnsureProjectGraphReadyAsync(id, repo, neo4jLifecycle, ct);
@@ -594,8 +594,8 @@ public static class ProjectEndpoints
         string id,
         GraphNeighborsRequest request,
         IProjectRepository repo,
-        ICodeGraphStore graphStore,
-        Neo4jLifecycleService neo4jLifecycle,
+        IGraphStore graphStore,
+        INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
         var readiness = await EnsureProjectGraphReadyAsync(id, repo, neo4jLifecycle, ct);
@@ -618,24 +618,24 @@ public static class ProjectEndpoints
     }
 
     private static async Task<IResult> GenerateAgentsMd(
-        string id, IProjectRepository repo, AgentsMdGenerator generator, CancellationToken ct)
+        string id, IProjectRepository repo, GraphRetrievalService generator, CancellationToken ct)
     {
         var project = await repo.GetAsync(id, ct);
         if (project is null)
             return Results.NotFound();
-        var content = await generator.GenerateAsync(id, project.RootPath, ct);
+        var content = await generator.GenerateAgentsMdAsync(id, project.RootPath, ct);
         return Results.Ok(new { content });
     }
 
     private static async Task<bool> EnsureGraphAvailableAsync(
-        Neo4jLifecycleService neo4jLifecycle,
+        INeo4jRuntime neo4jLifecycle,
         CancellationToken ct) =>
         await neo4jLifecycle.EnsureAvailableAsync(null, ct);
 
     private static async Task<IResult?> EnsureProjectGraphReadyAsync(
         string id,
         IProjectRepository repo,
-        Neo4jLifecycleService neo4jLifecycle,
+        INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
         var project = await repo.GetAsync(id, ct);
@@ -660,7 +660,7 @@ public static class ProjectEndpoints
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-    private static IResult GraphUnavailable(Neo4jLifecycleService neo4jLifecycle) =>
+    private static IResult GraphUnavailable(INeo4jRuntime neo4jLifecycle) =>
         Results.Json(
             new
             {
