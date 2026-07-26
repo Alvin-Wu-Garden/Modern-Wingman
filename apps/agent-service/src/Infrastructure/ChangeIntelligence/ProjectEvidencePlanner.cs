@@ -4,16 +4,18 @@ using AgentService.Application.Contracts;
 using AgentService.Application.Models;
 using AgentService.Domain.Models;
 using AgentService.Infrastructure.ChangeIntelligence.DataIntelligence;
+using AgentService.Modules.GraphRAG;
+using V3GraphConfidence = AgentService.Modules.GraphRAG.GraphConfidence;
 
 namespace AgentService.Infrastructure.ChangeIntelligence;
 
 /// <summary>
-/// 將既有 Code Graph 查詢收斂成有界、可追溯的 Evidence Pack。
+/// 將 GraphRAG V3 檢索結果收斂成有界、可追溯的 Evidence Pack。
 /// 這是 P2 的 deterministic data plane；LLM 只能根據回傳 evidence 作解釋，
 /// 不負責猜測哪一個圖譜工具應被使用。
 /// </summary>
 public sealed class ProjectEvidencePlanner(
-    ICodeGraphStore graph,
+    GraphRetrievalService graph,
     IEvidencePackBuilder packBuilder,
     ProjectDataEvidencePlanner dataEvidencePlanner,
     ISensitiveDataRedactor redactor)
@@ -26,6 +28,8 @@ public sealed class ProjectEvidencePlanner(
         var evidence = new List<EvidenceItem>();
         var paths = new List<EvidencePath>();
         var seenNodes = new HashSet<string>(StringComparer.Ordinal);
+        var seenEdges = new HashSet<string>(StringComparer.Ordinal);
+        var graphEvidenceCount = 0;
 
         foreach (var target in brief.Targets.Where(target =>
                      target.Kind is ChangeTargetKind.GitDiff or ChangeTargetKind.ErrorLog))
@@ -54,64 +58,39 @@ public sealed class ProjectEvidencePlanner(
 
         foreach (var query in queries)
         {
-            var hits = await graph.SearchAsync(project.Id, query, 8, ct);
-            foreach (var hit in hits)
+            var context = await graph.LocalSearchAsync(project.Id, query, ct);
+            foreach (var hit in context.Nodes)
             {
-                if (!seenNodes.Add(hit.Key))
+                if (!seenNodes.Add(hit.Node.Id))
                     continue;
 
-                evidence.Add(await ToEvidenceAsync(project.RootPath, hit, relevance: Score(hit, query), ct));
-                var neighborhood = await graph.GetNeighborhoodAsync(project.Id, hit.Key, 1, ct);
-                foreach (var neighbor in neighborhood.Neighbors.Take(12))
-                {
-                    var id = $"node:{neighbor.Key}";
-                    evidence.Add(new EvidenceItem(
-                        id,
-                        neighbor.Kind,
-                        $"{neighbor.Direction switch { "in" => "使用／呼叫端", _ => "相依／被呼叫端" }}：{neighbor.Name}",
-                        ToEvidenceConfidence(neighbor.Confidence),
-                        EvidenceSource(neighbor.SourceKind, neighbor.ExtractorId),
-                        neighbor.FilePath,
-                        neighbor.StartLine,
-                        neighbor.EndLine,
-                        Symbol: neighbor.Key,
-                        Relation: neighbor.RelationKind,
-                        Excerpt: await ReadExcerptAsync(
-                            project.RootPath, neighbor.FilePath, neighbor.StartLine, neighbor.EndLine, ct),
-                        Reason: neighbor.Reason,
-                        Relevance: 50));
-                }
+                evidence.Add(await ToEvidenceAsync(
+                    project.RootPath,
+                    hit,
+                    relevance: Score(hit, query),
+                    ct));
+                graphEvidenceCount++;
+            }
 
-                if (brief.Classification.AnalysisMode is ChangeAnalysisMode.ImpactAnalysis or ChangeAnalysisMode.ImplementationPlanning)
-                {
-                    var chains = await graph.GetReverseCallChainAsync(project.Id, hit.Key, 3, ct);
-                    foreach (var chain in chains.Take(20))
-                    {
-                        var ids = chain.Chain.Select(node => $"node:{node.Key}").ToList();
-                        paths.Add(new EvidencePath(
-                            "reverse-call",
-                            ids,
-                            ToEvidenceConfidence(chain.Confidence),
-                            chain.Truncated || chains.Count > 20));
-                        foreach (var node in chain.Chain)
-                        {
-                            if (seenNodes.Add(node.Key))
-                                evidence.Add(await ToEvidenceAsync(project.RootPath, node, relevance: 80, ct));
-                        }
-                    }
-                }
+            foreach (var edge in context.Edges.Where(edge => seenEdges.Add(edge.Id)).Take(40))
+            {
+                var confidence = StrongestConfidence(edge.Evidence);
+                paths.Add(new EvidencePath(
+                    edge.Kind.ToString(),
+                    [$"node:{edge.SourceId}", $"node:{edge.TargetId}"],
+                    ToEvidenceConfidence(confidence),
+                    context.Diagnostics.Count > 0));
             }
         }
 
-        var codeEvidenceCount = evidence.Count;
         var dataEvidence = await dataEvidencePlanner.BuildAsync(brief, ct);
         evidence.AddRange(dataEvidence.Items);
 
         var gaps = new List<string>(dataEvidence.CapabilityGaps);
         if (queries.Count == 0)
             gaps.Add("未提供可用的程式碼目標；目前只能依自然語言建立初步假設。");
-        if (codeEvidenceCount == 0)
-            gaps.Add("Code Graph 未找到可驗證的相符實體；可能需要重新索引或補充檔案、Symbol、Route 或錯誤 log。");
+        if (graphEvidenceCount == 0)
+            gaps.Add("GraphRAG V3 未找到可驗證的相符實體；可能需要重新索引或補充功能名稱、檔案、類型、Route 或錯誤 log。");
         if (brief.Classification.AnalysisMode == ChangeAnalysisMode.ImpactAnalysis)
             gaps.Add("目前影響分析主要根據靜態程式呼叫關係；資料庫、即時設定與外部系統證據需由對應 capability 提供。");
 
@@ -155,21 +134,27 @@ public sealed class ProjectEvidencePlanner(
 
     private async Task<EvidenceItem> ToEvidenceAsync(
         string rootPath,
-        GraphSearchHit hit,
+        ScoredGraphNode hit,
         int relevance,
-        CancellationToken ct) => new(
-            $"node:{hit.Key}",
-            hit.Kind,
-            hit.Signature ?? hit.Name,
-            ToEvidenceConfidence(hit.Confidence),
-            EvidenceSource(hit.SourceKind, hit.ExtractorId),
-            hit.FilePath,
-            hit.StartLine,
-            hit.EndLine,
-            Symbol: hit.Key,
-            Excerpt: await ReadExcerptAsync(rootPath, hit.FilePath, hit.StartLine, hit.EndLine, ct),
-            Reason: hit.Reason,
+        CancellationToken ct)
+    {
+        var node = hit.Node;
+        var strongest = StrongestEvidence(node.Evidence);
+        return new(
+            $"node:{node.Id}",
+            node.Kind.ToString(),
+            $"{node.Role}：{node.Name}",
+            ToEvidenceConfidence(strongest?.Confidence ?? V3GraphConfidence.Inferred),
+            strongest is null ? "GraphRAGV3" : EvidenceSource(strongest.Source),
+            node.FilePath,
+            node.StartLine,
+            node.EndLine,
+            Symbol: node.Id,
+            Excerpt: await ReadExcerptAsync(
+                rootPath, node.FilePath, node.StartLine, node.EndLine, ct),
+            Reason: strongest?.Reason ?? "由 GraphRAG V3 關聯檢索取得。",
             Relevance: relevance);
+    }
 
     private async Task<string?> ReadExcerptAsync(
         string rootPath,
@@ -221,23 +206,38 @@ public sealed class ProjectEvidencePlanner(
     private static string Hash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant()[..16];
 
-    private static EvidenceConfidence ToEvidenceConfidence(GraphConfidence confidence) => confidence switch
+    private static EvidenceConfidence ToEvidenceConfidence(V3GraphConfidence confidence) => confidence switch
     {
-        GraphConfidence.Confirmed => EvidenceConfidence.Confirmed,
-        GraphConfidence.Exact => EvidenceConfidence.Exact,
-        GraphConfidence.Resolved => EvidenceConfidence.Resolved,
-        GraphConfidence.Heuristic => EvidenceConfidence.Heuristic,
-        GraphConfidence.Inferred => EvidenceConfidence.Inferred,
+        V3GraphConfidence.Exact => EvidenceConfidence.Exact,
+        V3GraphConfidence.Resolved => EvidenceConfidence.Resolved,
+        V3GraphConfidence.Heuristic => EvidenceConfidence.Heuristic,
+        V3GraphConfidence.Inferred => EvidenceConfidence.Inferred,
         _ => EvidenceConfidence.Inferred,
     };
 
-    private static string EvidenceSource(GraphSourceKind sourceKind, string? extractorId) =>
-        string.IsNullOrWhiteSpace(extractorId)
-            ? sourceKind.ToString()
-            : $"{sourceKind}:{extractorId}";
+    private static string EvidenceSource(GraphEvidenceSource source) =>
+        $"GraphRAGV3:{source}";
 
-    private static int Score(GraphSearchHit hit, string query) =>
-        hit.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ? 100 : 70;
+    private static int Score(ScoredGraphNode hit, string query) =>
+        hit.Node.Name.Contains(query, StringComparison.OrdinalIgnoreCase)
+            ? 100
+            : Math.Clamp((int)Math.Round(hit.Score * 10), 50, 95);
+
+    private static GraphEvidence? StrongestEvidence(
+        IReadOnlyList<GraphEvidence> evidence) =>
+        evidence.OrderBy(item => ConfidenceRank(item.Confidence)).FirstOrDefault();
+
+    private static V3GraphConfidence StrongestConfidence(
+        IReadOnlyList<GraphEvidence> evidence) =>
+        StrongestEvidence(evidence)?.Confidence ?? V3GraphConfidence.Inferred;
+
+    private static int ConfidenceRank(V3GraphConfidence confidence) => confidence switch
+    {
+        V3GraphConfidence.Exact => 0,
+        V3GraphConfidence.Resolved => 1,
+        V3GraphConfidence.Heuristic => 2,
+        _ => 3,
+    };
 
     private static IReadOnlyList<string> ExtractSearchTerms(string text) =>
         text.Split([' ', '\t', '\r', '\n', '，', '。', '？', '?', '、'], StringSplitOptions.RemoveEmptyEntries)

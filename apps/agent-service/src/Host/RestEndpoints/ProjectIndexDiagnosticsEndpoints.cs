@@ -1,5 +1,5 @@
 using AgentService.Application.Contracts;
-using AgentService.Infrastructure.CodeGraph;
+using AgentService.Modules.GraphRAG;
 
 namespace AgentService.Host.RestEndpoints;
 
@@ -18,7 +18,7 @@ public static class ProjectIndexDiagnosticsEndpoints
     private static async Task<IResult> GetRun(
         string id,
         IProjectRepository projects,
-        ProjectIndexService indexService,
+        GraphIndexingService indexService,
         CancellationToken ct)
     {
         if (await projects.GetAsync(id, ct) is null)
@@ -31,7 +31,7 @@ public static class ProjectIndexDiagnosticsEndpoints
     private static async Task<IResult> GetDiagnostics(
         string id,
         IProjectRepository projects,
-        ProjectIndexService indexService,
+        GraphIndexingService indexService,
         CancellationToken ct)
     {
         if (await projects.GetAsync(id, ct) is null)
@@ -42,7 +42,7 @@ public static class ProjectIndexDiagnosticsEndpoints
     private static async Task<IResult> CatchUp(
         string id,
         IProjectRepository projects,
-        ProjectIndexService indexService,
+        GraphIndexingService indexService,
         CancellationToken ct)
     {
         if (await projects.GetAsync(id, ct) is null)

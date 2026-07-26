@@ -42,7 +42,7 @@ function Get-AvailableDesktopPort {
         [int]$StartPort,
 
         [ValidateRange(1, 1000)]
-        [int]$PortsToTry = 100
+        [int]$PortsToTry = 1000
     )
 
     $lastPort = [Math]::Min($StartPort + $PortsToTry - 1, 65534)
@@ -53,7 +53,14 @@ function Get-AvailableDesktopPort {
         }
     }
 
-    throw "No available desktop development port was found between $StartPort and $lastPort."
+    throw "No bindable desktop development port was found between $StartPort and $lastPort. The ports may be in use or reserved by Windows."
+}
+
+$desktopPort = $null
+if (-not $AgentOnly) {
+    # Windows can reserve large consecutive port ranges (for example through
+    # Hyper-V/WSL). Resolve the desktop port before starting any child process.
+    $desktopPort = Get-AvailableDesktopPort -StartPort $PreferredDesktopPort
 }
 
 if (-not $DesktopOnly) {
@@ -65,7 +72,6 @@ if (-not $DesktopOnly) {
 }
 
 if (-not $AgentOnly) {
-    $desktopPort = Get-AvailableDesktopPort -StartPort $PreferredDesktopPort
     $desktopPath = Join-Path $root "apps\desktop"
     $tauriDevUrl = "http://127.0.0.1:$desktopPort"
     $tauriConfig = @{ build = @{ devUrl = $tauriDevUrl } } | ConvertTo-Json -Compress

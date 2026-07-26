@@ -1,6 +1,6 @@
 using AgentService.Application.Contracts;
-using AgentService.Infrastructure.CodeGraph;
 using AgentService.Domain.Models;
+using AgentService.Modules.GraphRAG;
 using Microsoft.Agents.AI.Workflows;
 using Microsoft.Extensions.Logging;
 using WingmanAgentMode = AgentService.Domain.Models.AgentMode;
@@ -24,9 +24,7 @@ public sealed record WorkflowRunRequest(
 /// </summary>
 public sealed class ExplorePlanCodeVerifyWorkflow(
     IRunEventBus eventBus,
-    RepoMapService repoMapService,
-    GraphRagService graphRagService,
-    ImpactAnalysisService impactAnalysisService,
+    GraphRetrievalService graphRagService,
     VerificationService verificationService,
     ILlmCompletionService llm,
     IWorkflowCodeExecutor codeExecutor,
@@ -83,9 +81,9 @@ public sealed class ExplorePlanCodeVerifyWorkflow(
     {
         // Executors are intentionally created per invocation. This is the default
         // isolation pattern recommended by MAF and avoids cross-run mutable state.
-        var explore = new ExploreExecutor(eventBus, repoMapService, graphRagService, logger);
+        var explore = new ExploreExecutor(eventBus, graphRagService, logger);
         var plan = new PlanExecutor(eventBus, llm);
-        var impact = new ImpactExecutor(eventBus, impactAnalysisService, logger);
+        var impact = new ImpactExecutor(eventBus, graphRagService, logger);
         var code = new CodeExecutor(eventBus, codeExecutor, changeSetService, runSteps);
         var verify = new VerifyExecutor(eventBus, verificationService, logger);
         var result = new WorkflowResultExecutor();
