@@ -3,12 +3,13 @@ using AgentService.Domain.Models;
 using AgentService.Infrastructure.Providers;
 using AgentService.Infrastructure.Skills;
 using GitHub.Copilot;
+using GitHub.Copilot.Rpc;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.Logging;
-using AgentService.Infrastructure.Orchestration;
-using AgentService.Infrastructure.AgentFramework.Plugins;
 
 namespace AgentService.Infrastructure.AgentFramework;
+
+#pragma warning disable GHCP001 // SDK 的權限決策 API 是拒絕內建工具所需的正式掛點。
 
 /// <summary>
 /// CopilotDefault 路徑：GitHub Copilot SDK → MAF AsAIAgent()。
@@ -17,9 +18,6 @@ namespace AgentService.Infrastructure.AgentFramework;
 public sealed class CopilotAgentFactory(
     CopilotClientService copilotClientService,
     ISkillProvider skillProvider,
-    IToolRegistry toolRegistry,
-    MafPluginRuntimeAdapter pluginRuntime,
-    CopilotPermissionHandlerFactory permissionHandlerFactory,
     ILogger<CopilotAgentFactory> logger) : IAgentFactory
 {
     public ProviderKind Kind => ProviderKind.CopilotDefault;
@@ -30,16 +28,14 @@ public sealed class CopilotAgentFactory(
         {
             Streaming = true,
             Model = context.ModelOverride ?? context.Profile.ModelId,
-            OnPermissionRequest = permissionHandlerFactory.Create(
-                context.Mode,
-                context.WorkspacePath,
-                context.RunId),
-            Tools = [.. WingmanToolAdapter.CreateTools(toolRegistry, context)],
+            // Modern Wingman 的一般對話不執行檔案、Shell、MCP 或其他外部動作。
+            OnPermissionRequest = (_, _) => Task.FromResult(
+                PermissionDecision.Reject("Modern Wingman 對話模式不允許執行工具。")),
             SystemMessage = new SystemMessageConfig
             {
                 Mode = SystemMessageMode.Append,
                 // Skills 清單以 progressive disclosure 附加於指示之後
-                Content = "\n" + context.Instructions + context.SkillsPrompt + pluginRuntime.BuildContextPrompt(),
+                Content = "\n" + context.Instructions + context.SkillsPrompt,
             },
         };
 
@@ -54,3 +50,5 @@ public sealed class CopilotAgentFactory(
         return agent;
     }
 }
+
+#pragma warning restore GHCP001

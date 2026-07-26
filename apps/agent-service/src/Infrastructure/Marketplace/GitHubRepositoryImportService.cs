@@ -14,8 +14,7 @@ public sealed class GitHubRepositoryImportService(
     IProviderSettingStore providerSettings,
     IOptions<AgentServiceOptions> options,
     MarketplaceRegistryPathResolver paths,
-    IMarketplaceArtifactService artifacts,
-    IMarketplaceActivityRecorder? activity = null) : IGitHubRepositoryImportService
+    IMarketplaceArtifactService artifacts) : IGitHubRepositoryImportService
 {
     public async Task<GitHubRepositoryImportResult> ImportAsync(string repositoryUrl, string? reference, CancellationToken cancellationToken = default)
     {
@@ -40,11 +39,7 @@ public sealed class GitHubRepositoryImportService(
             }
             var canonicalUrl = $"https://github.com/{owner}/{repository}";
             var import = await artifacts.ImportArchiveAsync(archive, $"{canonicalUrl}@{commit.Sha}", cancellationToken);
-            var result = new GitHubRepositoryImportResult(canonicalUrl, requestedRef, commit.Sha, import);
-            if (activity is not null)
-                await activity.RecordAsync(new(Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"), "github-import", "Completed", null, null,
-                    $"repository={canonicalUrl};ref={requestedRef};sha={commit.Sha};artifacts={import.Artifacts.Count}", DateTimeOffset.UtcNow), cancellationToken);
-            return result;
+            return new GitHubRepositoryImportResult(canonicalUrl, requestedRef, commit.Sha, import);
         }
         finally { if (File.Exists(archive)) File.Delete(archive); }
     }

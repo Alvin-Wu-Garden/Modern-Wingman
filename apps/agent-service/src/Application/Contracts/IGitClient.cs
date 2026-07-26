@@ -1,13 +1,15 @@
-namespace AgentService.Application.Contracts;
-
 using AgentService.Application.Models;
+
+namespace AgentService.Application.Contracts;
 
 public sealed record GitCommandResult(
     bool Success,
     string Output,
-    string? Error = null,
-    string? CommitId = null);
+    string? Error = null);
 
+/// <summary>
+/// 專案匯入所需的最小 Git 能力；刻意不提供 branch、commit、push 或 worktree 寫入操作。
+/// </summary>
 public interface IGitClient
 {
     Task<GitCommandResult> TestConnectionAsync(
@@ -28,54 +30,12 @@ public interface IGitClient
         CancellationToken ct = default,
         Func<ProcessOutputLine, CancellationToken, ValueTask>? onOutput = null);
 
-    Task<GitCommandResult> CreateWorktreeAsync(
-        string repositoryPath,
-        string worktreePath,
-        string branchName,
-        string startPoint,
-        CancellationToken ct = default);
-
-    Task<GitCommandResult> FetchAsync(
+    Task<GitCommandResult> UpdateAsync(
         string profileId,
         string repositoryPath,
-        string remote,
-        CancellationToken ct = default);
-
-    Task<GitCommandResult> PullAsync(
-        string profileId,
-        string repositoryPath,
-        string remote,
-        string branch,
-        CancellationToken ct = default);
-
-    Task<GitCommandResult> SwitchAsync(
-        string repositoryPath,
-        string branch,
-        bool create,
-        string? startPoint,
         CancellationToken ct = default);
 
     Task<GitCommandResult> StatusAsync(
         string repositoryPath,
-        CancellationToken ct = default);
-
-    Task<GitCommandResult> DiffAsync(
-        string repositoryPath,
-        bool staged,
-        CancellationToken ct = default);
-
-    Task<GitCommandResult> BranchesAsync(string repositoryPath,CancellationToken ct=default);
-
-    Task<GitCommandResult> CommitAsync(
-        string profileId,
-        string repositoryPath,
-        string message,
-        CancellationToken ct = default);
-
-    Task<GitCommandResult> PushAsync(
-        string profileId,
-        string repositoryPath,
-        string remote,
-        string branch,
         CancellationToken ct = default);
 }

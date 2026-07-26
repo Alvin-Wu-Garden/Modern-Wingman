@@ -41,9 +41,4 @@ public interface IProviderSettingStore
     /// <summary>批次更新排序（傳入 profileId → sortOrder 的對應）。</summary>
     Task ReorderAsync(IReadOnlyList<(string ProfileId, int SortOrder)> order, CancellationToken ct = default);
 
-    /// <summary>
-    /// 確保所有 appsettings.json 中的 profile 在 DB 都有一筆設定記錄（首次啟動初始化）。
-    /// 已存在的記錄不覆蓋。
-    /// </summary>
-    Task EnsureSeedAsync(IReadOnlyList<string> profileIds, CancellationToken ct = default);
 }

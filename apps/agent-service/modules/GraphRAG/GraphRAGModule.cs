@@ -44,6 +44,7 @@ public static class GraphRagModule
         services.AddSingleton<JavaGraphExtractor>();
         services.AddSingleton<FrontendGraphExtractor>();
         services.AddSingleton<SqlServerGraphExtractor>();
+        services.AddSingleton<ProjectGraphDatabaseExtractor>();
         services.AddSingleton<IGraphExtractor>(
             provider => provider.GetRequiredService<CSharpGraphExtractor>());
         services.AddSingleton<IGraphExtractor>(
@@ -59,7 +60,7 @@ public static class GraphRagModule
             provider => provider.GetRequiredService<Neo4jRuntime>());
         services.AddSingleton<
             IGraphDatabaseSourceProvider,
-            EnvironmentGraphDatabaseSourceProvider>();
+            ProjectGraphDatabaseSourceProvider>();
         services.AddSingleton<GraphIndexingService>();
         services.AddSingleton<GraphRetrievalService>();
         services.AddHostedService<GraphIndexWatcherService>();

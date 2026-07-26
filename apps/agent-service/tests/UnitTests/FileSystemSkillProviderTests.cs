@@ -92,34 +92,6 @@ public sealed class FileSystemSkillProviderTests : IDisposable
     }
 
     [Fact]
-    public async Task ReadSkillContent_ReturnsFullText()
-    {
-        WriteSkill("my-skill", "---\ndescription: x\n---\nFull body here");
-        var provider = CreateProvider();
-
-        var content = await provider.ReadSkillContentAsync("my-skill");
-        Assert.NotNull(content);
-        Assert.Contains("Full body here", content);
-    }
-
-    [Fact]
-    public async Task ReadSkillContent_IsCaseInsensitive()
-    {
-        WriteSkill("My-Skill", "content");
-        var provider = CreateProvider();
-
-        var content = await provider.ReadSkillContentAsync("my-skill");
-        Assert.NotNull(content);
-    }
-
-    [Fact]
-    public async Task ReadSkillContent_UnknownName_ReturnsNull()
-    {
-        var provider = CreateProvider();
-        Assert.Null(await provider.ReadSkillContentAsync("does-not-exist"));
-    }
-
-    [Fact]
     public void Refresh_PicksUpNewSkills()
     {
         var provider = CreateProvider();

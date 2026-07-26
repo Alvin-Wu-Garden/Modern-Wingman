@@ -354,14 +354,9 @@ public sealed class GraphRetrievalServiceV3Tests
         Assert.Equal(4, llm.Calls.Count);
         Assert.Equal(
             3,
-            llm.Calls.Count(call =>
-                call.Context?.FeatureArea == "project_qa_global_map_v3"));
-        Assert.Equal(
-            "project_qa_global_reduce_v3",
-            llm.Calls[^1].Context?.FeatureArea);
-        Assert.All(llm.Calls, call =>
-            Assert.Equal("project", call.Context?.ProjectId));
-        Assert.Contains("Map 結果", llm.Calls[^1].Prompt);
+            llm.Calls.Count(prompt => prompt.Contains("map worker", StringComparison.Ordinal)));
+        Assert.Contains("reduce worker", llm.Calls[^1]);
+        Assert.Contains("Map 結果", llm.Calls[^1]);
     }
 
     [Theory]
@@ -542,21 +537,15 @@ public sealed class GraphRetrievalServiceV3Tests
 
     private sealed class RecordingLlm : ILlmCompletionService
     {
-        internal List<(string Prompt, LlmTelemetryContext? Context)> Calls { get; } = [];
+        internal List<string> Calls { get; } = [];
 
         public Task<string> CompleteAsync(
             string prompt,
-            CancellationToken ct = default) =>
-            CompleteAsync(prompt, null, ct);
-
-        public Task<string> CompleteAsync(
-            string prompt,
-            LlmTelemetryContext? telemetryContext,
             CancellationToken ct = default)
         {
-            Calls.Add((prompt, telemetryContext));
+            Calls.Add(prompt);
             return Task.FromResult(
-                telemetryContext?.FeatureArea == "project_qa_global_reduce_v3"
+                prompt.Contains("reduce worker", StringComparison.Ordinal)
                     ? "reduce-result"
                     : $"map-result-{Calls.Count}");
         }
@@ -566,14 +555,6 @@ public sealed class GraphRetrievalServiceV3Tests
             string? providerProfileId,
             string? modelId,
             CancellationToken ct = default) =>
-            CompleteAsync(prompt, null, ct);
-
-        public Task<string> CompleteAsync(
-            string prompt,
-            string? providerProfileId,
-            string? modelId,
-            LlmTelemetryContext? telemetryContext,
-            CancellationToken ct = default) =>
-            CompleteAsync(prompt, telemetryContext, ct);
+            CompleteAsync(prompt, ct);
     }
 }

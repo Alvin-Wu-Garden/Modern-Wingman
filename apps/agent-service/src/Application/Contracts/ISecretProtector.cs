@@ -7,8 +7,3 @@ public interface ISecretProtector
     ProtectedSecret Protect(string plaintext);
     string Unprotect(string value, string scheme);
 }
-
-public interface IVcsCredentialProtectionMigration
-{
-    Task<int> MigrateAsync(CancellationToken ct = default);
-}

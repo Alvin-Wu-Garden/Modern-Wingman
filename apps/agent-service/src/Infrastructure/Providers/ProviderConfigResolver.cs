@@ -3,7 +3,6 @@ using AgentService.Domain.Models;
 using GitHub.Copilot;
 using Microsoft.Extensions.Logging;
 using AgentService.Infrastructure.Orchestration;
-using WingmanAgentMode = AgentService.Domain.Models.AgentMode;
 
 namespace AgentService.Infrastructure.Providers;
 
@@ -31,50 +30,23 @@ public sealed class ProviderConfigResolver
     }
 
     /// <summary>
-    /// 根據 profile 建構 SessionConfig，包含 BYOK ProviderConfig、
-    /// 工作區 system prompt 注入、對話歷史注入以及 streaming 設定。
+    /// 根據 profile 建構一次性模型呼叫所需的 SessionConfig。
+    /// Modern Wingman 不把工作區路徑交給模型，專案內容一律由 GraphRAG 提供。
     /// </summary>
     public async Task<SessionConfig> BuildSessionConfigAsync(
         ModelProviderProfile profile,
-        string? workspacePath,
-        string? conversationHistoryText = null,
         string? modelOverride = null,
-        WingmanAgentMode mode = WingmanAgentMode.Ask,
-        string? runId = null,
         CancellationToken ct = default)
     {
         var config = new SessionConfig
         {
             Streaming = true,
-            OnPermissionRequest = _permissionHandlerFactory.Create(mode, workspacePath, runId),
+            OnPermissionRequest = _permissionHandlerFactory.Create(),
         };
 
         var modelId = string.IsNullOrWhiteSpace(modelOverride) ? profile.ModelId : modelOverride;
         if (modelId is not null)
             config.Model = modelId;
-
-        var extraContent = new System.Text.StringBuilder();
-
-        if (!string.IsNullOrWhiteSpace(workspacePath))
-        {
-            extraContent.AppendLine($"""
-                <workspace>
-                  <path>{workspacePath}</path>
-                </workspace>
-                """);
-        }
-
-        if (!string.IsNullOrWhiteSpace(conversationHistoryText))
-            extraContent.Append(conversationHistoryText);
-
-        if (extraContent.Length > 0)
-        {
-            config.SystemMessage = new SystemMessageConfig
-            {
-                Mode = SystemMessageMode.Append,
-                Content = "\n" + extraContent.ToString(),
-            };
-        }
 
         if (profile.Kind == ProviderKind.CopilotByok)
             config.Provider = await BuildProviderConfigAsync(profile, ct);

@@ -94,6 +94,8 @@ public interface IMarketplaceArtifactService
 public interface IAgentTargetAdapter
 {
     MarketplaceTargetDescriptor Descriptor { get; }
+    /// <summary>JSON MCP 設定中保存 server map 的根屬性。</summary>
+    string McpRootProperty { get; }
     string ResolveSkillDirectory(MarketplaceDeploymentScope scope, string? projectPath);
     string ResolveMcpConfigPath(MarketplaceDeploymentScope scope, string? projectPath);
 }
@@ -128,64 +130,6 @@ public interface IMarketplaceMcpDeploymentService
     Task<MarketplaceDeploymentBatchResult> ConfigureAsync(IReadOnlyList<MarketplaceDeploymentRequest> requests, CancellationToken cancellationToken = default);
     Task<MarketplaceDeploymentBatchResult> RemoveFromAllManagedTargetsAsync(string artifactId, CancellationToken cancellationToken = default);
     Task<MarketplaceDeploymentPlan> PreviewAsync(IReadOnlyList<MarketplaceDeploymentRequest> requests, CancellationToken cancellationToken = default);
-}
-
-public interface IMarketplacePluginStore
-{
-    Task SaveInstallationAsync(MarketplacePluginInstallation installation, CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<MarketplacePluginInstallation>> ListInstallationsAsync(CancellationToken cancellationToken = default);
-    Task SetEnabledAsync(string installationId, bool enabled, CancellationToken cancellationToken = default);
-}
-
-/// <summary>Persists user-supplied Plugin environment values encrypted at rest.</summary>
-public interface IMarketplacePluginConfigurationStore
-{
-    Task<IReadOnlyDictionary<string, string>> GetValuesAsync(string pluginId, CancellationToken cancellationToken = default);
-    Task SaveValuesAsync(string pluginId, IReadOnlyDictionary<string, string> values, CancellationToken cancellationToken = default);
-}
-
-public interface IMarketplaceUpdateService
-{
-    Task<IReadOnlyList<MarketplaceArtifactUpdate>> CheckAsync(CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<MarketplaceUpdateCheck>> ListHistoryAsync(string? artifactId = null, int take = 100, CancellationToken cancellationToken = default);
-    Task<MarketplaceArtifactUpdateApplicationResult> ApplyAsync(string artifactId, string expectedCommitSha, CancellationToken cancellationToken = default);
-}
-
-public interface IMarketplaceUpdateHistoryStore
-{
-    Task SaveAsync(IReadOnlyList<MarketplaceUpdateCheck> checks, CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<MarketplaceUpdateCheck>> ListAsync(string? artifactId, int take, CancellationToken cancellationToken = default);
-}
-
-public interface IMarketplaceActivityRecorder
-{
-    Task RecordAsync(MarketplaceActivityEvent activity, CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<MarketplaceActivityEvent>> ListAsync(int take = 100, CancellationToken cancellationToken = default);
-}
-
-public interface IMarketplacePluginService
-{
-    Task<IReadOnlyList<MarketplacePluginInstallation>> ListAsync(CancellationToken cancellationToken = default);
-    Task<MarketplacePluginPreview> PreviewAsync(string installationId, CancellationToken cancellationToken = default);
-    Task<MarketplacePluginInstallation> InstallAsync(string artifactId, CancellationToken cancellationToken = default);
-    Task SetEnabledAsync(string installationId, bool enabled, CancellationToken cancellationToken = default);
-    Task<MarketplacePluginConfiguration> GetConfigurationAsync(string installationId, CancellationToken cancellationToken = default);
-    Task SaveConfigurationAsync(string installationId, IReadOnlyDictionary<string, string> values, CancellationToken cancellationToken = default);
-}
-
-public interface IEnabledPluginCapabilitySource
-{
-    Task<IReadOnlyList<EnabledPluginCapabilities>> GetSnapshotAsync(CancellationToken cancellationToken = default);
-}
-
-public interface IPluginCapabilitySnapshotInvalidator
-{
-    void Invalidate();
-}
-
-public interface ICodexMarketplaceImportService
-{
-    Task<CodexMarketplaceImportResult> ImportAsync(string marketplaceJsonPath, CancellationToken cancellationToken = default);
 }
 
 public interface IGitHubRepositoryImportService

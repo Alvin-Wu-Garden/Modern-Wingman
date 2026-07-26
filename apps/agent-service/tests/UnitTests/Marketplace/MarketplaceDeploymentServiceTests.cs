@@ -52,6 +52,7 @@ public sealed class MarketplaceDeploymentServiceTests : IDisposable
     private sealed class TestTargetAdapter(string root) : IAgentTargetAdapter
     {
         public MarketplaceTargetDescriptor Descriptor { get; } = new("test-agent", "Test", true, false, true, true);
+        public string McpRootProperty => "mcpServers";
         public string ResolveSkillDirectory(MarketplaceDeploymentScope scope, string? projectPath) => scope == MarketplaceDeploymentScope.Global ? root : Path.Combine(projectPath!, ".test", "skills");
         public string ResolveMcpConfigPath(MarketplaceDeploymentScope scope, string? projectPath) => Path.Combine(root, "mcp.json");
     }

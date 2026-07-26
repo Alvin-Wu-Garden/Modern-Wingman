@@ -5,7 +5,6 @@ using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using OpenAI;
-using AgentService.Infrastructure.AgentFramework.Plugins;
 
 namespace AgentService.Infrastructure.AgentFramework;
 
@@ -17,8 +16,6 @@ namespace AgentService.Infrastructure.AgentFramework;
 public sealed class ByokAgentFactory(
     IApiKeyStore apiKeyStore,
     ISkillProvider skillProvider,
-    IToolRegistry toolRegistry,
-    MafPluginRuntimeAdapter pluginRuntime,
     ILogger<ByokAgentFactory> logger) : IAgentFactory
 {
     public ProviderKind Kind => ProviderKind.CopilotByok;
@@ -32,19 +29,13 @@ public sealed class ByokAgentFactory(
             return null;
         }
 
-        // read_skill is part of the provider-neutral registry. Expose every
-        // registered capability as its own standard function with its own schema.
-        var tools = WingmanToolAdapter.CreateTools(toolRegistry, context)
-            .Cast<AITool>()
-            .ToList();
-
         var agent = new ChatClientAgent(chatClient, new ChatClientAgentOptions
         {
             Name = "WingmanAgent",
             ChatOptions = new ChatOptions
             {
-                Instructions = context.Instructions + context.SkillsPrompt + pluginRuntime.BuildContextPrompt(),
-                Tools = tools.Count > 0 ? tools : null,
+                Instructions = context.Instructions + context.SkillsPrompt,
+                Tools = null,
             },
         });
 

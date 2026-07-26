@@ -108,6 +108,37 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
     }
 
     [Fact]
+    public async Task IndexProjectAsync_DatabasePreflightFailurePreservesPreviousSuccessfulGraph()
+    {
+        await File.WriteAllTextAsync(
+            Path.Combine(_root, "Order.cs"),
+            "public sealed class Order { }");
+        var databaseSources = new MutableDatabaseSourceProvider();
+        var fixture = CreateFixture(databaseSources);
+        var first = await fixture.Service.IndexProjectAsync("project");
+        var previousManifest = first.IndexManifestVersion;
+        var previousPublishCount = fixture.Store.PublishCount;
+        databaseSources.Source = new GraphDatabaseSource(
+            ProjectDatabaseProvider.Sqlite,
+            new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(_root, "missing.db"),
+                Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                Pooling = false,
+            }.ConnectionString,
+            "missing");
+
+        await Assert.ThrowsAnyAsync<Microsoft.Data.Sqlite.SqliteException>(
+            () => fixture.Service.IndexProjectAsync("project"));
+
+        var saved = await fixture.Projects.GetAsync("project");
+        Assert.Equal(previousManifest, saved!.IndexManifestVersion);
+        Assert.Equal(previousPublishCount, fixture.Store.PublishCount);
+        Assert.Equal(previousManifest, fixture.Store.ActiveManifest);
+        Assert.Equal(ProjectIndexStatus.Stale, saved.IndexStatus);
+    }
+
+    [Fact]
     public async Task GetDiagnosticsAsync_ReconcilesNeo4jPublishAfterSqlitePromoteFailure()
     {
         await File.WriteAllTextAsync(
@@ -477,7 +508,7 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
 
     [FblNeo4jAcceptanceFact]
     [Trait("Category", "ExternalAcceptance")]
-    public async Task RealFblGraph_PublishesToNeo4jAndAnswersFourGoldenQuestions()
+    public async Task RealFblGraph_PublishesToNeo4jAndAnswersFiveGoldenQuestions()
     {
         _managedNeo4jUsed = true;
         var root = Path.GetFullPath(
@@ -534,12 +565,18 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
                     sql,
                 ],
                 sql,
+                new ProjectGraphDatabaseExtractor(
+                    sql,
+                    NullLogger<ProjectGraphDatabaseExtractor>.Instance),
                 store,
                 runtime,
                 projects,
                 manifests,
                 new FixedDatabaseSourceProvider(
-                    new SqlServerGraphSource(connectionString, "FBL_SPV_SIT")),
+                    new GraphDatabaseSource(
+                        ProjectDatabaseProvider.SqlServer,
+                        connectionString,
+                        "FBL_SPV_SIT")),
                 Options.Create(new GraphIndexingOptions()),
                 NullLogger<GraphIndexingService>.Instance);
             var indexed = await indexing.IndexProjectAsync(projectId);
@@ -633,13 +670,42 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
                     ("WritePath", context => context.Edges.Any(edge =>
                         edge.Kind == GraphEdgeKind.Writes)),
                 ]);
+            // 這是使用者實際遇到「索引完成卻回答資訊不足」的問題，必須固定成回歸案例。
+            // 驗收不要求把所有庫存相關功能塞入 context，只要求能從選單入口一路定位到
+            // 前端、Controller 與資料層，讓模型有足夠證據解釋主要資料流。
+            await VerifyGolden(
+                "關於庫存，給我解釋整個資料流是怎麼運行的？",
+                ["庫存", "Inventory", "Position", "Holding", "InventoryReport"],
+                [
+                    ("Menu", context => HasRoleNode(context, GraphRoles.MenuFeature, "庫存")),
+                    ("Route", context => HasNode(
+                        context, GraphNodeKind.EntryPoint, "inventoryreport")),
+                    ("Frontend", context => context.Nodes.Any(item =>
+                        item.Node.Kind == GraphNodeKind.Code &&
+                        item.Node.Role is GraphRoles.FrontendPage or GraphRoles.Module &&
+                        SearchText(item.Node).Contains(
+                            "inventoryreport",
+                            StringComparison.OrdinalIgnoreCase))),
+                    ("Controller", context => context.Nodes.Any(item =>
+                        item.Node.Kind == GraphNodeKind.Code &&
+                        item.Node.Role == GraphRoles.Controller &&
+                        SearchText(item.Node).Contains(
+                            "inventoryreport",
+                            StringComparison.OrdinalIgnoreCase))),
+                    ("Data", context => context.Nodes.Any(item =>
+                        item.Node.Kind == GraphNodeKind.Data)),
+                    ("DataPath", context => context.Edges.Any(edge =>
+                        edge.Kind is GraphEdgeKind.Reads or GraphEdgeKind.Writes)),
+                ],
+                minimumCoverage: 1);
             Assert.True(failures.Count == 0,
                 string.Join(Environment.NewLine + Environment.NewLine, failures));
 
             async Task VerifyGolden(
                 string question,
                 IReadOnlyList<string> relevanceTerms,
-                IReadOnlyList<(string Name, Func<GraphRetrievalContext, bool> Match)> expected)
+                IReadOnlyList<(string Name, Func<GraphRetrievalContext, bool> Match)> expected,
+                double minimumCoverage = 0.8)
             {
                 var retrievalClock = Stopwatch.StartNew();
                 var context = await retrieval.LocalSearchAsync(projectId, question);
@@ -657,7 +723,7 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
                 Console.WriteLine(
                     $"FBL local question={question}, elapsed={retrievalClock.ElapsedMilliseconds}ms, " +
                     $"coverage={coverage:P0}, noise={noiseRatio:P0}");
-                if (coverage >= 0.8 &&
+                if (coverage >= minimumCoverage &&
                     noiseRatio <= 0.75 &&
                     retrievalClock.Elapsed < TimeSpan.FromSeconds(1.5))
                     return;
@@ -806,12 +872,18 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
                 sql,
             ],
             sql,
+            new ProjectGraphDatabaseExtractor(
+                sql,
+                NullLogger<ProjectGraphDatabaseExtractor>.Instance),
             store,
             new AvailableNeo4jRuntime(),
             projects,
             manifests,
             new FixedDatabaseSourceProvider(
-                new SqlServerGraphSource(connectionString, "FBL_SPV_SIT")),
+                new GraphDatabaseSource(
+                    ProjectDatabaseProvider.SqlServer,
+                    connectionString,
+                    "FBL_SPV_SIT")),
             Options.Create(new GraphIndexingOptions()),
             NullLogger<GraphIndexingService>.Instance);
 
@@ -950,7 +1022,7 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
         }
     }
 
-    private Fixture CreateFixture()
+    private Fixture CreateFixture(IGraphDatabaseSourceProvider? databaseSources = null)
     {
         var project = new ProjectEntity
         {
@@ -967,11 +1039,14 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
         var service = new GraphIndexingService(
             [extractor],
             sql,
+            new ProjectGraphDatabaseExtractor(
+                sql,
+                NullLogger<ProjectGraphDatabaseExtractor>.Instance),
             store,
             new AvailableNeo4jRuntime(),
             projects,
             manifests,
-            new NullDatabaseSourceProvider(),
+            databaseSources ?? new NullDatabaseSourceProvider(),
             Options.Create(new GraphIndexingOptions()),
             NullLogger<GraphIndexingService>.Instance);
         return new Fixture(service, projects, manifests, store, extractor);
@@ -995,6 +1070,9 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
         var service = new GraphIndexingService(
             [csharp],
             sql,
+            new ProjectGraphDatabaseExtractor(
+                sql,
+                NullLogger<ProjectGraphDatabaseExtractor>.Instance),
             store,
             new AvailableNeo4jRuntime(),
             projects,
@@ -1023,6 +1101,9 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
         var service = new GraphIndexingService(
             [csharp, sql],
             sql,
+            new ProjectGraphDatabaseExtractor(
+                sql,
+                NullLogger<ProjectGraphDatabaseExtractor>.Instance),
             store,
             new AvailableNeo4jRuntime(),
             projects,
@@ -1224,19 +1305,30 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
 
     private sealed class NullDatabaseSourceProvider : IGraphDatabaseSourceProvider
     {
-        public Task<SqlServerGraphSource?> GetAsync(
+        public Task<GraphDatabaseSource?> GetAsync(
             ProjectEntity project,
             CancellationToken cancellationToken = default) =>
-            Task.FromResult<SqlServerGraphSource?>(null);
+            Task.FromResult<GraphDatabaseSource?>(null);
     }
 
-    private sealed class FixedDatabaseSourceProvider(SqlServerGraphSource source)
+    private sealed class FixedDatabaseSourceProvider(GraphDatabaseSource source)
         : IGraphDatabaseSourceProvider
     {
-        public Task<SqlServerGraphSource?> GetAsync(
+        public Task<GraphDatabaseSource?> GetAsync(
             ProjectEntity project,
             CancellationToken cancellationToken = default) =>
-            Task.FromResult<SqlServerGraphSource?>(source);
+            Task.FromResult<GraphDatabaseSource?>(source);
+    }
+
+    /// <summary>允許測試在首次成功索引後切換成失敗資料庫來源。</summary>
+    private sealed class MutableDatabaseSourceProvider : IGraphDatabaseSourceProvider
+    {
+        public GraphDatabaseSource? Source { get; set; }
+
+        public Task<GraphDatabaseSource?> GetAsync(
+            ProjectEntity project,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(Source);
     }
 
     private sealed class DefaultHttpClientFactory : IHttpClientFactory

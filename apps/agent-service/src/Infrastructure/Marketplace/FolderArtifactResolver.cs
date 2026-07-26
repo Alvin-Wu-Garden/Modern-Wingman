@@ -27,15 +27,6 @@ public sealed class FolderArtifactResolver : IArtifactResolver
             var validation = await ValidateSkillAsync(skillFile, cancellationToken);
             candidates.Add(Create(candidateRoot, MarketplaceArtifactKind.Skill, validation.IsValid ? MarketplaceDiscoveryStatus.Resolved : MarketplaceDiscoveryStatus.Invalid, "agent-skill-standard/v1", validation.Error));
         }
-        foreach (var pluginManifest in Directory.EnumerateFiles(root, "plugin.json", SearchOption.AllDirectories)
-                     .Where(path => Path.GetFileName(Path.GetDirectoryName(path))?.Equals(".codex-plugin", StringComparison.OrdinalIgnoreCase) == true)
-                     .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var pluginRoot = Directory.GetParent(Path.GetDirectoryName(pluginManifest)!)!.FullName;
-            var validation = await ValidatePluginAsync(pluginManifest, Path.Combine(pluginRoot, "wingman.json"), cancellationToken);
-            candidates.Add(Create(pluginRoot, MarketplaceArtifactKind.WingmanPlugin, validation.IsValid ? MarketplaceDiscoveryStatus.Resolved : MarketplaceDiscoveryStatus.Invalid, "codex-plugin-compat/2026-07", validation.Error));
-        }
         foreach (var mcpFile in Directory.EnumerateFiles(root, ".mcp.json", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -65,49 +56,6 @@ public sealed class FolderArtifactResolver : IArtifactResolver
             if (length > MaxFileBytes) throw new InvalidDataException("匯入來源包含超過單檔大小上限的檔案。");
             if ((totalBytes += length) > MaxTotalBytes) throw new InvalidDataException("匯入來源超過總大小上限。");
         }
-    }
-
-    private static async Task<(bool IsValid, string? Error)> ValidatePluginAsync(string pluginManifest, string wingmanManifest, CancellationToken ct)
-    {
-        if (!File.Exists(wingmanManifest)) return (false, "缺少 wingman.json。");
-        var pluginRoot = Directory.GetParent(Path.GetDirectoryName(pluginManifest)!)!.FullName;
-        if (Directory.EnumerateFiles(pluginRoot, "*", SearchOption.AllDirectories)
-            .Any(path => Path.GetExtension(path) is ".dll" or ".so" or ".dylib"))
-            return (false, "Wingman Plugin 不允許攜帶 .NET 或 native binary extension。");
-        try
-        {
-            await using var stream = File.OpenRead(pluginManifest);
-            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
-            foreach (var property in new[] { "name", "version" })
-                if (!document.RootElement.TryGetProperty(property, out var value) || string.IsNullOrWhiteSpace(value.GetString())) return (false, $".codex-plugin/plugin.json 缺少必要欄位 {property}。");
-            foreach (var component in new[] { "skills", "mcpServers", "hooks", "apps" })
-            {
-                if (!document.RootElement.TryGetProperty(component, out var value)) continue;
-                foreach (var path in ComponentPaths(value))
-                {
-                    var relative = path.Replace('\\', '/');
-                    if (relative.StartsWith("./", StringComparison.Ordinal)) relative = relative[2..];
-                    if (Path.IsPathRooted(path) || string.IsNullOrWhiteSpace(relative) || relative.Split('/', StringSplitOptions.RemoveEmptyEntries).Any(part => part is "." or "..")) return (false, $"Plugin component path 不安全：{path}");
-                    var resolved = Path.GetFullPath(Path.Combine(pluginRoot, relative));
-                    var prefix = pluginRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-                    if (!resolved.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || (!File.Exists(resolved) && !Directory.Exists(resolved))) return (false, $"Plugin component 不存在：{path}");
-                }
-            }
-            await using var wingmanStream = File.OpenRead(wingmanManifest);
-            using var wingman = await JsonDocument.ParseAsync(wingmanStream, cancellationToken: ct);
-            if (wingman.RootElement.ValueKind != JsonValueKind.Object) return (false, "wingman.json 必須是 JSON object。");
-            if (new[] { "install", "uninstall", "update", "postinstall", "preinstall" }.Any(name => wingman.RootElement.TryGetProperty(name, out _)))
-                return (false, "Wingman Plugin 不允許 install/update/uninstall lifecycle script。");
-            return (true, null);
-        }
-        catch (JsonException) { return (false, ".codex-plugin/plugin.json 不是有效 JSON。"); }
-
-        static IEnumerable<string> ComponentPaths(JsonElement value) => value.ValueKind switch
-        {
-            JsonValueKind.String => [value.GetString()!],
-            JsonValueKind.Array => value.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!),
-            _ => [],
-        };
     }
 
     private static async Task<(bool IsValid, string? Error)> ValidateSkillAsync(string skillFile, CancellationToken ct)

@@ -11,8 +11,7 @@ public sealed class MarketplaceArtifactService(
     IArtifactResolver resolver,
     IMarketplaceArtifactStore store,
     MarketplaceRegistryPathResolver paths,
-    MarketplaceArtifactQualityScorer qualityScorer,
-    IMarketplaceActivityRecorder? activity = null) : IMarketplaceArtifactService
+    MarketplaceArtifactQualityScorer qualityScorer) : IMarketplaceArtifactService
 {
     public Task<IReadOnlyList<MarketplaceArtifact>> ListArtifactsAsync(CancellationToken cancellationToken = default) => store.ListArtifactsAsync(cancellationToken);
 
@@ -31,11 +30,10 @@ public sealed class MarketplaceArtifactService(
             artifacts.Add(existing ?? new(Guid.NewGuid().ToString("N"), candidate.Id, candidate.Kind, candidate.DisplayName, snapshotPath, hash, candidate.Status, candidate.ValidationProfileId, DateTimeOffset.UtcNow));
         }
         await store.SaveImportAsync(candidates, artifacts, artifacts.Select(qualityScorer.Score).ToList(), cancellationToken);
-        var result = new MarketplaceImportResult(sourceLocation ?? Path.GetFullPath(sourceFolder), candidates, artifacts);
-        if (activity is not null)
-            await activity.RecordAsync(new(Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"), "artifact-import", "Completed", null, null,
-                $"source={result.SourceLocation};candidates={candidates.Count};artifacts={artifacts.Count}", DateTimeOffset.UtcNow), cancellationToken);
-        return result;
+        return new MarketplaceImportResult(
+            sourceLocation ?? Path.GetFullPath(sourceFolder),
+            candidates,
+            artifacts);
     }
 
     public async Task<MarketplaceImportResult> ImportArchiveAsync(string archivePath, string? sourceLocation = null, CancellationToken cancellationToken = default)

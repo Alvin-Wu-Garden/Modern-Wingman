@@ -9,8 +9,7 @@ public sealed class MarketplaceService(
     IEnumerable<IDiscoveryProvider> discoveryProviders,
     IMarketplaceStore store,
     MarketplaceDiscoveryClassifier classifier,
-    MarketplaceDiscoveryScorer scorer,
-    IMarketplaceActivityRecorder? activity = null) : IMarketplaceService
+    MarketplaceDiscoveryScorer scorer) : IMarketplaceService
 {
     private static readonly DiscoveryQuery[] Queries =
     [
@@ -30,8 +29,6 @@ public sealed class MarketplaceService(
     public async Task<MarketplaceRefreshResult> RefreshAsync(CancellationToken cancellationToken = default)
     {
         var syncRunId = await store.StartRefreshAsync(cancellationToken);
-        if (activity is not null)
-            await activity.RecordAsync(new(Guid.NewGuid().ToString("N"), syncRunId, "discovery-refresh", "Started", null, null, null, DateTimeOffset.UtcNow), cancellationToken);
         var provider = discoveryProviders.SingleOrDefault(candidate => candidate.ProviderId == "github-discovery")
             ?? throw new InvalidOperationException("GitHub Discovery provider is not registered.");
         var now = DateTimeOffset.UtcNow;
@@ -120,17 +117,11 @@ public sealed class MarketplaceService(
         if (prerequisite is not null && successful == 0)
         {
             await store.FailRefreshAsync(syncRunId, prerequisite.Message, cancellationToken);
-            if (activity is not null)
-                await activity.RecordAsync(new(Guid.NewGuid().ToString("N"), syncRunId, "discovery-refresh", "Failed", null, null, prerequisite.Message, DateTimeOffset.UtcNow), cancellationToken);
             throw prerequisite;
         }
 
         await store.UpsertDiscoveryAsync(records, snapshots, cancellationToken);
-        var result = await store.CompleteRefreshAsync(syncRunId, seen, newCount, updatedCount, unchangedCount,
+        return await store.CompleteRefreshAsync(syncRunId, seen, newCount, updatedCount, unchangedCount,
             successful, Queries.Length, partial || successful != Queries.Length, cancellationToken);
-        if (activity is not null)
-            await activity.RecordAsync(new(Guid.NewGuid().ToString("N"), syncRunId, "discovery-refresh", result.IsPartial ? "Partial" : "Completed", null, null,
-                $"new={result.NewCount};updated={result.UpdatedCount};unchanged={result.UnchangedCount}", DateTimeOffset.UtcNow), cancellationToken);
-        return result;
     }
 }

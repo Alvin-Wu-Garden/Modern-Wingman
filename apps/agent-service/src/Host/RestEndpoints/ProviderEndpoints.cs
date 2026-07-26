@@ -303,23 +303,11 @@ public static class ProviderEndpoints
             : null;
     }
 
-    private static string ProviderAuditDetails(ModelProviderProfile? profile, object? extra = null) =>
-        JsonSerializer.Serialize(new
-        {
-            ProviderProfileId = profile?.Id,
-            ProviderDisplayName = profile?.DisplayName,
-            Kind = profile?.Kind.ToString(),
-            profile?.ProviderType,
-            BaseUrlHost = ExtractHost(profile?.BaseUrl),
-            Extra = extra,
-        });
-
     private static async Task<IResult> SetKey(
         string id,
         SetApiKeyRequest request,
         IModelProviderService providerService,
         IProviderCredentialService credentialService,
-        IAuditEventRecorder audit,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.ApiKey))
@@ -337,21 +325,6 @@ public static class ProviderEndpoints
         if (!result.IsValid)
             return Results.Ok(result);
 
-        await audit.RecordAsync(
-            new AuditEventWrite(
-                EventType: "provider_api_key_saved",
-                TargetType: "provider",
-                TargetId: id,
-                Action: "update",
-                DetailsJson: ProviderAuditDetails(profile, new
-                {
-                    KeyStored = true,
-                    Authentication = profile.Kind == ProviderKind.CopilotDefault
-                        ? "fine_grained_pat"
-                        : "api_key",
-                })),
-            CancellationToken.None);
-
         return Results.Ok(result);
     }
 
@@ -360,7 +333,6 @@ public static class ProviderEndpoints
         IProviderSettingStore settingStore,
         IModelProviderService providerService,
         CopilotClientService copilotClientService,
-        IAuditEventRecorder audit,
         CancellationToken ct)
     {
         await settingStore.RemoveApiKeyAsync(id, ct);
@@ -370,22 +342,12 @@ public static class ProviderEndpoints
         if (profile?.Kind == ProviderKind.CopilotDefault)
             await copilotClientService.RestartWithTokenAsync(null, ct);
 
-        await audit.RecordAsync(
-            new AuditEventWrite(
-                EventType: "provider_api_key_removed",
-                TargetType: "provider",
-                TargetId: id,
-                Action: "update",
-                DetailsJson: ProviderAuditDetails(profile, new { KeyStored = false })),
-            CancellationToken.None);
-
         return Results.NoContent();
     }
 
     private static async Task<IResult> Reorder(
         ReorderProvidersRequest request,
         IProviderSettingStore settingStore,
-        IAuditEventRecorder audit,
         CancellationToken ct)
     {
         if (request.Order is null || request.Order.Count == 0)
@@ -396,14 +358,6 @@ public static class ProviderEndpoints
             .ToList();
 
         await settingStore.ReorderAsync(order, ct);
-        await audit.RecordAsync(
-            new AuditEventWrite(
-                EventType: "provider_order_changed",
-                TargetType: "provider",
-                TargetId: "provider-list",
-                Action: "update",
-                DetailsJson: JsonSerializer.Serialize(new { Order = request.Order })),
-            CancellationToken.None);
         return Results.NoContent();
     }
 

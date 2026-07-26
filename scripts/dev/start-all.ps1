@@ -1,4 +1,4 @@
-# start-all.ps1 — Start all development services
+﻿# start-all.ps1 — 啟動 Modern Wingman 的本機開發服務
 param(
     [switch]$AgentOnly,
     [switch]$DesktopOnly,
@@ -53,18 +53,18 @@ function Get-AvailableDesktopPort {
         }
     }
 
-    throw "No bindable desktop development port was found between $StartPort and $lastPort. The ports may be in use or reserved by Windows."
+    throw "在 $StartPort 到 $lastPort 之間找不到可綁定的桌面開發連接埠；這些連接埠可能已被占用或由 Windows 保留。"
 }
 
 $desktopPort = $null
 if (-not $AgentOnly) {
-    # Windows can reserve large consecutive port ranges (for example through
-    # Hyper-V/WSL). Resolve the desktop port before starting any child process.
+    # Windows 可能由 Hyper-V／WSL 保留一整段連續連接埠。
+    # 必須先找到可實際 bind 的連接埠，再啟動任何子程序，避免只檢查 netstat 的誤判。
     $desktopPort = Get-AvailableDesktopPort -StartPort $PreferredDesktopPort
 }
 
 if (-not $DesktopOnly) {
-    Write-Host "[1/2] Starting Agent Service (.NET)..." -ForegroundColor Cyan
+    Write-Host "[1/2] 正在啟動 Agent Service (.NET)..." -ForegroundColor Cyan
     Start-Process powershell -ArgumentList "-NoExit", "-Command", `
         "cd '$root\apps\agent-service'; dotnet run" `
         -WindowStyle Normal
@@ -79,8 +79,8 @@ if (-not $AgentOnly) {
         ([System.IO.Path]::GetTempPath()) `
         "modern-wingman-tauri-dev-$([System.Guid]::NewGuid().ToString('N')).json"
 
-    # Passing inline JSON through Start-Process -> PowerShell -> pnpm strips its
-    # quotes on Windows. A temporary config file avoids that argument parsing.
+    # Windows 會在 Start-Process → PowerShell → pnpm 的多層參數傳遞中移除 inline JSON 引號。
+    # 使用 UTF-8 暫存設定檔可避免 Tauri 取得損壞的 JSON。
     [System.IO.File]::WriteAllText(
         $tauriConfigPath,
         $tauriConfig,
@@ -94,12 +94,12 @@ if (-not $AgentOnly) {
         "try { pnpm tauri dev --config '$escapedTauriConfigPath' } " + `
         "finally { Remove-Item -LiteralPath '$escapedTauriConfigPath' -Force -ErrorAction SilentlyContinue }"
 
-    # The child PowerShell inherits this value, so Vite and Tauri use the same port.
+    # 子 PowerShell 會繼承此環境變數，確保 Vite 與 Tauri 使用同一個動態連接埠。
     $previousDesktopPort = $env:WINGMAN_DEV_PORT
     $env:WINGMAN_DEV_PORT = $desktopPort.ToString()
 
     try {
-        Write-Host "[2/2] Starting Desktop (Tauri dev) on $tauriDevUrl..." -ForegroundColor Cyan
+        Write-Host "[2/2] 正在啟動 Desktop (Tauri dev)：$tauriDevUrl..." -ForegroundColor Cyan
         Start-Process powershell -ArgumentList "-NoExit", "-NoProfile", "-Command", $desktopCommand `
             -WindowStyle Normal
     }
@@ -117,4 +117,4 @@ if (-not $AgentOnly) {
     }
 }
 
-Write-Host "`nAll services started. Close the opened windows to stop." -ForegroundColor Green
+Write-Host "`n所有服務已啟動；關閉開啟的視窗即可停止。" -ForegroundColor Green

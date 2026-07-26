@@ -4,12 +4,17 @@ using AgentService.Domain.Models;
 
 namespace AgentService.Infrastructure.Providers;
 
+/// <summary>
+/// 先向實際 Provider 驗證憑證，再以 DPAPI 原子保存。
+/// Copilot runtime 啟用失敗時會還原上一把 Key，候選 Key 不會留在資料庫。
+/// </summary>
 public sealed class ProviderCredentialService(
     IEnumerable<IProviderApiKeyValidator> validators,
     IProviderSettingStore settingStore,
     ICopilotCredentialRuntime copilotRuntime,
     ILogger<ProviderCredentialService> logger) : IProviderCredentialService
 {
+    /// <summary>驗證並保存憑證；驗證失敗不改變任何既有設定。</summary>
     public async Task<ApiKeyValidationResult> ValidateAndSaveAsync(
         ModelProviderProfile profile,
         string apiKey,
@@ -42,6 +47,7 @@ public sealed class ProviderCredentialService(
             return validation;
 
         var previous = await settingStore.GetAsync(profile.Id, ct);
+        var previousKey = settingStore.GetApiKey(profile.Id);
         await settingStore.SetValidatedCredentialAsync(profile.Id, apiKey, baseUrl, ct);
 
         if (profile.Kind != ProviderKind.CopilotDefault)
@@ -58,18 +64,20 @@ public sealed class ProviderCredentialService(
                 "Validated Copilot PAT could not activate bundled runtime: errorType={ErrorType}",
                 ex.GetType().Name);
 
-            if (string.IsNullOrWhiteSpace(previous?.ApiKey))
+            if (string.IsNullOrWhiteSpace(previousKey))
                 await settingStore.RemoveApiKeyAsync(profile.Id, CancellationToken.None);
             else
                 await settingStore.SetValidatedCredentialAsync(
                     profile.Id,
-                    previous.ApiKey,
-                    previous.BaseUrl,
+                    previousKey,
+                    previous?.BaseUrl,
                     CancellationToken.None);
 
             try
             {
-                await copilotRuntime.RestartWithTokenAsync(previous?.ApiKey, CancellationToken.None);
+                await copilotRuntime.RestartWithTokenAsync(
+                    previousKey,
+                    CancellationToken.None);
             }
             catch
             {

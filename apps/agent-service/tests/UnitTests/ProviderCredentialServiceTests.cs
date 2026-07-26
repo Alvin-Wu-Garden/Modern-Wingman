@@ -133,7 +133,6 @@ public sealed class ProviderCredentialServiceTests
                 : new ProviderSettingEntity
                 {
                     ProfileId = profileId,
-                    ApiKey = StoredApiKey,
                     BaseUrl = StoredBaseUrl,
                 });
 
@@ -162,7 +161,5 @@ public sealed class ProviderCredentialServiceTests
             IReadOnlyList<(string ProfileId, int SortOrder)> order,
             CancellationToken ct = default) => Task.CompletedTask;
 
-        public Task EnsureSeedAsync(IReadOnlyList<string> profileIds, CancellationToken ct = default) =>
-            Task.CompletedTask;
     }
 }

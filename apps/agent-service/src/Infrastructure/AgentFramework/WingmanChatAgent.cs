@@ -5,8 +5,6 @@ using AgentService.Application.Contracts;
 using AgentService.Application.Models;
 using AgentService.Domain.Models;
 using AgentService.Infrastructure.Skills;
-using AgentService.Infrastructure.ChangeIntelligence;
-using AgentService.Modules.GraphRAG;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
@@ -22,16 +20,11 @@ namespace AgentService.Infrastructure.AgentFramework;
 ///   3. 呼叫 AIAgent.RunStreamingAsync 逐 token 回傳 + usage 回報
 ///
 /// OCP：新增 provider = 新增 IAgentFactory 實作 + DI 註冊，本類別不需修改。
-/// Skills 由 ISkillProvider 提供，progressive disclosure 注入。
+/// Skills 由 ISkillProvider 提供，並以有長度上限的不受信任指示注入。
 /// </summary>
 public sealed class WingmanChatAgent(
     IEnumerable<IAgentFactory> agentFactories,
     ISkillProvider skillProvider,
-    IContextAssembler contextAssembler,
-    IProjectRepository projectRepository,
-    GraphIndexingService projectIndexService,
-    IChangeBriefBuilder changeBriefBuilder,
-    ProjectEvidencePlanner evidencePlanner,
     ILogger<WingmanChatAgent> logger)
 {
     public sealed record TimelineEvent(string Type,string? CallId,string? Name,object? Data,DateTimeOffset Timestamp);
@@ -47,41 +40,12 @@ public sealed class WingmanChatAgent(
         List<MessageEntity> history,
         ModelProviderProfile profile,
         string? modelOverride = null,
-        AgentMode mode = AgentMode.Plan,
-        string? workspacePath = null,
-        string? runId = null,
-        string? projectId = null,
         Action<TokenUsage>? onUsage = null,
-        Func<TimelineEvent,CancellationToken,Task>? onTimeline = null,
         IReadOnlyList<AttachmentReference>? attachments = null,
+        bool includeSkills = true,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var effectiveMessage=userMessage;
-        if(!string.IsNullOrWhiteSpace(workspacePath)&&Directory.Exists(workspacePath))effectiveMessage=(await contextAssembler.AssembleAsync(userMessage,workspacePath,ct,runId)).Prompt;
-        if (!string.IsNullOrWhiteSpace(projectId))
-        {
-            try
-            {
-                var project = await projectRepository.GetAsync(projectId, ct);
-                if (project is not null)
-                {
-                    var brief = changeBriefBuilder.Build(project.Id, userMessage);
-                    if (brief.Classification.IsProjectScoped && project.IndexManifestVersion is not null)
-                    {
-                        if (await projectIndexService.CatchUpAsync(project.Id, ct))
-                            project = await projectIndexService.IndexProjectAsync(project.Id, ct);
-                        var evidence = await evidencePlanner.BuildAsync(project, brief, ct);
-                        effectiveMessage += ProjectEvidencePlanner.FormatForPrompt(evidence);
-                    }
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // 專案圖譜是增強上下文；Neo4j 暫時不可用不應讓一般聊天完全失效。
-                logger.LogWarning(ex, "無法為一般聊天載入 Project Evidence Pack，ProjectId={ProjectId}", projectId);
-            }
-        }
-        var messages = await BuildMessagesAsync(history, effectiveMessage, attachments, ct);
+        var messages = await BuildMessagesAsync(history, userMessage, attachments, ct);
 
         var factory = agentFactories.FirstOrDefault(f => f.Kind == profile.Kind);
         if (factory is null)
@@ -96,11 +60,10 @@ public sealed class WingmanChatAgent(
             Profile = profile,
             ModelOverride = modelOverride,
             Instructions = AgentInstructions,
-            SkillsPrompt = SkillPromptBuilder.BuildSkillsPrompt(skillProvider),
-            Mode = mode,
-            WorkspacePath = workspacePath,
-            RunId = runId,
-            ProjectId = projectId,
+            // 專案解析只能使用 GraphRAG 與當次附件；一般聊天才載入共用 Agent Skill。
+            SkillsPrompt = includeSkills
+                ? SkillPromptBuilder.BuildSkillsPrompt(skillProvider)
+                : string.Empty,
         };
 
         var agent = factory.CreateAgent(context);
@@ -128,8 +91,6 @@ public sealed class WingmanChatAgent(
             {
                 foreach (var item in contents)
                 {
-                    if(item is FunctionCallContent call&&onTimeline is not null)await onTimeline(new("tool_call",call.CallId,call.Name,call.Arguments,DateTimeOffset.UtcNow),ct);
-                    if(item is FunctionResultContent result&&onTimeline is not null)await onTimeline(new("tool_result",result.CallId,null,result.Result,DateTimeOffset.UtcNow),ct);
                     if (item is UsageContent uc)
                     {
                         lastUsage = uc.Details;
@@ -168,28 +129,39 @@ public sealed class WingmanChatAgent(
                 : new ChatMessage(ChatRole.Assistant, msg.Content));
         }
         var contents = new List<AIContent> { new TextContent(userMessage) };
+        var totalAttachmentBytes = 0;
         foreach (var attachment in attachments?.Take(5) ?? [])
         {
-            var path = Path.GetFullPath(attachment.Path);
-            var info = new FileInfo(path);
-            if (!info.Exists)
-                throw new FileNotFoundException("Attachment not found.", path);
-            if (info.Length > 10 * 1024 * 1024)
-                throw new InvalidDataException($"Attachment exceeds 10 MB: {info.Name}");
-            var mediaType = ResolveMediaType(path, attachment.MediaType);
+            byte[] bytes;
+            try
+            {
+                bytes = Convert.FromBase64String(attachment.ContentBase64);
+            }
+            catch (FormatException exception)
+            {
+                throw new InvalidDataException($"附件內容不是有效的 Base64：{attachment.Name}", exception);
+            }
+
+            if (bytes.Length > 10 * 1024 * 1024)
+                throw new InvalidDataException($"單一附件不可超過 10 MB：{attachment.Name}");
+            totalAttachmentBytes += bytes.Length;
+            if (totalAttachmentBytes > 20 * 1024 * 1024)
+                throw new InvalidDataException("單次問題的附件總容量不可超過 20 MB。");
+
+            var mediaType = ResolveMediaType(attachment.Name, attachment.MediaType);
             if (mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ||
                 mediaType == "application/pdf")
             {
-                contents.Add(new DataContent(await File.ReadAllBytesAsync(path, ct), mediaType));
+                contents.Add(new DataContent(bytes, mediaType));
                 continue;
             }
-            var text = Path.GetExtension(path).Equals(".docx", StringComparison.OrdinalIgnoreCase)
-                ? await ReadDocxAsync(path, ct)
-                : await File.ReadAllTextAsync(path, ct);
+            var text = Path.GetExtension(attachment.Name).Equals(".docx", StringComparison.OrdinalIgnoreCase)
+                ? await ReadDocxAsync(bytes, ct)
+                : System.Text.Encoding.UTF8.GetString(bytes);
             if (text.Length > 200_000)
                 text = text[..200_000] + "\n[attachment truncated]";
             contents.Add(new TextContent(
-                $"<attachment trust=\"untrusted-user-document\" name=\"{System.Security.SecurityElement.Escape(attachment.Name ?? info.Name)}\">\n{text}\n</attachment>"));
+                $"<attachment trust=\"untrusted-user-document\" name=\"{System.Security.SecurityElement.Escape(attachment.Name)}\">\n{text}\n</attachment>"));
         }
         messages.Add(new ChatMessage(ChatRole.User, contents));
         return messages;
@@ -212,9 +184,10 @@ public sealed class WingmanChatAgent(
         };
     }
 
-    private static async Task<string> ReadDocxAsync(string path, CancellationToken ct)
+    private static async Task<string> ReadDocxAsync(byte[] bytes, CancellationToken ct)
     {
-        using var archive = ZipFile.OpenRead(path);
+        using var source = new MemoryStream(bytes, writable: false);
+        using var archive = new ZipArchive(source, ZipArchiveMode.Read, leaveOpen: false);
         var entry = archive.GetEntry("word/document.xml")
             ?? throw new InvalidDataException("DOCX document.xml is missing.");
         await using var stream = entry.Open();

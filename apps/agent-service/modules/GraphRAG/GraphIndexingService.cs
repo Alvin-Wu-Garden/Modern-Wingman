@@ -9,7 +9,6 @@ using AgentService.Domain.Models;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -36,69 +35,6 @@ public sealed class GraphIndexingOptions
 
     /// <summary>單一專案一次最多索引的原始檔案數，避免錯誤 root 耗盡資源。</summary>
     public int MaximumFiles { get; set; } = 250_000;
-}
-
-/// <summary>提供 project-specific live DB secret，不讓 indexing service 直接讀 appsettings 明文密碼。</summary>
-public interface IGraphDatabaseSourceProvider
-{
-    /// <summary>沒有設定 live DB 時回傳 null；實作不得將 connection string 寫入 log。</summary>
-    /// <param name="project">目前索引專案。</param>
-    /// <param name="cancellationToken">取消取得 secret 的 token。</param>
-    /// <returns>記憶體中的安全 SQL Server source。</returns>
-    Task<SqlServerGraphSource?> GetAsync(
-        ProjectEntity project,
-        CancellationToken cancellationToken = default);
-}
-
-/// <summary>
-/// 從 process environment 取得 optional SQL Server secret。
-/// 支援全域 WINGMAN_GRAPHRAG_SQLSERVER_CONNECTION，也支援尾端加雙底線與 project ID 的專案專用值。
-/// </summary>
-public sealed class EnvironmentGraphDatabaseSourceProvider : IGraphDatabaseSourceProvider
-{
-    /// <inheritdoc />
-    public Task<SqlServerGraphSource?> GetAsync(
-        ProjectEntity project,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(project);
-        cancellationToken.ThrowIfCancellationRequested();
-        var suffix = "__" + EnvironmentKey(project.Id);
-        var connectionString =
-            Environment.GetEnvironmentVariable(
-                "WINGMAN_GRAPHRAG_SQLSERVER_CONNECTION" + suffix) ??
-            Environment.GetEnvironmentVariable(
-                "WINGMAN_GRAPHRAG_SQLSERVER_CONNECTION");
-        if (string.IsNullOrWhiteSpace(connectionString))
-            return Task.FromResult<SqlServerGraphSource?>(null);
-
-        var database =
-            Environment.GetEnvironmentVariable(
-                "WINGMAN_GRAPHRAG_SQLSERVER_DATABASE" + suffix) ??
-            Environment.GetEnvironmentVariable(
-                "WINGMAN_GRAPHRAG_SQLSERVER_DATABASE");
-        if (string.IsNullOrWhiteSpace(database))
-        {
-            // SqlConnectionStringBuilder 只在記憶體解析 InitialCatalog；
-            // 解析結果只取 logical database name，完整連線字串不進例外或 log。
-            database = new SqlConnectionStringBuilder(connectionString).InitialCatalog;
-        }
-        if (string.IsNullOrWhiteSpace(database))
-            throw new InvalidOperationException(
-                "已設定 GraphRAG SQL Server 連線，但缺少 logical database name。");
-        return Task.FromResult<SqlServerGraphSource?>(
-            new SqlServerGraphSource(connectionString, database));
-    }
-
-    private static string EnvironmentKey(string value)
-    {
-        var builder = new StringBuilder(value.Length);
-        foreach (var character in value)
-            builder.Append(char.IsLetterOrDigit(character)
-                ? char.ToUpperInvariant(character)
-                : '_');
-        return builder.ToString();
-    }
 }
 
 /// <summary>前端輪詢用的 V3 索引進度。</summary>
@@ -168,6 +104,7 @@ public sealed class GraphIndexingService
 
     private readonly IReadOnlyList<IGraphExtractor> _extractors;
     private readonly SqlServerGraphExtractor _sqlExtractor;
+    private readonly ProjectGraphDatabaseExtractor _databaseExtractor;
     private readonly IGraphStore _graphStore;
     private readonly INeo4jRuntime _neo4jRuntime;
     private readonly IProjectRepository _projects;
@@ -190,6 +127,7 @@ public sealed class GraphIndexingService
     public GraphIndexingService(
         IEnumerable<IGraphExtractor> extractors,
         SqlServerGraphExtractor sqlExtractor,
+        ProjectGraphDatabaseExtractor databaseExtractor,
         IGraphStore graphStore,
         INeo4jRuntime neo4jRuntime,
         IProjectRepository projects,
@@ -203,6 +141,7 @@ public sealed class GraphIndexingService
             .OrderBy(extractor => extractor.Id, StringComparer.Ordinal)
             .ToList();
         _sqlExtractor = sqlExtractor;
+        _databaseExtractor = databaseExtractor;
         _graphStore = graphStore;
         _neo4jRuntime = neo4jRuntime;
         _projects = projects;
@@ -382,7 +321,7 @@ public sealed class GraphIndexingService
                 project, cancellationToken);
             var databaseFingerprint = databaseSource is null
                 ? "none"
-                : await _sqlExtractor.ComputeDatabaseFingerprintAsync(
+                : await _databaseExtractor.ComputeFingerprintAsync(
                     databaseSource, cancellationToken);
             var workingFingerprint = WorkingFingerprint(
                 fileManifests, databaseFingerprint);
@@ -498,7 +437,7 @@ public sealed class GraphIndexingService
             if (!bodyDelta && databaseSource is not null)
             {
                 var databaseClock = Stopwatch.StartNew();
-                fragments.Add(await _sqlExtractor.ExtractDatabaseAsync(
+                fragments.Add(await _databaseExtractor.ExtractAsync(
                     databaseSource, cancellationToken));
                 databaseClock.Stop();
                 stages["extract:sqlserver-live-database-v3"] =
@@ -751,7 +690,7 @@ public sealed class GraphIndexingService
         ProjectIndexManifest? current,
         string? neo4jManifest,
         string workingFingerprint,
-        SqlServerGraphSource? databaseSource,
+        GraphDatabaseSource? databaseSource,
         string? databaseFingerprint) =>
         _options.EnableNoOpFastPath &&
         !_options.ForceFullIndex &&
@@ -771,7 +710,7 @@ public sealed class GraphIndexingService
         ProjectIndexManifest? current,
         string? neo4jManifest,
         IReadOnlyList<IndexedFileManifest> liveFiles,
-        SqlServerGraphSource? databaseSource,
+        GraphDatabaseSource? databaseSource,
         string? databaseFingerprint,
         GraphSnapshot? activeSnapshot)
     {
@@ -827,7 +766,7 @@ public sealed class GraphIndexingService
 
     private static bool DatabaseFingerprintMatches(
         GraphSnapshot snapshot,
-        SqlServerGraphSource? databaseSource,
+        GraphDatabaseSource? databaseSource,
         string? databaseFingerprint)
     {
         var databaseArtifacts = snapshot.Artifacts
@@ -1235,33 +1174,51 @@ public sealed class GraphIndexWatcherService(
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
+        try
         {
-            var allProjects = await projects.ListAsync(stoppingToken);
-            var activeIds = allProjects.Select(project => project.Id)
-                .ToHashSet(StringComparer.Ordinal);
-            foreach (var project in allProjects)
+            while (!stoppingToken.IsCancellationRequested)
             {
-                if (_watchers.ContainsKey(project.Id) || !Directory.Exists(project.RootPath))
-                    continue;
-                var watcher = new FileSystemWatcher(project.RootPath)
+                var allProjects = await projects.ListAsync(stoppingToken);
+                var activeIds = allProjects.Select(project => project.Id)
+                    .ToHashSet(StringComparer.Ordinal);
+                foreach (var project in allProjects)
                 {
-                    IncludeSubdirectories = true,
-                    NotifyFilter = NotifyFilters.FileName |
-                                   NotifyFilters.DirectoryName |
-                                   NotifyFilters.LastWrite |
-                                   NotifyFilters.Size,
-                    EnableRaisingEvents = true,
-                };
-                watcher.Changed += (_, args) => Schedule(project.Id, args.FullPath, stoppingToken);
-                watcher.Created += (_, args) => Schedule(project.Id, args.FullPath, stoppingToken);
-                watcher.Deleted += (_, args) => Schedule(project.Id, args.FullPath, stoppingToken);
-                watcher.Renamed += (_, args) => Schedule(project.Id, args.FullPath, stoppingToken);
-                if (!_watchers.TryAdd(project.Id, watcher)) watcher.Dispose();
+                    if (_watchers.ContainsKey(project.Id) ||
+                        !Directory.Exists(project.RootPath))
+                        continue;
+                    var watcher = new FileSystemWatcher(project.RootPath)
+                    {
+                        IncludeSubdirectories = true,
+                        NotifyFilter = NotifyFilters.FileName |
+                                       NotifyFilters.DirectoryName |
+                                       NotifyFilters.LastWrite |
+                                       NotifyFilters.Size,
+                        EnableRaisingEvents = true,
+                    };
+                    watcher.Changed += (_, args) =>
+                        Schedule(project.Id, args.FullPath, stoppingToken);
+                    watcher.Created += (_, args) =>
+                        Schedule(project.Id, args.FullPath, stoppingToken);
+                    watcher.Deleted += (_, args) =>
+                        Schedule(project.Id, args.FullPath, stoppingToken);
+                    watcher.Renamed += (_, args) =>
+                        Schedule(project.Id, args.FullPath, stoppingToken);
+                    if (!_watchers.TryAdd(project.Id, watcher))
+                        watcher.Dispose();
+                }
+                foreach (var stale in _watchers.Keys
+                             .Where(id => !activeIds.Contains(id))
+                             .ToList())
+                {
+                    if (_watchers.TryRemove(stale, out var watcher))
+                        watcher.Dispose();
+                }
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
-            foreach (var stale in _watchers.Keys.Where(id => !activeIds.Contains(id)).ToList())
-                if (_watchers.TryRemove(stale, out var watcher)) watcher.Dispose();
-            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // 正常 Host 關機不應被 BackgroundService 視為未處理例外。
         }
     }
 

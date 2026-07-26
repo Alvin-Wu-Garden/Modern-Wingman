@@ -11,6 +11,8 @@ public sealed record ConversationDto(
     string Id,
     string Title,
     string? ProviderProfileId,
+    string Scope,
+    string? ProjectId,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     List<MessageDto>? Messages = null   // null = list view；非 null = detail view
@@ -21,14 +23,18 @@ public sealed record SendMessageRequest(
     string? ProviderProfileId = null,
     /// <summary>選擇性模型 ID 覆蓋，例如 "gpt-4o"、"claude-sonnet-4-5"。null = 使用 profile 預設值。</summary>
     string? ModelId = null,
-    /// <summary>ask | plan | auto | full_auto；未指定時使用 plan。</summary>
-    string? AgentMode = null,
-    IReadOnlyList<AttachmentReference>? Attachments = null,
-    string? ProjectId = null,
-    bool IncludeUncommittedChanges = true
+    IReadOnlyList<AttachmentReference>? Attachments = null
 );
 
-public sealed record AttachmentReference(string Path, string? Name = null, string? MediaType = null);
+/// <summary>
+/// 只在單次對話請求中存在的附件。
+/// 前端傳送使用者實際選取的內容，不傳本機路徑，避免開放 CORS 的 localhost API
+/// 被其他網頁拿來讀取任意檔案。附件不會寫入對話資料表或 GraphRAG。
+/// </summary>
+public sealed record AttachmentReference(
+    string Name,
+    string ContentBase64,
+    string? MediaType = null);
 
 /// <summary>
 /// Provider API Key + 設定 狀態（GET /api/providers/{id}/key-status）。

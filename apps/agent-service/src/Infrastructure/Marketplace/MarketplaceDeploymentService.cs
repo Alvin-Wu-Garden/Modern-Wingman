@@ -8,8 +8,7 @@ public sealed class MarketplaceDeploymentService(
     IMarketplaceArtifactStore artifactStore,
     IMarketplaceDeploymentStore deploymentStore,
     IMarketplaceInstallabilityStore installabilityStore,
-    IEnumerable<IAgentTargetAdapter> adapters,
-    IMarketplaceActivityRecorder? activity = null) : IMarketplaceDeploymentService
+    IEnumerable<IAgentTargetAdapter> adapters) : IMarketplaceDeploymentService
 {
     private readonly IReadOnlyDictionary<string, IAgentTargetAdapter> _adapters = adapters.ToDictionary(adapter => adapter.Descriptor.Id, StringComparer.OrdinalIgnoreCase);
 
@@ -86,7 +85,6 @@ public sealed class MarketplaceDeploymentService(
             catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or DirectoryNotFoundException or IOException or UnauthorizedAccessException or KeyNotFoundException)
             { results.Add(new(request.TargetId, request.Scope, "Failed", null, ex.Message)); }
         }
-        await RecordResultsAsync("skill-deploy", requests[0].ArtifactId, results, cancellationToken);
         return new(results);
     }
 
@@ -117,17 +115,7 @@ public sealed class MarketplaceDeploymentService(
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             { results.Add(new(deployment.TargetId, deployment.Scope, "Failed", deployment.TargetPath, ex.Message)); }
         }
-        await RecordResultsAsync("skill-remove", artifactId, results, cancellationToken);
         return new(results);
-    }
-
-    private async Task RecordResultsAsync(string eventType, string artifactId, IReadOnlyList<MarketplaceDeploymentResult> results, CancellationToken ct)
-    {
-        if (activity is null) return;
-        var operationId = Guid.NewGuid().ToString("N");
-        foreach (var result in results)
-            await activity.RecordAsync(new(Guid.NewGuid().ToString("N"), operationId, eventType, result.Status, artifactId, result.TargetId,
-                result.Message ?? result.TargetPath, DateTimeOffset.UtcNow), ct);
     }
 
     private static void CopyAtomically(string source, string destination, CancellationToken ct)

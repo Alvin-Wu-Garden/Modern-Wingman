@@ -1,17 +1,22 @@
 using System.Security.Cryptography;
 using System.Text;
 using AgentService.Application.Contracts;
-using Microsoft.EntityFrameworkCore;
 
 namespace AgentService.Infrastructure.Persistence;
 
+/// <summary>
+/// 使用 Windows DPAPI CurrentUser 保護本機機密。
+/// 密文只能由同一部 Windows 電腦上的同一位使用者解密，不提供跨平台降級儲存。
+/// </summary>
 public sealed class DpapiSecretProtector : ISecretProtector
 {
-    private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("ModernWingman.VcsCredentials.v1");
+    private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("ModernWingman.LocalSecrets.v1");
 
+    /// <summary>將明文轉成含版本化 scheme 的 Base64 DPAPI 密文。</summary>
     public ProtectedSecret Protect(string plaintext)
     {
-        if (!OperatingSystem.IsWindows()) return new(plaintext, "plaintext");
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Modern Wingman 僅支援 Windows 10／11 x64。");
         var encrypted = ProtectedData.Protect(
             Encoding.UTF8.GetBytes(plaintext),
             Entropy,
@@ -19,35 +24,12 @@ public sealed class DpapiSecretProtector : ISecretProtector
         return new(Convert.ToBase64String(encrypted), "dpapi-current-user-v1");
     }
 
+    /// <summary>驗證 scheme 後解密；未知或非 Windows 環境採 fail-closed。</summary>
     public string Unprotect(string value, string scheme) => scheme switch
     {
-        "plaintext" or "" => value,
         "dpapi-current-user-v1" when OperatingSystem.IsWindows() => Encoding.UTF8.GetString(
             ProtectedData.Unprotect(Convert.FromBase64String(value), Entropy, DataProtectionScope.CurrentUser)),
         "dpapi-current-user-v1" => throw new PlatformNotSupportedException("Windows DPAPI credentials can only be read by the Windows user that saved them."),
         _ => throw new InvalidOperationException($"Unsupported credential encryption scheme: {scheme}"),
     };
-}
-
-public sealed class VcsCredentialProtectionMigration(
-    IDbContextFactory<AppDbContext> factory,
-    ISecretProtector protector) : IVcsCredentialProtectionMigration
-{
-    public async Task<int> MigrateAsync(CancellationToken ct = default)
-    {
-        if (!OperatingSystem.IsWindows()) return 0;
-        await using var db = await factory.CreateDbContextAsync(ct);
-        var rows = await db.VcsCredentials
-            .Where(row => row.EncryptionScheme == "plaintext" && row.SecretValue != "")
-            .ToListAsync(ct);
-        foreach (var row in rows)
-        {
-            var protectedSecret = protector.Protect(row.SecretValue);
-            row.SecretValue = protectedSecret.Value;
-            row.EncryptionScheme = protectedSecret.Scheme;
-            row.UpdatedAt = DateTimeOffset.UtcNow;
-        }
-        if (rows.Count > 0) await db.SaveChangesAsync(ct);
-        return rows.Count;
-    }
 }

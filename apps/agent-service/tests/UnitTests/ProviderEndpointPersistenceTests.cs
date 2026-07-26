@@ -30,7 +30,7 @@ public sealed class ProviderEndpointPersistenceTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
         Assert.Equal("invalid", document.RootElement.GetProperty("status").GetString());
-        Assert.Null(await ReadStoredKeyAsync(databasePath, "openai-byok"));
+        Assert.Null(await ReadStoredCiphertextAsync(databasePath, "openai-byok"));
     }
 
     [Fact]
@@ -47,7 +47,13 @@ public sealed class ProviderEndpointPersistenceTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
         Assert.Equal("valid", document.RootElement.GetProperty("status").GetString());
-        Assert.Equal("candidate-secret", await ReadStoredKeyAsync(databasePath, "openai-byok"));
+        Assert.NotEqual(
+            "candidate-secret",
+            await ReadStoredCiphertextAsync(databasePath, "openai-byok"));
+        Assert.Equal(
+            "candidate-secret",
+            factory.Services.GetRequiredService<IProviderSettingStore>()
+                .GetApiKey("openai-byok"));
     }
 
     [Fact]
@@ -60,8 +66,8 @@ public sealed class ProviderEndpointPersistenceTests
         // Start the host so migrations create the real SQLite schema before seeding an existing credential.
         using var initializeResponse = await client.GetAsync("/api/providers");
         initializeResponse.EnsureSuccessStatusCode();
-        await WriteStoredCredentialAsync(
-            databasePath,
+        var settingStore = factory.Services.GetRequiredService<IProviderSettingStore>();
+        await settingStore.SetValidatedCredentialAsync(
             "openai-byok",
             "existing-secret",
             "https://old.example.test/v1");
@@ -73,9 +79,10 @@ public sealed class ProviderEndpointPersistenceTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
         Assert.Equal("invalid", document.RootElement.GetProperty("status").GetString());
+        Assert.Equal("existing-secret", settingStore.GetApiKey("openai-byok"));
         Assert.Equal(
-            ("existing-secret", "https://old.example.test/v1"),
-            await ReadStoredCredentialAsync(databasePath, "openai-byok"));
+            "https://old.example.test/v1",
+            (await settingStore.GetAsync("openai-byok"))!.BaseUrl);
     }
 
     private static string CreateDatabasePath()
@@ -88,54 +95,21 @@ public sealed class ProviderEndpointPersistenceTests
         return Path.Combine(directory, "wingman.db");
     }
 
-    private static async Task<string?> ReadStoredKeyAsync(string databasePath, string profileId)
-    {
-        await using var connection = new SqliteConnection($"Data Source={databasePath}");
-        await connection.OpenAsync();
-        await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT ApiKey FROM ProviderSettings WHERE ProfileId = $profileId";
-        command.Parameters.AddWithValue("$profileId", profileId);
-        return await command.ExecuteScalarAsync() as string;
-    }
-
-    private static async Task<(string? ApiKey, string? BaseUrl)> ReadStoredCredentialAsync(
+    /// <summary>只讀取資料庫密文，用來證明候選 Key 沒有以明文落地。</summary>
+    private static async Task<string?> ReadStoredCiphertextAsync(
         string databasePath,
         string profileId)
     {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT ApiKey, BaseUrl FROM ProviderSettings WHERE ProfileId = $profileId";
-        command.Parameters.AddWithValue("$profileId", profileId);
-        await using var reader = await command.ExecuteReaderAsync();
-        Assert.True(await reader.ReadAsync());
-        return (
-            reader.IsDBNull(0) ? null : reader.GetString(0),
-            reader.IsDBNull(1) ? null : reader.GetString(1));
-    }
-
-    private static async Task WriteStoredCredentialAsync(
-        string databasePath,
-        string profileId,
-        string apiKey,
-        string baseUrl)
-    {
-        await using var connection = new SqliteConnection($"Data Source={databasePath}");
-        await connection.OpenAsync();
-        await using var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT INTO ProviderSettings (ProfileId, ApiKey, BaseUrl, SortOrder, UpdatedAt)
-            VALUES ($profileId, $apiKey, $baseUrl, 0, $updatedAt)
-            ON CONFLICT(ProfileId) DO UPDATE SET
-                ApiKey = excluded.ApiKey,
-                BaseUrl = excluded.BaseUrl,
-                UpdatedAt = excluded.UpdatedAt
+            SELECT ProtectedApiKey
+            FROM ProviderSettings
+            WHERE ProfileId = $profileId
             """;
         command.Parameters.AddWithValue("$profileId", profileId);
-        command.Parameters.AddWithValue("$apiKey", apiKey);
-        command.Parameters.AddWithValue("$baseUrl", baseUrl);
-        command.Parameters.AddWithValue("$updatedAt", DateTimeOffset.UtcNow.ToString("O"));
-        await command.ExecuteNonQueryAsync();
+        return await command.ExecuteScalarAsync() as string;
     }
 
     private sealed class ProviderFactory(
