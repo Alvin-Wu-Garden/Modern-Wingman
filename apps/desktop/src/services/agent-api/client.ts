@@ -1,18 +1,17 @@
 /**
- * Agent Service REST API Client
- * Base URL: http://localhost:5002  (REST endpoint)
+ * Agent Service 共用 REST client。
+ * 所有前端功能應由此處取得同一個 Base URL，避免各模組各自寫死連線位址。
  */
+export const AGENT_API_BASE_URL = 'http://localhost:5002'
 
-import type { AgentMode } from '@modern-wingman/contracts'
-
-const BASE_URL = 'http://localhost:5002'
-
-// ── Types ─────────────────────────────────────────────────────────────────────
+export type ConversationScope = 'general' | 'project'
 
 export interface ConversationSummary {
   id: string
   title: string
   providerProfileId: string | null
+  scope: ConversationScope
+  projectId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -26,6 +25,12 @@ export interface MessageItem {
 
 export interface ConversationDetail extends ConversationSummary {
   messages: MessageItem[]
+}
+
+export interface AttachmentReference {
+  name: string
+  contentBase64: string
+  mediaType: string | null
 }
 
 export interface ProviderInfo {
@@ -57,228 +62,146 @@ export interface CopilotRuntimeStatus {
   modelCount: number | null
   error: string | null
 }
-export interface AttachmentReference { path:string; name:string; mediaType:string|null }
-
-export interface PendingApproval {
-  id: string
-  runId: string
-  operation: string
-  target: string | null
-  workingDirectory: string | null
-  summary: string | null
-  capabilities: string
-  riskLevel: 'low' | 'medium' | 'high' | 'critical'
-  status: 'pending'
-  createdAt: string
-}
-
-export interface RunChangeSet {
-  checkpointId: string
-  runId: string
-  workspacePath: string
-  createdAt: string
-  files: Array<{
-    relativePath: string
-    kind: 'Added' | 'Modified' | 'Deleted' | 'Renamed'
-    baselineHash: string | null
-    currentHash: string | null
-    binary: boolean
-    unifiedDiff: string | null
-    originalPath: string | null
-    hunks: Array<{index:number;oldStart:number;oldCount:number;newStart:number;newCount:number;lines:string[]}> | null
-  }>
-  validation:{status:string;attempt:number;errorSanitized:string|null;endedAt:string|null}|null
-}
-
-// ── Conversation API ──────────────────────────────────────────────────────────
 
 export async function listConversations(): Promise<ConversationSummary[]> {
-  const res = await fetch(`${BASE_URL}/api/conversations`)
-  if (!res.ok) throw new Error(`listConversations: ${res.status}`)
-  return res.json()
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/conversations`)
+  if (!response.ok) throw new Error(`無法載入對話：HTTP ${response.status}`)
+  return response.json()
 }
 
-export async function createConversation(providerProfileId?: string): Promise<ConversationSummary> {
-  const res = await fetch(`${BASE_URL}/api/conversations`, {
+export async function createConversation(
+  scope: ConversationScope,
+  projectId?: string | null,
+  providerProfileId?: string | null,
+): Promise<ConversationSummary> {
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/conversations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ providerProfileId: providerProfileId ?? null }),
+    body: JSON.stringify({
+      scope,
+      projectId: scope === 'project' ? projectId ?? null : null,
+      providerProfileId: providerProfileId ?? null,
+    }),
   })
-  if (!res.ok) throw new Error(`createConversation: ${res.status}`)
-  return res.json()
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: string } | null
+    throw new Error(body?.error ?? `無法建立對話：HTTP ${response.status}`)
+  }
+  return response.json()
 }
 
 export async function getConversation(id: string): Promise<ConversationDetail> {
-  const res = await fetch(`${BASE_URL}/api/conversations/${id}`)
-  if (!res.ok) throw new Error(`getConversation: ${res.status}`)
-  return res.json()
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/conversations/${id}`)
+  if (!response.ok) throw new Error(`無法載入對話：HTTP ${response.status}`)
+  return response.json()
 }
 
 export async function deleteConversation(id: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/conversations/${id}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`deleteConversation: ${res.status}`)
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/conversations/${id}`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) throw new Error(`無法刪除對話：HTTP ${response.status}`)
 }
 
 export async function renameConversation(id: string, title: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/conversations/${id}/title`, {
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/conversations/${id}/title`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title }),
   })
-  if (!res.ok) throw new Error(`renameConversation: ${res.status}`)
+  if (!response.ok) throw new Error(`無法重新命名對話：HTTP ${response.status}`)
 }
 
 /**
- * 傳送訊息並以 SSE 串流接收回應。
- * onToken: 每個 token 回呼
- * onDone:  串流完成回呼
- * onError: 發生錯誤回呼
+ * 傳送訊息並解析後端 SSE。附件只存在本次 request，不會寫入 GraphRAG。
  */
 export async function sendMessage(
   conversationId: string,
   userMessage: string,
   providerProfileId: string | null,
-  onToken: (token: string) => void,
-  onDone: () => void,
-  onError: (err: string) => void,
+  modelId: string | null,
+  attachments: AttachmentReference[],
+  handlers: {
+    onToken: (token: string) => void
+    onDone: () => void
+    onError: (error: string) => void
+  },
   signal?: AbortSignal,
-  modelId?: string | null,
-  agentMode: AgentMode = 'plan',
-  onRunStarted?: (run: {runId:string}) => void,
-  onTimeline?: (event: TimelineEvent) => void,
-  attachments: AttachmentReference[] = [],
-  projectId?: string | null,
-  includeUncommittedChanges=true,
 ): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/conversations/${conversationId}/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userMessage, providerProfileId, modelId: modelId ?? null, agentMode, attachments, projectId:projectId??null,includeUncommittedChanges }),
-    signal,
-  })
-
-  if (!res.ok) {
-    onError(`HTTP ${res.status}`)
+  const response = await fetch(
+    `${AGENT_API_BASE_URL}/api/conversations/${conversationId}/messages`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userMessage,
+        providerProfileId,
+        modelId,
+        attachments,
+      }),
+      signal,
+    },
+  )
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: string } | null
+    handlers.onError(body?.error ?? `HTTP ${response.status}`)
+    return
+  }
+  if (!response.body) {
+    handlers.onError('服務未回傳串流內容。')
     return
   }
 
-  if (!res.body) {
-    onError('No response body')
-    return
-  }
-
-  const reader = res.body.getReader()
+  const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-
   try {
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
-
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue
-        const json = line.slice(6).trim()
-        if (!json) continue
-
+        const payload = line.slice(6).trim()
+        if (!payload) continue
         try {
-          const evt = JSON.parse(json) as Record<string, unknown>
-          if (evt.runId && typeof evt.runId === 'string') {
-            onRunStarted?.({runId:evt.runId})
-          } else if (evt.timeline && typeof evt.timeline === 'object') {
-            onTimeline?.(evt.timeline as TimelineEvent)
-          } else if (evt.token) {
-            // unescape the token
-            const raw = (evt.token as string)
-              .replace(/\\n/g, '\n')
-              .replace(/\\r/g, '\r')
-              .replace(/\\\\/g, '\\')
-            onToken(raw)
-          } else if (evt.done) {
-            onDone()
-          } else if (evt.error) {
-            onError(evt.error as string)
-          } else if (evt.cancelled) {
-            onDone()
+          const event = JSON.parse(payload) as {
+            token?: string
+            done?: boolean
+            error?: string
           }
+          if (typeof event.token === 'string') handlers.onToken(event.token)
+          else if (event.done) handlers.onDone()
+          else if (event.error) handlers.onError(event.error)
         } catch {
-          // ignore malformed lines
+          // 忽略單一格式錯誤事件，後續 SSE 仍可繼續處理。
         }
       }
     }
-  } catch (e) {
-    if ((e as Error).name !== 'AbortError') onError(String(e))
+  } catch (error) {
+    if ((error as Error).name !== 'AbortError')
+      handlers.onError(String(error))
   }
 }
-
-export interface TimelineEvent { type:'tool_call'|'tool_result'|'phase'|'plan'|'verify';callId:string|null;name:string|null;data:unknown;timestamp:string }
-export interface PersistedRunEvent{sequence:number;event:{runId:string;eventType:string;timestamp:string;payloadJson:string}}
-export async function listRunEvents(runId:string,after=0){const response=await fetch(`${BASE_URL}/api/runs/${runId}/events?after=${after}&limit=200`);if(!response.ok)throw new Error(`listRunEvents: ${response.status}`);return response.json() as Promise<PersistedRunEvent[]>}
-
-export async function listPendingApprovals(runId: string): Promise<PendingApproval[]> {
-  const res = await fetch(`${BASE_URL}/api/approvals/runs/${runId}`)
-  if (!res.ok) throw new Error(`listPendingApprovals: ${res.status}`)
-  return res.json()
-}
-
-export async function resolveApproval(
-  approvalId: string,
-  approved: boolean,
-  scope: 'once' | 'run' | 'workspace' = 'once',
-): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/approvals/${approvalId}/decision`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ approved, scope }),
-  })
-  if (!res.ok) throw new Error(`resolveApproval: ${res.status}`)
-}
-
-export async function getRunChangeSet(runId: string): Promise<RunChangeSet | null> {
-  const res = await fetch(`${BASE_URL}/api/runs/${runId}/changeset`)
-  if (res.status === 404 || res.status === 409) return null
-  if (!res.ok) throw new Error(`getRunChangeSet: ${res.status}`)
-  return res.json()
-}
-
-export async function restoreRunChangeSet(runId: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/runs/${runId}/changeset/restore`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ force: false }),
-  })
-  if (!res.ok) {
-    const body = await res.json().catch(() => null)
-    throw new Error(body?.conflicts?.length
-      ? `檔案已被再次修改，無法安全復原：${body.conflicts.join(', ')}`
-      : `restoreRunChangeSet: ${res.status}`)
-  }
-}
-export async function updateRunChangeFiles(runId:string,paths:string[],action:'accept'|'restore'):Promise<void>{const res=await fetch(`${BASE_URL}/api/runs/${runId}/changeset/files/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths,force:false})});if(!res.ok){const body=await res.json().catch(()=>null);throw new Error(body?.error??body?.conflicts?.join(', ')??`HTTP ${res.status}`)}}
-export async function updateRunChangeHunks(runId:string,path:string,hunkIndexes:number[],action:'accept'|'restore'):Promise<void>{const res=await fetch(`${BASE_URL}/api/runs/${runId}/changeset/hunks/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,hunkIndexes})});if(!res.ok){const body=await res.json().catch(()=>null);throw new Error(body?.error??body?.conflicts?.join(', ')??`HTTP ${res.status}`)}}
-export interface WorkspaceActionResult{success:boolean;action:string;output:string|null;error:string|null;requiresProtectedConfirmation:boolean}
-export interface WorkspaceActionPreview{vcsType:string|null;remote:string|null;target:string|null;revision:string|null;protected:boolean}
-export async function runWorkspaceAction(runId:string,action:'retain'|'discard'|'apply'|'commit'|'push'|'svn_commit',message?:string,protectedConfirmed=false){const res=await fetch(`${BASE_URL}/api/runs/${runId}/workspace/actions`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,message:message||null,protectedConfirmed})});const body=await res.json() as WorkspaceActionResult;if(!res.ok&&!body.requiresProtectedConfirmation)throw new Error(body.error??`HTTP ${res.status}`);return body}
-export async function getWorkspaceActionPreview(runId:string){const res=await fetch(`${BASE_URL}/api/runs/${runId}/workspace/preview`);if(!res.ok)throw new Error(`HTTP ${res.status}`);return res.json() as Promise<WorkspaceActionPreview>}
-export async function retryRunFromSafeStep(runId:string,providerProfileId?:string|null){const res=await fetch(`${BASE_URL}/api/runs/${runId}/retry`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({providerProfileId:providerProfileId??null})});const body=await res.json();if(!res.ok)throw new Error(body?.error??`HTTP ${res.status}`);return body}
-export async function approveWorkflowPlan(runId:string){const res=await fetch(`${BASE_URL}/api/workflow/${runId}/approve`,{method:'POST'});const body=await res.json().catch(()=>null);if(!res.ok)throw new Error(body?.error??`HTTP ${res.status}`);return body}
-
-// ── Provider / API Key API ────────────────────────────────────────────────────
 
 export async function listProviders(): Promise<ProviderInfo[]> {
-  const res = await fetch(`${BASE_URL}/api/providers`)
-  if (!res.ok) throw new Error(`listProviders: ${res.status}`)
-  return res.json()
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers`)
+  if (!response.ok) throw new Error(`無法載入供應商：HTTP ${response.status}`)
+  return response.json()
 }
 
 export async function getProviderKeyStatus(profileId: string): Promise<ProviderKeyStatus> {
-  const res = await fetch(`${BASE_URL}/api/providers/${profileId}/key-status`)
-  if (!res.ok) throw new Error(`getProviderKeyStatus: ${res.status}`)
-  return res.json()
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers/${profileId}/key-status`)
+  if (!response.ok) throw new Error(`無法取得供應商狀態：HTTP ${response.status}`)
+  return response.json()
+}
+
+export interface KeyValidationResult {
+  valid: boolean
+  scopes?: string
+  error?: string
 }
 
 export async function setProviderKey(
@@ -286,81 +209,72 @@ export async function setProviderKey(
   apiKey: string,
   baseUrl?: string | null,
 ): Promise<KeyValidationResult> {
-  const res = await fetch(`${BASE_URL}/api/providers/${profileId}/key`, {
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers/${profileId}/key`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ apiKey, baseUrl: baseUrl ?? null }),
   })
-  if (!res.ok) {
-    const body = await res.json().catch(() => null) as { error?: string } | null
-    throw new Error(body?.error ?? `setProviderKey: ${res.status}`)
-  }
-  const result = await res.json() as { status: 'valid' | 'invalid'; message?: string }
+  const body = await response.json().catch(() => null) as {
+    status?: 'valid' | 'invalid'
+    message?: string
+    error?: string
+  } | null
+  if (!response.ok)
+    throw new Error(body?.error ?? `無法儲存 API Key：HTTP ${response.status}`)
   return {
-    valid: result.status === 'valid',
-    error: result.status === 'invalid' ? result.message : undefined,
+    valid: body?.status === 'valid',
+    error: body?.status === 'invalid' ? body.message : undefined,
   }
 }
 
 export async function deleteProviderKey(profileId: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/providers/${profileId}/key`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`deleteProviderKey: ${res.status}`)
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers/${profileId}/key`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) throw new Error(`無法刪除 API Key：HTTP ${response.status}`)
 }
 
 export async function reorderProviders(profileIds: string[]): Promise<void> {
-  const res = await fetch(`${BASE_URL}/api/providers/reorder`, {
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers/reorder`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ order: profileIds }),
   })
-  if (!res.ok) throw new Error(`reorderProviders: ${res.status}`)
+  if (!response.ok) throw new Error(`無法調整供應商順序：HTTP ${response.status}`)
 }
 
-// ── Key Validation ────────────────────────────────────────────────────────────
-
-export interface KeyValidationResult {
-  valid: boolean
-  /** For GitHub PAT: the x-oauth-scopes header value */
-  scopes?: string
-  error?: string
-}
-
-/** 透過後端代理驗證 Skills 功能使用的 GitHub PAT。 */
-export async function validateGithubPatViaBackend(apiKey: string): Promise<KeyValidationResult> {
+export async function validateGithubPatViaBackend(
+  apiKey: string,
+): Promise<KeyValidationResult> {
   try {
-    const res = await fetch(`${BASE_URL}/api/providers/validate-key`, {
+    const response = await fetch(`${AGENT_API_BASE_URL}/api/providers/validate-key`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ apiKey }),
     })
-    if (!res.ok) return { valid: false, error: `HTTP ${res.status}` }
-    const data = await res.json() as { valid: boolean; error?: string; scopes?: string }
-    return { valid: data.valid, error: data.error, scopes: data.scopes }
-  } catch (e) {
-    return { valid: false, error: String(e) }
+    if (!response.ok) return { valid: false, error: `HTTP ${response.status}` }
+    return response.json()
+  } catch (error) {
+    return { valid: false, error: String(error) }
   }
 }
-
-// ── Model listing (React-side only) ──────────────────────────────────────────
 
 export interface ModelGroup {
   group: string
   models: string[]
 }
 
-/**
- * Fetch available models for a specific provider via backend API.
- * Works for all providers including CopilotDefault (which uses the Copilot SDK server-side).
- */
 export async function listProviderModels(profileId: string): Promise<ModelGroup[]> {
-  const res = await fetch(`${BASE_URL}/api/providers/${profileId}/models`)
-  if (!res.ok) return []
-  const data = await res.json() as { id: string; displayName: string; group: string }[]
-  // Group by the 'group' field
-  const map = new Map<string, string[]>()
-  for (const m of data) {
-    if (!map.has(m.group)) map.set(m.group, [])
-    map.get(m.group)!.push(m.id)
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers/${profileId}/models`)
+  if (!response.ok) return []
+  const models = await response.json() as Array<{
+    id: string
+    group: string
+  }>
+  const groups = new Map<string, string[]>()
+  for (const model of models) {
+    if (!groups.has(model.group)) groups.set(model.group, [])
+    groups.get(model.group)!.push(model.id)
   }
-  return Array.from(map.entries()).map(([group, models]) => ({ group, models }))
+  return [...groups].map(([group, values]) => ({ group, models: values }))
 }

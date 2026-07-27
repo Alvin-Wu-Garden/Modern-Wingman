@@ -10,7 +10,11 @@ public interface IConversationRepository
 {
     Task<List<ConversationEntity>> ListAsync(CancellationToken ct = default);
     Task<ConversationEntity?> GetAsync(string id, CancellationToken ct = default);
-    Task<ConversationEntity> CreateAsync(string? providerProfileId = null, CancellationToken ct = default);
+    Task<ConversationEntity> CreateAsync(
+        string? providerProfileId = null,
+        ConversationScope scope = ConversationScope.General,
+        string? projectId = null,
+        CancellationToken ct = default);
     Task DeleteAsync(string id, CancellationToken ct = default);
 
     Task<string> AddMessageAsync(string conversationId, MessageRole role, string content, CancellationToken ct = default);

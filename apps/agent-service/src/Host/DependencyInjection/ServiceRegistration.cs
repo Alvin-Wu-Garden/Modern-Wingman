@@ -1,21 +1,12 @@
 using AgentService.Application.Contracts;
-using AgentService.Host.GrpcServices;
 using AgentService.Host.RestEndpoints;
 using AgentService.Infrastructure.AgentFramework;
-using AgentService.Infrastructure.ChangeIntelligence;
-using AgentService.Infrastructure.ChangeIntelligence.DataIntelligence;
-using AgentService.Infrastructure.Changes;
 using AgentService.Infrastructure.Orchestration;
-using AgentService.Infrastructure.Mcp;
-using AgentService.Infrastructure.Context;
 using AgentService.Infrastructure.Persistence;
 using AgentService.Infrastructure.Providers;
 using AgentService.Infrastructure.Speech;
 using AgentService.Infrastructure.Skills;
-using AgentService.Infrastructure.Streaming;
 using AgentService.Infrastructure.Telemetry;
-using AgentService.Infrastructure.Tools;
-using AgentService.Infrastructure.Workflow;
 using AgentService.Infrastructure.VersionControl;
 using AgentService.Infrastructure.Marketplace;
 using AgentService.Modules.GraphRAG;
@@ -31,9 +22,6 @@ public static class ServiceRegistration
         IConfiguration configuration,
         IHostEnvironment environment)
     {
-        // ── gRPC ──────────────────────────────────────────────────────────────
-        services.AddGrpc();
-
         // ── REST / JSON ────────────────────────────────────────────────────────
         services.AddCors(opts =>
             opts.AddDefaultPolicy(p => p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
@@ -55,8 +43,6 @@ public static class ServiceRegistration
         // ── Options / BYOK 設定綁定 ────────────────────────────────────────────
         services.Configure<AgentServiceOptions>(
             configuration.GetSection(AgentServiceOptions.SectionName));
-        services.Configure<LlmTelemetryOptions>(
-            configuration.GetSection(LlmTelemetryOptions.SectionName));
 
         // ── SQLite / EF Core ──────────────────────────────────────────────────
         var connectionString = DatabasePathResolver.ResolveConnectionString(configuration, environment);
@@ -67,12 +53,7 @@ public static class ServiceRegistration
 
         // ── Persistence ────────────────────────────────────────────────────────
         services.AddScoped<IConversationRepository, ConversationRepository>();
-        services.AddSingleton<IRunRepository, RunRepository>();
-        services.AddSingleton<IApprovalRepository, ApprovalRepository>();
-        services.AddSingleton<IRunEventRepository, RunEventRepository>();
-        services.AddSingleton<IContextSnapshotRepository, ContextSnapshotRepository>();
-        services.AddSingleton<IRunStepRepository, RunStepRepository>();
-        services.AddSingleton<IAgentScheduleStore, AgentScheduleStore>();
+        services.AddSingleton<IProjectDatabaseConfigurationStore, ProjectDatabaseConfigurationStore>();
         services.AddSingleton<IVcsProfileRepository, VcsProfileRepository>();
         services.AddSingleton<IProviderSettingStore, ProviderSettingStore>();
         services.AddSingleton<IApiKeyStore, ApiKeyStore>();
@@ -89,23 +70,11 @@ public static class ServiceRegistration
         services.AddSingleton<IProviderApiKeyValidator, CopilotApiKeyValidator>();
         services.AddSingleton<IProviderApiKeyValidator, HttpProviderApiKeyValidator>();
         services.AddSingleton<IProviderCredentialService, ProviderCredentialService>();
-        services.AddSingleton<ILlmTelemetryRecorder, LlmTelemetryRecorder>();
-        services.AddSingleton<IAuditEventRecorder, AuditEventRecorder>();
-        services.AddSingleton<ISensitiveDataRedactor, SensitiveDataRedactor>();
         services.AddSingleton<ISecretProtector, DpapiSecretProtector>();
-        services.AddSingleton<IVcsCredentialProtectionMigration, VcsCredentialProtectionMigration>();
-        services.AddSingleton<IToolCallTelemetry, ToolCallTelemetry>();
-        services.AddSingleton<IAuditQueryService, AuditQueryService>();
-        services.AddSingleton<IAuditMaintenanceService, AuditMaintenanceService>();
-        services.AddSingleton<IAgentEvalService, AgentEvalService>();
+        services.AddSingleton<ISensitiveDataRedactor, SensitiveDataRedactor>();
 
-        // ── Skills（中央 Skill Library → Wingman Agent，progressive disclosure）─
+        // ── Skills：Modern Wingman 只讀取純指示內容，不執行 Skill script。──────
         services.AddSingleton<ISkillProvider, FileSystemSkillProvider>();
-        services.AddSingleton<ISkillManifestLoader, YamlSkillManifestLoader>();
-        services.AddSingleton<IRuntimeResolver, LocalRuntimeResolver>();
-        services.AddSingleton<ISkillRiskProvider, SqliteSkillRiskProvider>();
-        services.AddSingleton<IPluginCatalog, PluginCatalog>();
-        services.AddSingleton<IRuntimeImportService, RuntimeImportService>();
         services.AddMarketplaceServices();
 
         // ── MAF Agent（Strategy：依 ProviderKind 選擇工廠，OCP）────────────────
@@ -113,87 +82,25 @@ public static class ServiceRegistration
         services.AddScoped<IAgentFactory, ByokAgentFactory>();
         services.AddScoped<WingmanChatAgent>();
 
-        // ── Streaming / Orchestration ─────────────────────────────────────────
-        services.AddSingleton<IRunEventBus, RunEventBus>();
-        services.AddSingleton<CopilotEventBridge>();
-        services.AddSingleton<IAgentPolicyProfileProvider, ConfigurationPolicyProfileProvider>();
-        services.AddSingleton<IAgentPolicyEngine, DefaultAgentPolicyEngine>();
-        services.AddSingleton<IApprovalCoordinator, ApprovalCoordinator>();
+        // Copilot SDK 若要求工具權限，一律拒絕，確保聊天只產生文字回覆。
         services.AddSingleton<CopilotPermissionHandlerFactory>();
 
-        // ── Provider-agnostic Tool Runtime ───────────────────────────────────
+        // ── 專案匯入只保留 Git clone/update 與 SVN checkout/update 所需服務。───
         services.AddSingleton<IProcessRunner, ManagedProcessRunner>();
-        services.AddSingleton<IAgentTool, ReadFileTool>();
-        services.AddSingleton<IAgentTool, SearchFilesTool>();
-        services.AddSingleton<IAgentTool, RunCommandTool>();
-        services.AddSingleton<ISkillScriptRunner, SkillScriptRunner>();
-        services.AddSingleton<IAgentTool, RunSkillScriptTool>();
-        services.AddSingleton<IAgentTool, ListDirectoryTool>();
-        services.AddSingleton<IAgentTool, ReadFileRangeTool>();
-        services.AddSingleton<IAgentTool, ApplyPatchTool>();
-        services.AddSingleton<IAgentTool, DeleteFileTool>();
-        services.AddSingleton<IAgentTool, RunBuildTool>();
-        services.AddSingleton<IAgentTool, RunTestTool>();
-        services.AddSingleton<IAgentTool, GitStatusTool>();
-        services.AddSingleton<IAgentTool, GitDiffTool>();
-        services.AddSingleton<IAgentTool, GitBranchTool>();
-        services.AddSingleton<IAgentTool, SvnStatusTool>();
-        services.AddSingleton<IAgentTool, SvnDiffTool>();
-        services.AddSingleton<IAgentTool, GitCommitTool>();
-        services.AddSingleton<IAgentTool, GitPushTool>();
-        services.AddSingleton<IAgentTool, SvnCommitTool>();
-        services.AddSingleton<IAgentTool, ReadSkillTool>();
-        services.AddSingleton<IAgentTool, QueryCodeGraphTool>();
-        services.AddSingleton<IAgentTool, AnalyzeImpactTool>();
-        services.AddSingleton<IAgentTool, CallMcpTool>();
-        services.AddSingleton<ToolRegistry>();
-        services.AddSingleton<IToolRegistry>(sp => sp.GetRequiredService<ToolRegistry>());
-        services.AddSingleton<IManagedToolRegistry>(sp => sp.GetRequiredService<ToolRegistry>());
-        services.AddSingleton<IChangeSetService, FileSystemChangeSetService>();
-        services.AddSingleton<IAgentSettingsStore, AgentSettingsStore>();
         services.AddSingleton<IVcsRuntimeResolver, VcsRuntimeResolver>();
         services.AddSingleton<IGitClient, GitClient>();
         services.AddSingleton<IProjectImportProgressStore, ProjectImportProgressStore>();
         services.AddSingleton<IVcsStateRepository, VcsStateRepository>();
-        services.AddSingleton<IProtectedRefMatcher, ProtectedRefMatcher>();
         services.AddSingleton<ISvnClient, SvnClient>();
-        services.AddSingleton<IShadowGitService, ShadowGitService>();
-        services.AddSingleton<IRunWorkspaceManager, RunWorkspaceManager>();
-        services.AddSingleton<IRunWorkspaceLifecycleService, RunWorkspaceLifecycleService>();
-        services.AddSingleton<IMcpServerRepository, McpServerRepository>();
-        services.AddSingleton<IMcpClientRuntime, McpClientRuntime>();
-        services.AddSingleton<IMcpToolCatalog, McpToolCatalog>();
-        services.AddSingleton<IContextAssembler, WorkspaceContextAssembler>();
-        services.AddSingleton<IIdeSelectionContextService, IdeSelectionContextService>();
-        services.AddSingleton<RunExecutionQueue>();
-        services.AddSingleton<IRunExecutionQueue>(sp=>sp.GetRequiredService<RunExecutionQueue>());
-        services.AddHostedService(sp=>sp.GetRequiredService<RunExecutionQueue>());
-        services.AddHostedService<RunRecoveryService>();
-        services.AddHostedService<WorkspaceRecoveryService>();
-        services.AddHostedService<AgentScheduleDispatcher>();
-        services.AddSingleton<IRunOrchestrator, RunOrchestrator>();
-        services.AddSingleton<ISubagentCoordinator, SubagentCoordinator>();
-        services.AddSingleton<IRunReplayGuard, RunReplayGuard>();
-        services.AddSingleton<IAgentHookDispatcher, AgentHookDispatcher>();
+        services.AddSingleton<ProjectJobQueue>();
+        services.AddSingleton<IProjectJobQueue>(
+            provider => provider.GetRequiredService<ProjectJobQueue>());
+        services.AddHostedService(
+            provider => provider.GetRequiredService<ProjectJobQueue>());
 
         // ── GraphRAG V3：四種節點、九種關係、單一無 profile 模組 ─────────────
-        services.AddHttpClient("mcp", client => client.Timeout = TimeSpan.FromMinutes(2));
-
         services.AddSingleton<IProjectRepository, ProjectRepository>();
         services.AddSingleton<IProjectIndexManifestStore, ProjectIndexManifestStore>();
-        services.AddSingleton<IChangeIntentClassifier, DeterministicChangeIntentClassifier>();
-        services.AddSingleton<IChangeBriefBuilder, ChangeBriefBuilder>();
-        services.AddSingleton<IClarificationPlanner, DeterministicClarificationPlanner>();
-        services.AddSingleton<IEvidencePackBuilder, BoundedEvidencePackBuilder>();
-        services.AddSingleton<IChangeAnalysisSessionStore, ChangeAnalysisSessionSqliteStore>();
-        services.AddSingleton<IChangeAnalysisSessionService, ChangeAnalysisSessionService>();
-        services.AddSingleton<IChangeImplementationPlanBuilder, ChangeImplementationPlanBuilder>();
-        services.AddSingleton<ProjectEvidencePlanner>();
-        services.AddSingleton<IReadOnlyDatabaseQueryPlanValidator, StrictReadOnlyDatabaseQueryPlanValidator>();
-        services.AddSingleton<IDatabaseRuntimeEvidenceRequestValidator, DatabaseRuntimeEvidenceRequestValidator>();
-        services.AddSingleton<IDomainGlossaryStore, DomainGlossarySqliteStore>();
-        services.AddSingleton<IDatabaseRuntimeEvidenceCoordinator, McpDatabaseRuntimeEvidenceProvider>();
-        services.AddSingleton<ProjectDataEvidencePlanner>();
         services.AddSingleton<ILlmCompletionService, CopilotCompletionService>();
         services.AddGraphRagV3(configuration);
 
@@ -214,11 +121,6 @@ public static class ServiceRegistration
         services.AddSingleton<ISpeechModelManager, SpeechModelManager>();
         services.AddSingleton<ISpeechToTextService, WhisperCliSpeechToTextService>();
 
-        // ── WS4: Explore→Plan→Code→Verify 工作流 ──────────────────────────────
-        services.AddSingleton<VerificationService>();
-        services.AddSingleton<IWorkflowCodeExecutor, CopilotWorkflowCodeExecutor>();
-        services.AddSingleton<ExplorePlanCodeVerifyWorkflow>();
-
         return services;
     }
 
@@ -230,33 +132,13 @@ public static class ServiceRegistration
         app.MapConversationEndpoints();
         app.MapProviderEndpoints();
         app.MapProjectEndpoints();
+        app.MapProjectDatabaseEndpoints();
         app.MapProjectIndexDiagnosticsEndpoints();
         app.MapSpeechEndpoints();
-        app.MapWorkflowEndpoints();
-        app.MapApprovalEndpoints();
-        app.MapRunEndpoints();
         app.MapVcsProfileEndpoints();
-        app.MapVcsProtectedRefEndpoints();
-        app.MapVcsRuntimeEndpoints();
-        app.MapGitEndpoints();
-        app.MapSvnEndpoints();
-        app.MapMcpRuntimeEndpoints();
-        app.MapAuditEndpoints();
-        app.MapSkillRuntimeEndpoints();
-        app.MapSkillRuntimeStatusEndpoints();
-        app.MapContextEndpoints();
-        app.MapProviderHealthEndpoints();
-        app.MapAgentSettingsEndpoints();
-        app.MapExtensionEndpoints();
-        app.MapAgentScheduleEndpoints();
         app.MapMarketplaceEndpoints();
-        app.MapDataIntelligenceEndpoints();
 
-        // ── gRPC ───────────────────────────────────────────────────────────────
-        app.MapGrpcService<HealthGrpcService>();
-        app.MapGrpcService<RunGrpcService>();
-
-        app.MapGet("/", () => "Modern Wingman Agent Service — REST on :5002 / gRPC on :5001");
+        app.MapGet("/", () => "Modern Wingman Agent Service — REST on :5002");
         return app;
     }
 }

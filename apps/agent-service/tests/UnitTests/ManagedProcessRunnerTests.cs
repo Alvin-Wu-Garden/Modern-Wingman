@@ -1,5 +1,5 @@
 using AgentService.Application.Models;
-using AgentService.Infrastructure.Tools;
+using AgentService.Infrastructure.VersionControl;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgentService.UnitTests;

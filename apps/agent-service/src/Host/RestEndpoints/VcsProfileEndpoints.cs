@@ -11,8 +11,6 @@ public static class VcsProfileEndpoints
         string BaseUrl,
         bool SslVerificationEnabled,
         string? DefaultWorkspaceRoot,
-        string? CommitAuthorName,
-        string? CommitAuthorEmail,
         bool Enabled,
         string? Username,
         string? SecretType,
@@ -26,6 +24,7 @@ public static class VcsProfileEndpoints
         group.MapPost("/", Create);
         group.MapPut("/{id}", Update);
         group.MapDelete("/{id}", Delete);
+        group.MapPost("/{id}/test", Test);
         return app;
     }
 
@@ -91,6 +90,29 @@ public static class VcsProfileEndpoints
         return Results.NoContent();
     }
 
+    /// <summary>使用已保存的 DPAPI 憑證測試 Profile 的 Base URL。</summary>
+    private static async Task<IResult> Test(
+        string id,
+        IVcsProfileRepository repository,
+        IGitClient git,
+        ISvnClient svn,
+        CancellationToken ct)
+    {
+        var profile = await repository.GetAsync(id, ct);
+        if (profile is null)
+            return Results.NotFound();
+        if (profile.VcsType == VcsType.Git)
+        {
+            var result = await git.TestConnectionAsync(id, profile.BaseUrl, ct);
+            return Results.Ok(new { result.Success, result.Output, result.Error });
+        }
+        else
+        {
+            var result = await svn.TestConnectionAsync(id, profile.BaseUrl, ct);
+            return Results.Ok(new { result.Success, result.Output, result.Error });
+        }
+    }
+
     private static string? Validate(SaveVcsProfileRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
@@ -125,8 +147,6 @@ public static class VcsProfileEndpoints
             DefaultWorkspaceRoot = string.IsNullOrWhiteSpace(request.DefaultWorkspaceRoot)
                 ? null
                 : Path.GetFullPath(request.DefaultWorkspaceRoot),
-            CommitAuthorName = request.CommitAuthorName?.Trim(),
-            CommitAuthorEmail = request.CommitAuthorEmail?.Trim(),
             Enabled = request.Enabled,
             CreatedAt = createdAt ?? DateTimeOffset.UtcNow,
             UpdatedAt = DateTimeOffset.UtcNow,
@@ -149,16 +169,11 @@ public static class VcsProfileEndpoints
         profile.BaseUrl,
         profile.SslVerificationEnabled,
         profile.DefaultWorkspaceRoot,
-        profile.CommitAuthorName,
-        profile.CommitAuthorEmail,
         profile.Enabled,
         profile.Username,
         secretType = profile.SecretType?.ToString(),
         profile.HasSecret,
         profile.CreatedAt,
         profile.UpdatedAt,
-        profile.LastTestStatus,
-        profile.LastTestError,
-        profile.LastTestedAt,
     };
 }

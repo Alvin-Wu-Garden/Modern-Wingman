@@ -1,7 +1,6 @@
 using AgentService.Application.Contracts;
 using AgentService.Application.Models;
 using AgentService.Domain.Models;
-using AgentService.Infrastructure.ChangeIntelligence;
 using AgentService.Modules.GraphRAG;
 using Neo4j.Driver;
 
@@ -18,9 +17,7 @@ namespace AgentService.Host.RestEndpoints;
 /// GET    /api/projects/{id}/index/progress   → 索引進度（輪詢）
 /// POST   /api/projects/{id}/summaries        → 建立社群摘要（GraphRAG 索引期）
 /// POST   /api/projects/{id}/query            → GraphRAG 問答（auto/global/local）
-/// POST   /api/projects/{id}/impact           → Impact Analysis（不改A壞B）
 /// GET    /api/projects/{id}/repomap          → Repo Map
-/// POST   /api/projects/{id}/agents-md        → 生成 AGENTS.md
 /// </summary>
 public static class ProjectEndpoints
 {
@@ -33,16 +30,6 @@ public static class ProjectEndpoints
         string? Ref,
         string DestinationPath,
         string? OperationId = null);
-    public sealed record QueryRequest(
-        string Question,
-        string? Mode,
-        string? ProviderProfileId = null,
-        string? ModelId = null,
-        string? AgentMode = null,
-        IReadOnlyList<ChangeTarget>? Targets = null,
-        string? AnalysisSessionId = null,
-        IReadOnlyList<ClarificationAnswer>? ClarificationAnswers = null);
-    public sealed record ImpactRequest(string Symbol, int? MaxDepth);
     public sealed record GraphQueryRequest(string Cypher, int? Limit);
     public sealed record GraphNeighborsRequest(
         IReadOnlyList<string> NodeKeys,
@@ -83,14 +70,10 @@ public static class ProjectEndpoints
         group.MapGet("/{id}/index/progress", GetProgress);
         group.MapPost("/{id}/summaries", BuildSummaries);
         group.MapGet("/{id}/summaries/progress", GetSummaryProgress);
-        group.MapPost("/{id}/query", Query);
-        group.MapPost("/{id}/impact", Impact);
-        group.MapGet("/{id}/repomap", GetRepoMap);
         group.MapGet("/{id}/graph/schema", GetGraphSchema);
         group.MapGet("/{id}/graph", GetGraph);
         group.MapPost("/{id}/graph/query", QueryGraph);
         group.MapPost("/{id}/graph/neighbors", ExpandGraphNeighbors);
-        group.MapPost("/{id}/agents-md", GenerateAgentsMd);
 
         return app;
     }
@@ -315,7 +298,7 @@ public static class ProjectEndpoints
     private static async Task<IResult> StartIndex(
         string id,
         GraphIndexingService indexService,
-        IRunExecutionQueue executionQueue,
+        IProjectJobQueue executionQueue,
         CancellationToken ct)
     {
         await executionQueue.EnqueueAsync(
@@ -343,7 +326,7 @@ public static class ProjectEndpoints
         string id,
         GraphRetrievalService graphRag,
         INeo4jRuntime neo4jLifecycle,
-        IRunExecutionQueue executionQueue,
+        IProjectJobQueue executionQueue,
         CancellationToken ct)
     {
         if (!await EnsureGraphAvailableAsync(neo4jLifecycle, ct))
@@ -358,155 +341,6 @@ public static class ProjectEndpoints
 
     private static IResult GetSummaryProgress(string id, GraphRetrievalService graphRag) =>
         Results.Ok(graphRag.GetEnrichmentStatus(id));
-
-    private static async Task<IResult> Query(
-        string id,
-        QueryRequest request,
-        IProjectRepository projects,
-        IContextAssembler contextAssembler,
-        IRunRepository runs,
-        GraphRetrievalService graphRag,
-        IChangeAnalysisSessionService sessionService,
-        IChangeImplementationPlanBuilder implementationPlanBuilder,
-        ProjectEvidencePlanner evidencePlanner,
-        GraphIndexingService indexService,
-        INeo4jRuntime neo4jLifecycle,
-        CancellationToken ct)
-    {
-        var project=await projects.GetAsync(id,ct);if(project is null)return Results.NotFound();
-        if (!await EnsureGraphAvailableAsync(neo4jLifecycle, ct))
-            return GraphUnavailable(neo4jLifecycle);
-        if (await indexService.CatchUpAsync(id, ct))
-            project = await indexService.IndexProjectAsync(id, ct);
-        else
-            project=await projects.GetAsync(id,ct) ?? project;
-        if (project.IndexManifestVersion is null)
-            return Results.Json(new { error = "此專案尚未有可用的成功索引，請先完成索引。" }, statusCode: StatusCodes.Status409Conflict);
-        var run=new RunEntity{SessionId=$"project:{id}",UserMessage=request.Question,ProviderProfileId=request.ProviderProfileId,ResolvedModelId=request.ModelId,WorkspacePath=project.RootPath,ProjectId=id,Mode=ParseAgentMode(request.AgentMode),WorkspaceStrategy=WorkspaceStrategy.Direct,Status=RunStatus.Running,StartedAt=DateTimeOffset.UtcNow};await runs.SaveAsync(run,ct);
-        try
-        {
-            var analysisSession = await sessionService.StartOrContinueAsync(
-                id,
-                request.Question,
-                request.Targets,
-                request.AnalysisSessionId,
-                request.ClarificationAnswers,
-                ct);
-            var changeBrief = analysisSession.Brief;
-            var clarificationQuestions = analysisSession.PendingQuestions;
-            var evidencePack = await evidencePlanner.BuildAsync(project, changeBrief, ct);
-            var implementationPlan = implementationPlanBuilder.Build(analysisSession, evidencePack);
-            if (analysisSession.Status == ChangeAnalysisSessionStatus.AwaitingClarification)
-            {
-                var clarificationAnswer = BuildClarificationResponse(clarificationQuestions);
-                run.Status=RunStatus.Completed;run.EndedAt=DateTimeOffset.UtcNow;await runs.SaveAsync(run,CancellationToken.None);
-                return Results.Ok(new
-                {
-                    answer=clarificationAnswer,
-                    runId=run.Id,
-                    analysisSessionId=analysisSession.Id,
-                    requiresClarification=true,
-                    changeBrief,
-                    clarificationQuestions,
-                    evidencePack,
-                    implementationPlan,
-                });
-            }
-            var question=(await contextAssembler.AssembleAsync(request.Question,project.RootPath,ct,run.Id)).Prompt
-                + ProjectEvidencePlanner.FormatForPrompt(evidencePack)
-                + FormatPlanForPrompt(implementationPlan);
-            var answer = request.Mode?.ToLowerInvariant() switch
-            {
-                "global" => await graphRag.AnswerGlobalAsync(
-                    id,
-                    question,
-                    ct,
-                    providerProfileId: request.ProviderProfileId,
-                    modelId: request.ModelId),
-                "local" => await graphRag.AnswerLocalAsync(
-                    id,
-                    question,
-                    ct,
-                    providerProfileId: request.ProviderProfileId,
-                    modelId: request.ModelId),
-                _ => await graphRag.AnswerAsync(
-                    id,
-                    question,
-                    ct,
-                    providerProfileId: request.ProviderProfileId,
-                    modelId: request.ModelId),
-            };
-            await sessionService.CompleteAsync(analysisSession.Id, CancellationToken.None);
-            run.Status=RunStatus.Completed;run.EndedAt=DateTimeOffset.UtcNow;await runs.SaveAsync(run,CancellationToken.None);return Results.Ok(new { answer,runId=run.Id,analysisSessionId=analysisSession.Id,requiresClarification=false,changeBrief,clarificationQuestions,evidencePack,implementationPlan });
-        }
-        catch (ServiceUnavailableException)
-        {
-            run.Status=RunStatus.Failed;run.Error="Knowledge graph is unavailable.";run.EndedAt=DateTimeOffset.UtcNow;await runs.SaveAsync(run,CancellationToken.None);
-            return GraphUnavailable(neo4jLifecycle);
-        }
-        catch(Exception ex) when (ex is ArgumentException or InvalidOperationException)
-        {
-            run.Status=RunStatus.Failed;run.Error=ex.Message;run.EndedAt=DateTimeOffset.UtcNow;await runs.SaveAsync(run,CancellationToken.None);
-            return Results.BadRequest(new { error = ex.Message });
-        }
-        catch(Exception ex)when(ex is not OperationCanceledException){run.Status=RunStatus.Failed;run.Error=ex.Message;run.EndedAt=DateTimeOffset.UtcNow;await runs.SaveAsync(run,CancellationToken.None);throw;}
-    }
-
-    private static string BuildClarificationResponse(IReadOnlyList<ClarificationQuestion> questions)
-    {
-        var blocking = questions.Where(question => question.IsBlocking).OrderBy(question => question.Priority).ToList();
-        var lines = new List<string>
-        {
-            "目前資訊不足，先確認下列會改變設計或風險判斷的問題，再產出正式變更計畫：",
-        };
-        lines.AddRange(blocking.Select((question, index) => $"{index + 1}. {question.Question}\n   影響：{question.DecisionImpact}"));
-        return string.Join("\n", lines);
-    }
-
-    private static string FormatPlanForPrompt(ChangeImplementationPlan plan)
-    {
-        var lines = new List<string>
-        {
-            "\n## Deterministic Change Plan",
-            $"Status: {plan.Status}",
-            "Answer in these sections: conclusion and change points; direct/indirect impact and risk; clickable evidence; implementation order; tests and acceptance; verified/inferred/unknown and freshness.",
-            "Do not promote this plan beyond the confidence of its cited evidence.",
-        };
-        lines.AddRange(plan.ModificationSteps.Select(step => $"- Step {step.Order}: {step.Target} — {step.Action} [{step.Confidence}]"));
-        lines.AddRange(plan.Risks.Select(risk => $"- Risk: {risk}"));
-        lines.AddRange(plan.Tests.Select(test => $"- Test ({test.Kind}): {test.Description}"));
-        lines.AddRange(plan.AcceptanceCriteria.Select(item => $"- Acceptance: {item}"));
-        return string.Join("\n", lines);
-    }
-
-    private static AgentMode ParseAgentMode(string? value)=>value?.Trim().ToLowerInvariant() switch{"ask"=>AgentMode.Ask,"auto"=>AgentMode.Auto,"full_auto" or "fullauto"=>AgentMode.FullAuto,_=>AgentMode.Plan};
-
-    private static async Task<IResult> Impact(
-        string id,
-        ImpactRequest request,
-        GraphRetrievalService impactService,
-        INeo4jRuntime neo4jLifecycle,
-        CancellationToken ct)
-    {
-        if (!await EnsureGraphAvailableAsync(neo4jLifecycle, ct))
-            return GraphUnavailable(neo4jLifecycle);
-
-        var result = await impactService.AnalyzeImpactAsync(id, request.Symbol, request.MaxDepth ?? 3, ct);
-        return Results.Ok(result);
-    }
-
-    private static async Task<IResult> GetRepoMap(
-        string id,
-        GraphRetrievalService repoMapService,
-        INeo4jRuntime neo4jLifecycle,
-        CancellationToken ct)
-    {
-        if (!await EnsureGraphAvailableAsync(neo4jLifecycle, ct))
-            return GraphUnavailable(neo4jLifecycle);
-
-        var map = await repoMapService.GenerateRepoMapAsync(id, 1024, ct);
-        return Results.Ok(new { map });
-    }
 
     private static async Task<IResult> GetGraphSchema(
         string id,
@@ -615,16 +449,6 @@ public static class ProjectEndpoints
         {
             return GraphUnavailable(neo4jLifecycle);
         }
-    }
-
-    private static async Task<IResult> GenerateAgentsMd(
-        string id, IProjectRepository repo, GraphRetrievalService generator, CancellationToken ct)
-    {
-        var project = await repo.GetAsync(id, ct);
-        if (project is null)
-            return Results.NotFound();
-        var content = await generator.GenerateAgentsMdAsync(id, project.RootPath, ct);
-        return Results.Ok(new { content });
     }
 
     private static async Task<bool> EnsureGraphAvailableAsync(

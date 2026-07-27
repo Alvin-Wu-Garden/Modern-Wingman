@@ -36,8 +36,6 @@ public sealed class VcsProfileRepositoryTests : IAsyncLifetime
             SecretType = VcsSecretType.AccessToken,
             SecretValue = "secret-token",
             SslVerificationEnabled = false,
-            LastTestStatus = "success",
-            LastTestedAt = DateTimeOffset.UtcNow,
         };
 
         await repository.SaveAsync(profile);
@@ -52,8 +50,6 @@ public sealed class VcsProfileRepositoryTests : IAsyncLifetime
             Assert.Equal("test-protected", stored.EncryptionScheme);
         }
         Assert.False(loaded.SslVerificationEnabled);
-        Assert.Equal("success",loaded.LastTestStatus);
-        Assert.NotNull(loaded.LastTestedAt);
 
         profile.Name = "Updated";
         await repository.SaveAsync(profile);

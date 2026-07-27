@@ -47,6 +47,10 @@ public sealed class AgentServiceStartupTests : IAsyncLifetime
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Production");
+            // UseSetting 在 entry point 建立 DbContext 前就固定路徑，避免測試誤用使用者資料庫。
+            builder.UseSetting(
+                "ConnectionStrings:WingmanDb",
+                $"Data Source={databasePath}");
             builder.ConfigureAppConfiguration((_, configuration) =>
                 configuration.AddInMemoryCollection(new Dictionary<string, string?>
                 {

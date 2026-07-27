@@ -29,10 +29,17 @@ public sealed class ConversationRepository(IDbContextFactory<AppDbContext> dbFac
 
     public async Task<ConversationEntity> CreateAsync(
         string? providerProfileId = null,
+        ConversationScope scope = ConversationScope.General,
+        string? projectId = null,
         CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
-        var conv = new ConversationEntity { ProviderProfileId = providerProfileId };
+        var conv = new ConversationEntity
+        {
+            ProviderProfileId = providerProfileId,
+            Scope = scope,
+            ProjectId = scope == ConversationScope.Project ? projectId : null,
+        };
         db.Conversations.Add(conv);
         await db.SaveChangesAsync(ct);
         return conv;

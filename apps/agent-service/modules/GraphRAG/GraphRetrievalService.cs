@@ -71,15 +71,6 @@ public sealed record GraphAiEnrichmentStatus(
     DateTimeOffset? CompletedAt,
     string? Message = null);
 
-/// <summary>V3 影響分析結果，直接以 type/file/data 修改單位呈現。</summary>
-public sealed record GraphImpactResult(
-    ScoredGraphNode? Target,
-    IReadOnlyList<ScoredGraphNode> AffectedNodes,
-    IReadOnlyList<GraphEdge> Relationships,
-    IReadOnlyList<string> AffectedFiles,
-    IReadOnlyList<string> SuggestedTestFilters,
-    bool Truncated);
-
 /// <summary>
 /// 使用 Neo4j BM25 種子加 relation-aware BFS 建立修改範圍上下文。
 /// 本服務不呼叫 LLM 來猜 canonical edge；LLM 只閱讀已抽取的 node、edge、evidence 與社群摘要。
@@ -189,12 +180,7 @@ public sealed partial class GraphRetrievalService
 
                         只輸出摘要，不要標題或前後綴。
                         """;
-                    var summary = await llm.CompleteAsync(
-                        prompt,
-                        new LlmTelemetryContext(
-                            FeatureArea: "project_community_summary_v3",
-                            ProjectId: projectId),
-                        cancellationToken);
+                    var summary = await llm.CompleteAsync(prompt, cancellationToken);
                     enriched.Add(report with
                     {
                         Summary = summary.Trim(),
@@ -265,8 +251,10 @@ public sealed partial class GraphRetrievalService
             {question}
             """;
         return await CompleteAsync(
-            prompt, projectId, "project_qa_local_v3",
-            providerProfileId, modelId, cancellationToken);
+            prompt,
+            providerProfileId,
+            modelId,
+            cancellationToken);
     }
 
     /// <summary>
@@ -310,8 +298,6 @@ public sealed partial class GraphRetrievalService
                 """;
             return await CompleteAsync(
                 mapPrompt,
-                projectId,
-                "project_qa_global_map_v3",
                 providerProfileId,
                 modelId,
                 cancellationToken);
@@ -330,8 +316,10 @@ public sealed partial class GraphRetrievalService
                 $"## Map {index + 1}\n{value}"))}
             """;
         return await CompleteAsync(
-            prompt, projectId, "project_qa_global_reduce_v3",
-            providerProfileId, modelId, cancellationToken);
+            prompt,
+            providerProfileId,
+            modelId,
+            cancellationToken);
     }
 
     /// <summary>依具體識別字與需求語氣自動選擇 Local 或 Global answer。</summary>
@@ -349,6 +337,67 @@ public sealed partial class GraphRetrievalService
             : AnswerGlobalAsync(
                 projectId, question, cancellationToken,
                 providerProfileId, modelId);
+    }
+
+    /// <summary>
+    /// 建立專案對話要交給共用 Agent 的唯讀 GraphRAG 提示。
+    /// 本方法只做檢索與組裝，不直接呼叫模型，因此一般聊天與專案聊天能共用同一條串流、
+    /// Provider、Model 與附件處理路徑。
+    /// </summary>
+    public async Task<string> BuildAnswerPromptAsync(
+        string projectId,
+        string question,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(question);
+        if (LooksLikeLocalQuestion(question))
+        {
+            var context = await LocalSearchAsync(projectId, question, cancellationToken);
+            return $"""
+                你正在回答 Modern Wingman 的專案解析問題。
+                只能依據下列 GraphRAG context 與使用者本次附件回答，不得編造不存在的程式碼或資料流。
+                請使用繁體中文，引用 filePath、line、evidence；推論與未知資訊必須明確標示。
+                若問題是 bug 或新需求，只回答應修改的檔案／symbol、原因及做法，不要執行修改。
+
+                # GraphRAG context
+                {FormatContext(context)}
+
+                # 使用者問題
+                {question}
+                """;
+        }
+
+        var reports = await GlobalSearchAsync(projectId, question, 20, cancellationToken);
+        if (reports.Count == 0)
+        {
+            var context = await LocalSearchAsync(projectId, question, cancellationToken);
+            return $"""
+                你正在回答 Modern Wingman 的專案解析問題。
+                只能依據下列 GraphRAG context 與使用者本次附件回答，不得編造。
+                請使用繁體中文，引用 filePath、line、evidence，並標示未知資訊。
+
+                # GraphRAG context
+                {FormatContext(context)}
+
+                # 使用者問題
+                {question}
+                """;
+        }
+
+        return $"""
+            你正在回答 Modern Wingman 的跨功能專案解析問題。
+            只能依據下列 GraphRAG 社群摘要與使用者本次附件回答，不得新增摘要未提供的流程、
+            類別或資料表。請用繁體中文說明資料流，保留 communityId 引用；
+            需要精確檔案與行號但摘要沒有提供時，必須明確標示未知。
+
+            # GraphRAG 社群摘要
+            {string.Join("\n\n", reports.Select(report =>
+                $"communityId={report.CommunityId}\n" +
+                $"title={report.Title}\nkind={report.Kind}\nsummary={report.Summary}"))}
+
+            # 使用者問題
+            {question}
+            """;
     }
 
     internal static bool LooksLikeLocalQuestion(string question)
@@ -403,102 +452,24 @@ public sealed partial class GraphRetrievalService
             : result[..maximumCharacters] + "\n…（已截斷）";
     }
 
-    /// <summary>以 Local Search 的雙向關係計算 type/file/data 層級影響範圍。</summary>
-    public async Task<GraphImpactResult> AnalyzeImpactAsync(
-        string projectId,
-        string symbolQuery,
-        int maximumDepth = 3,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(symbolQuery);
-        var originalDepth = _options.MaximumDepth;
-        maximumDepth = Math.Clamp(maximumDepth, 1, originalDepth);
-        var context = await LocalSearchAsync(
-            projectId, symbolQuery, cancellationToken);
-        var target = context.Nodes.FirstOrDefault(node => node.Seed);
-        var affected = context.Nodes
-            .Where(node => target is null || node.Node.Id != target.Node.Id)
-            .ToList();
-        var files = affected.Select(node => node.Node.FilePath)
-            .Where(path => !string.IsNullOrWhiteSpace(path))
-            .Select(path => path!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        var filters = affected
-            .Where(node => node.Node.Kind == GraphNodeKind.Code)
-            .Select(node => node.Node.Name)
-            .Distinct(StringComparer.Ordinal)
-            .Take(10)
-            .Select(name => $"dotnet test --filter \"FullyQualifiedName~{name}\"")
-            .ToList();
-        return new GraphImpactResult(
-            target,
-            affected,
-            context.Edges,
-            files,
-            filters,
-            context.Diagnostics.Count > 0);
-    }
-
-    /// <summary>以工具鏈偵測與 V3 community reports 生成 AGENTS.md 並寫入專案根目錄。</summary>
-    public async Task<string> GenerateAgentsMdAsync(
-        string projectId,
-        string projectRoot,
-        CancellationToken cancellationToken = default)
-    {
-        var facts = DetectProjectFacts(projectRoot);
-        var reports = await _store.ListCommunityReportsAsync(
-            projectId, cancellationToken);
-        var prompt = $"""
-            請為以下專案撰寫精簡的 AGENTS.md，使用繁體中文，最多 60 行。
-            只保留 AI coding agent 無法直接推斷的建置、測試、架構與慣例；
-            GraphRAG 社群內容不可擴寫成不存在的規則。
-
-            # 工具鏈事實
-            {facts}
-
-            # 業務社群
-            {string.Join('\n', reports.Take(12).Select(report =>
-                $"- {report.Title}: {report.Summary}"))}
-
-            只輸出 Markdown 內容。
-            """;
-        var content = await CompleteAsync(
-            prompt, projectId, "agents_md_generation_v3",
-            null, null, cancellationToken);
-        var path = Path.GetFullPath(Path.Combine(projectRoot, "AGENTS.md"));
-        if (!Path.GetRelativePath(Path.GetFullPath(projectRoot), path)
-                .Equals("AGENTS.md", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("AGENTS.md 目標路徑不在專案根目錄。");
-        await File.WriteAllTextAsync(path, content, cancellationToken);
-        return content;
-    }
-
     private ILlmCompletionService RequiredLlm() =>
         _llm ?? throw new InvalidOperationException(
             "GraphRAG AI enrichment／answer 尚未註冊 ILlmCompletionService。");
 
     private Task<string> CompleteAsync(
         string prompt,
-        string projectId,
-        string featureArea,
         string? providerProfileId,
         string? modelId,
         CancellationToken cancellationToken)
     {
         var llm = RequiredLlm();
-        var telemetry = new LlmTelemetryContext(
-            FeatureArea: featureArea,
-            ProjectId: projectId);
         return string.IsNullOrWhiteSpace(providerProfileId) &&
                string.IsNullOrWhiteSpace(modelId)
-            ? llm.CompleteAsync(prompt, telemetry, cancellationToken)
+            ? llm.CompleteAsync(prompt, cancellationToken)
             : llm.CompleteAsync(
                 prompt,
                 providerProfileId,
                 modelId,
-                telemetry,
                 cancellationToken);
     }
 
@@ -536,52 +507,6 @@ public sealed partial class GraphRetrievalService
                     .AppendLine(report.Summary);
         }
         return builder.ToString();
-    }
-
-    private static string DetectProjectFacts(string root)
-    {
-        var builder = new StringBuilder();
-        AddTopLevel("*.sln", "含 .NET solution（dotnet build / dotnet test）");
-        AddRecursive("*.csproj", "含 C# 專案（dotnet build）");
-        AddTopLevel("pom.xml", "Maven 專案（mvn compile / mvn test）");
-        AddTopLevel("build.gradle", "Gradle 專案（gradle build / gradle test）");
-        AddTopLevel("build.gradle.kts", "Gradle Kotlin DSL 專案");
-        AddTopLevel("package.json", "Node.js 專案（依 package.json scripts 執行）");
-        AddTopLevel("pnpm-workspace.yaml", "pnpm monorepo");
-        AddTopLevel("Dockerfile", "含 Dockerfile");
-        AddTopLevel(".editorconfig", "有 .editorconfig 編碼慣例");
-        if (Directory.Exists(Path.Combine(root, ".github", "workflows")))
-            builder.AppendLine("- 有 GitHub Actions CI");
-        return builder.Length == 0 ? "（未偵測到已知建置系統）" : builder.ToString();
-
-        void AddTopLevel(string pattern, string fact)
-        {
-            try
-            {
-                if (Directory.EnumerateFiles(root, pattern, SearchOption.TopDirectoryOnly).Any())
-                    builder.AppendLine($"- {fact}");
-            }
-            catch
-            {
-            }
-        }
-
-        void AddRecursive(string pattern, string fact)
-        {
-            try
-            {
-                if (Directory.EnumerateFiles(root, pattern, new EnumerationOptions
-                    {
-                        RecurseSubdirectories = true,
-                        MaxRecursionDepth = 3,
-                        IgnoreInaccessible = true,
-                    }).Any())
-                    builder.AppendLine($"- {fact}");
-            }
-            catch
-            {
-            }
-        }
     }
 
     /// <summary>

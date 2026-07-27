@@ -15,8 +15,7 @@ public sealed class MarketplaceMcpDeploymentService(
     IMarketplaceArtifactStore artifactStore,
     IMarketplaceDeploymentStore deploymentStore,
     IMarketplaceInstallabilityStore installabilityStore,
-    IEnumerable<IAgentTargetAdapter> adapters,
-    IMarketplaceActivityRecorder? activity = null) : IMarketplaceMcpDeploymentService
+    IEnumerable<IAgentTargetAdapter> adapters) : IMarketplaceMcpDeploymentService
 {
     private const string SecretPlaceholder = "REPLACE_WITH_YOUR_API_KEY";
     private readonly IReadOnlyDictionary<string, IAgentTargetAdapter> _adapters = adapters.ToDictionary(adapter => adapter.Descriptor.Id, StringComparer.OrdinalIgnoreCase);
@@ -41,7 +40,7 @@ public sealed class MarketplaceMcpDeploymentService(
                 var deployments = await deploymentStore.ListDeploymentsAsync(artifact.Id, cancellationToken);
                 var ownsConfig = deployments.Any(item => item.Status is "Configured" or "NeedsUserInput" or "PrerequisiteMissing" && PathsEqual(item.TargetPath, configPath));
                 var existing = ReadConfig(configPath);
-                var servers = GetOrCreateServers(existing);
+                var servers = GetOrCreateServers(existing, adapter.McpRootProperty);
                 var conflict = definitions.Keys.FirstOrDefault(id => servers.ContainsKey(id) && !ownsConfig);
                 var secrets = definitions.Values.Any(HasSecretEnvironment);
                 items.Add(conflict is null
@@ -73,7 +72,7 @@ public sealed class MarketplaceMcpDeploymentService(
                 var deployments = await deploymentStore.ListDeploymentsAsync(artifact.Id, cancellationToken);
                 var ownsConfig = deployments.Any(item => item.Status is "Configured" or "NeedsUserInput" or "PrerequisiteMissing" && PathsEqual(item.TargetPath, configPath));
                 var document = ReadConfig(configPath);
-                var servers = GetOrCreateServers(document);
+                var servers = GetOrCreateServers(document, adapter.McpRootProperty);
                 foreach (var (serverId, definition) in definitions)
                 {
                     if (servers.ContainsKey(serverId) && !ownsConfig)
@@ -91,7 +90,6 @@ public sealed class MarketplaceMcpDeploymentService(
             catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or DirectoryNotFoundException or IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException)
             { results.Add(new(request.TargetId, request.Scope, "Failed", null, ex.Message)); }
         }
-        await RecordResultsAsync("mcp-configure", requests[0].ArtifactId, results, cancellationToken);
         return new(results);
     }
 
@@ -106,10 +104,12 @@ public sealed class MarketplaceMcpDeploymentService(
             if (deployment.Status is not ("Configured" or "NeedsUserInput" or "PrerequisiteMissing")) continue;
             try
             {
+                if (!_adapters.TryGetValue(deployment.TargetId, out var adapter))
+                    throw new InvalidOperationException("部署紀錄的 Agent Target 已不存在。");
                 if (File.Exists(deployment.TargetPath))
                 {
                     var document = ReadConfig(deployment.TargetPath);
-                    var servers = GetOrCreateServers(document);
+                    var servers = GetOrCreateServers(document, adapter.McpRootProperty);
                     foreach (var serverId in definitions.Keys) servers.Remove(serverId);
                     WriteAtomically(deployment.TargetPath, document);
                 }
@@ -119,17 +119,7 @@ public sealed class MarketplaceMcpDeploymentService(
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             { results.Add(new(deployment.TargetId, deployment.Scope, "Failed", deployment.TargetPath, ex.Message)); }
         }
-        await RecordResultsAsync("mcp-remove", artifactId, results, cancellationToken);
         return new(results);
-    }
-
-    private async Task RecordResultsAsync(string eventType, string artifactId, IReadOnlyList<MarketplaceDeploymentResult> results, CancellationToken ct)
-    {
-        if (activity is null) return;
-        var operationId = Guid.NewGuid().ToString("N");
-        foreach (var result in results)
-            await activity.RecordAsync(new(Guid.NewGuid().ToString("N"), operationId, eventType, result.Status, artifactId, result.TargetId,
-                result.Message ?? result.TargetPath, DateTimeOffset.UtcNow), ct);
     }
 
     private static async Task<IReadOnlyDictionary<string, JsonObject>> ReadDefinitionAsync(string snapshotPath, CancellationToken ct)
@@ -155,15 +145,16 @@ public sealed class MarketplaceMcpDeploymentService(
             ?? throw new InvalidDataException("目標 MCP config 必須是 JSON object。");
     }
 
-    private static JsonObject GetOrCreateServers(JsonObject document)
+    private static JsonObject GetOrCreateServers(JsonObject document, string rootProperty)
     {
-        if (document["mcpServers"] is null)
+        if (document[rootProperty] is null)
         {
             var servers = new JsonObject();
-            document["mcpServers"] = servers;
+            document[rootProperty] = servers;
             return servers;
         }
-        return document["mcpServers"] as JsonObject ?? throw new InvalidDataException("目標 MCP config 的 mcpServers 必須是 JSON object。");
+        return document[rootProperty] as JsonObject ??
+               throw new InvalidDataException($"目標 MCP config 的 {rootProperty} 必須是 JSON object。");
     }
 
     private static JsonObject SanitizeSecrets(JsonObject definition)

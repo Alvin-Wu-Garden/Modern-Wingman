@@ -1,4 +1,0 @@
-const BASE_URL='http://localhost:5002'
-export async function refreshWingmanSkills(){const response=await fetch(`${BASE_URL}/api/skills/runtime/refresh`,{method:'POST'});if(!response.ok)throw new Error(await response.text());return response.json() as Promise<{count:number}>}
-export interface SkillRuntimeStatus{name:string;executable:boolean;status:'instruction_only'|'ready'|'missing'|'dependencies_missing'|'invalid';runtime:string|null;version:string|null;error:string|null;dependencyFile:string|null;packageManager:string|null;network:boolean;requiresApproval:boolean;requiredEnvironment:string[]}
-export async function listSkillRuntimeStatus(){const response=await fetch(`${BASE_URL}/api/skills/runtime/status`);if(!response.ok)throw new Error(await response.text());return response.json() as Promise<SkillRuntimeStatus[]>}

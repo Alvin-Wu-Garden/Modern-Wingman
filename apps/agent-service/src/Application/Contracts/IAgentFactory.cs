@@ -28,10 +28,9 @@ public sealed class AgentCreationContext
     public string? ModelOverride { get; init; }
     /// <summary>基礎系統指示（語言、角色設定）。</summary>
     public required string Instructions { get; init; }
-    /// <summary>Skills 清單注入片段（progressive disclosure）；無 skills 時為空字串。</summary>
+    /// <summary>
+    /// 經過字數上限與不可信內容標記處理的 instruction-only Skill 片段；
+    /// 無 Skill 時為空字串，且不包含任何可執行 script 或 MCP tool。
+    /// </summary>
     public string SkillsPrompt { get; init; } = string.Empty;
-    public AgentMode Mode { get; init; } = AgentMode.Ask;
-    public string? WorkspacePath { get; init; }
-    public string? RunId { get; init; }
-    public string? ProjectId { get; init; }
 }

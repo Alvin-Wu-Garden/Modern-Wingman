@@ -2,11 +2,10 @@ namespace Wingman.Marketplace.Domain;
 
 public enum MarketplaceArtifactKind
 {
+    /// <summary>只用於尚未分類的搜尋候選，不允許匯入或部署。</summary>
     Unknown,
     Skill,
     McpServer,
-    WingmanPlugin,
-    UnsupportedProject,
 }
 
 public enum MarketplaceDiscoveryStatus
@@ -26,8 +25,6 @@ public enum MarketplaceSourceKind
     GitHubDiscovery,
     GitHubRepository,
     LocalFolder,
-    LocalArchive,
-    CodexMarketplaceImport,
 }
 
 public enum MarketplaceClassificationConfidence
@@ -164,7 +161,10 @@ public sealed record MarketplaceTargetDescriptor(
     bool SupportsGlobalScope,
     bool SupportsProjectScope,
     bool IsDetected = false,
-    string? DetectionReason = null);
+    string? DetectionReason = null,
+    // MCP 的 global／project 設定位置不一定同時存在，必須分開揭露給 UI。
+    bool SupportsGlobalMcp = false,
+    bool SupportsProjectMcp = false);
 
 public sealed record MarketplaceDeploymentRequest(
     string ArtifactId,
@@ -210,92 +210,7 @@ public sealed record MarketplaceDeploymentState(
     string Status,
     DateTimeOffset UpdatedAt);
 
-public sealed record MarketplacePluginInstallation(
-    string Id,
-    string ArtifactId,
-    string PluginId,
-    string Version,
-    bool Enabled,
-    string InstalledPath,
-    DateTimeOffset InstalledAt);
-
-public sealed record MarketplacePluginPreview(
-    string InstallationId,
-    string PluginId,
-    string Version,
-    IReadOnlyList<string> SkillPaths,
-    IReadOnlyList<string> McpPaths,
-    IReadOnlyList<string> FunctionIds,
-    IReadOnlyList<string> HookIds,
-    string SafetySummary);
-
-/// <summary>Configuration metadata only; values are never returned to the Desktop client.</summary>
-public sealed record MarketplacePluginConfiguration(
-    string InstallationId,
-    string PluginId,
-    IReadOnlyList<MarketplacePluginConfigurationField> Fields);
-
-public sealed record MarketplacePluginConfigurationField(
-    string Name,
-    bool IsSecret,
-    bool IsConfigured);
-
-public sealed record EnabledPluginCapabilities(
-    string PluginId,
-    string Version,
-    IReadOnlyList<string> SkillPaths,
-    IReadOnlyList<string> McpPaths,
-    IReadOnlyList<string> FunctionIds,
-    IReadOnlyList<string> HookIds,
-    string? InstalledPath = null);
-
-public sealed record CodexMarketplaceImportResult(
-    int ImportedArtifacts,
-    int InvalidCandidates,
-    IReadOnlyList<string> SkippedEntries);
-
 public sealed record MarketplaceArtifactSource(MarketplaceArtifact Artifact, string SourceLocation);
-
-public sealed record MarketplaceArtifactUpdate(
-    string ArtifactId,
-    string DisplayName,
-    string SourceLocation,
-    string? InstalledCommitSha,
-    string Status,
-    string? AvailableCommitSha = null,
-    string? Message = null);
-
-/// <summary>Immutable result of a user-initiated update check. Checks never alter an artifact.</summary>
-public sealed record MarketplaceUpdateCheck(
-    string Id,
-    string ArtifactId,
-    string SourceLocation,
-    string? InstalledCommitSha,
-    string Status,
-    string? AvailableCommitSha,
-    string? Message,
-    DateTimeOffset CheckedAt);
-
-/// <summary>Result of an explicit update import. Deployments are deliberately never changed here.</summary>
-public sealed record MarketplaceArtifactUpdateApplicationResult(
-    string ArtifactId,
-    string PreviousCommitSha,
-    string ImportedCommitSha,
-    MarketplaceImportResult Import);
-
-/// <summary>
-/// Local Marketplace activity projected to the existing run-event timeline under
-/// <c>marketplace:&lt;operationId&gt;</c>. It contains metadata only; never credentials or file contents.
-/// </summary>
-public sealed record MarketplaceActivityEvent(
-    string Id,
-    string OperationId,
-    string EventType,
-    string Status,
-    string? ArtifactId,
-    string? TargetId,
-    string? Detail,
-    DateTimeOffset OccurredAt);
 
 public sealed record GitHubRepositoryImportResult(
     string CanonicalUrl,

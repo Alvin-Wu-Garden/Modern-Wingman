@@ -18,36 +18,25 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import {
   Check,
-  Bot,
   ChevronDown,
   ChevronUp,
   GripVertical,
   Key,
-  ListChecks,
   Loader2,
-  MessageCircle,
-  Zap,
   X,
 } from 'lucide-react'
-import type { AgentMode } from '@modern-wingman/contracts'
 import { useAppStore, type AppTheme } from '@/app/store'
 import { Button } from '@/components/ui/button'
 import { ProviderBrandIcon } from '@/components/ui/provider-brand-icon'
-import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 import { SpeechSettingsPanel } from './SpeechSettingsPanel'
 import { VersionControlSettingsPanel } from './VersionControlSettingsPanel'
-import { AuditSettingsPanel } from './AuditSettingsPanel'
-import { RuntimeSettingsPanel } from './RuntimeSettingsPanel'
-import { useSkillsStore } from '@/features/skills/store/useSkillsStore'
-import { McpTab } from '@/features/skills/components/McpTab'
 import {
   listProviders,
   getProviderKeyStatus,
   setProviderKey,
   deleteProviderKey,
   reorderProviders,
-  validateGithubPatViaBackend,
   type ProviderInfo,
   type ProviderKeyStatus,
   type KeyValidationResult,
@@ -429,39 +418,16 @@ function SortableProviderRow(props: ProviderRowProps) {
 }
 
 /* ── Main component ── */
-type SettingsCategory = 'general' | 'agent' | 'data'
+type SettingsCategory = 'general' | 'providers'
 const SETTINGS_CATEGORIES: { id: SettingsCategory; label: string }[] = [
   { id: 'general', label: '一般' },
-  { id: 'agent', label: 'Agent 設定' },
-  { id: 'data', label: '資料稽核' },
-]
-
-const AGENT_MODE_OPTIONS: Array<{
-  id: AgentMode
-  label: string
-  description: string
-  icon: typeof MessageCircle
-}> = [
-  { id: 'ask', label: '詢問', description: '唯讀分析，不修改檔案或執行有副作用的工具。', icon: MessageCircle },
-  { id: 'plan', label: '規劃', description: '先產生計畫，核准後才建立隔離工作區並修改。', icon: ListChecks },
-  { id: 'auto', label: 'Auto', description: '可修改與驗證；高風險、推送與受保護操作仍需核准。', icon: Zap },
-  { id: 'full_auto', label: '完全自動', description: '在非受保護範圍自動完成，安全政策與禁用規則仍然有效。', icon: Bot },
+  { id: 'providers', label: 'AI 供應商' },
 ]
 
 export function SettingsPage() {
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>('general')
   const theme = useAppStore((s) => s.theme)
   const setTheme = useAppStore((s) => s.setTheme)
-  const systemPrompt = useAppStore((s) => s.systemPrompt)
-  const setSystemPrompt = useAppStore((s) => s.setSystemPrompt)
-  const defaultAgentMode = useAppStore((s) => s.defaultAgentMode)
-  const setDefaultAgentMode = useAppStore((s) => s.setDefaultAgentMode)
-  const githubPat = useAppStore((s) => s.githubPat)
-  const setGithubPat = useAppStore((s) => s.setGithubPat)
-  const { agents, fetchAgents, updateAgentPath } = useSkillsStore()
-
-  const [agentPathsOpen, setAgentPathsOpen] = useState(false)
-  const [editingPaths, setEditingPaths] = useState<Record<string, string>>({})
 
   /* ── Provider state ── */
   const [providers, setProviders] = useState<ProviderInfo[]>([])
@@ -471,7 +437,6 @@ export function SettingsPage() {
   const [keySaving, setKeySaving] = useState<Record<string, boolean>>({})
   const [keyDeleting, setKeyDeleting] = useState<Record<string, boolean>>({})
   const [validations, setValidations] = useState<Record<string, ValidationState>>({})
-  const [githubPatValidation, setGithubPatValidation] = useState<ValidationState>('idle')
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({})
 
   const allExpanded = providers.length > 0 && providers.every((p) => expandedRows[p.id])
@@ -506,7 +471,6 @@ export function SettingsPage() {
   }, [])
 
   useEffect(() => {
-    fetchAgents()
     loadProviders()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -582,17 +546,6 @@ export function SettingsPage() {
     }
   }, [providers, loadProviders])
 
-  /* ── GitHub PAT blur ── */
-  const handleGithubPatBlur = useCallback(async () => {
-    const pat = githubPat.trim()
-    if (!pat) { setGithubPatValidation('idle'); return }
-    setGithubPatValidation('validating')
-    const result = await validateGithubPatViaBackend(pat)
-    setGithubPatValidation(result)
-  }, [githubPat])
-
-  const SYSTEM_PROMPT_MAX = 500
-
   return (
     <div className="flex-1 overflow-y-auto p-8">
       <div className="mx-auto flex max-w-4xl flex-col gap-6">
@@ -662,24 +615,8 @@ export function SettingsPage() {
         </SettingsSection>
         </div>
 
-        {/* ── General settings (system prompt only) ── */}
-        <div className={activeCategory === 'agent' ? 'contents' : 'hidden'}>
-        <SettingsSection title="系統提示詞" description="定義 Agent 行為設定">
-          <Textarea
-            label="系統提示詞"
-            placeholder="您是一位專業的 AI 助手…"
-            value={systemPrompt}
-            onChange={(e) => setSystemPrompt(e.target.value)}
-            rows={6}
-            showCount
-            maxCount={SYSTEM_PROMPT_MAX}
-            hint="定義 AI Agent 的角色、語氣與行為規範"
-          />
-        </SettingsSection>
-        </div>
-
         {/* ── AI Provider API Keys ── */}
-        <div className={activeCategory === 'agent' ? 'contents' : 'hidden'}>
+        <div className={activeCategory === 'providers' ? 'contents' : 'hidden'}>
         <SettingsSection
           title="AI 供應商 API 金鑰"
           description="拖動左側圖示可調整順序，新對話將依此順序列出供應商。"
@@ -725,129 +662,6 @@ export function SettingsPage() {
               </div>
             </SortableContext>
           </DndContext>
-        </SettingsSection>
-        </div>
-
-        <div className={activeCategory === 'agent' ? 'contents' : 'hidden'}>
-        <SettingsSection title="預設 Agent 模式" description="新對話與尚未個別設定的專案會使用此模式。">
-          <div className="grid gap-3 sm:grid-cols-2">
-            {AGENT_MODE_OPTIONS.map(option => {
-              const Icon = option.icon
-              const selected = defaultAgentMode === option.id
-              return <button
-                key={option.id}
-                type="button"
-                aria-pressed={selected}
-                onClick={() => setDefaultAgentMode(option.id)}
-                className={cn(
-                  'flex min-h-24 items-start gap-3 rounded-lg border p-4 text-left transition-colors',
-                  selected ? 'border-brand bg-brand/5' : 'border-border bg-surface hover:bg-surface-alt',
-                )}
-              >
-                <Icon className={cn('mt-0.5 h-5 w-5 shrink-0', selected ? 'text-brand' : 'text-ink-subtle')} />
-                <span>
-                  <span className="block text-sm font-semibold text-ink">{option.label}</span>
-                  <span className="mt-1 block text-xs leading-5 text-ink-secondary">{option.description}</span>
-                </span>
-              </button>
-            })}
-          </div>
-        </SettingsSection>
-        </div>
-
-        <div className={activeCategory === 'agent' ? 'contents' : 'hidden'}>
-        <SettingsSection title="開發 Runtime" description="Agent 執行 Skill 與專案工具時可用的 Python、Node.js 與 PowerShell。">
-          <RuntimeSettingsPanel />
-        </SettingsSection>
-        </div>
-
-        <div className={activeCategory === 'data' ? 'contents' : 'hidden'}>
-        <SettingsSection title="資料與稽核" description="查詢 Agent、供應商、工具與版本控制的安全事件。">
-          <AuditSettingsPanel />
-        </SettingsSection>
-        </div>
-
-        <div className={activeCategory === 'agent' ? 'contents' : 'hidden'}>
-        <SettingsSection title="MCP 伺服器" description="管理 MCP 連線、檢查健康狀態並重新連線。">
-          <McpTab />
-        </SettingsSection>
-        </div>
-
-        {/* ── Skills: GitHub PAT ── */}
-        <div className={activeCategory === 'agent' ? 'contents' : 'hidden'}>
-        <SettingsSection
-          title="Skills 技能庫"
-          description="GitHub Personal Access Token（選填）— 填入後可提升 API 請求上限，且若含 repo 權限可讓技能庫存取私有倉庫。"
-        >
-          <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-ink">
-              GitHub Personal Access Token（選填）
-            </label>
-            <input
-              type="password"
-              value={githubPat}
-              onChange={(e) => setGithubPat(e.target.value)}
-              onBlur={handleGithubPatBlur}
-              placeholder="ghp_..."
-              className="w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"
-            />
-            <ValidationBadge state={githubPatValidation} isGithub />
-            <p className="text-xs text-ink-subtle">Token 僅存於本機記憶體，重啟後需重新填入。</p>
-          </div>
-        </SettingsSection>
-        </div>
-
-        {/* ── Skills: Agent Paths ── */}
-        <div className={activeCategory === 'agent' ? 'contents' : 'hidden'}>
-        <SettingsSection title="Agent 技能路徑" description="自訂各 AI Agent 的全域技能資料夾位置">
-          <button
-            type="button"
-            onClick={() => setAgentPathsOpen((o) => !o)}
-            className="flex items-center gap-2 text-sm text-ink-secondary hover:text-ink transition-colors"
-          >
-            {agentPathsOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-            {agentPathsOpen ? '收合' : '展開設定'}
-          </button>
-          {agentPathsOpen && (
-            <div className="mt-4 space-y-4">
-              {agents.map((agent) => {
-                const editing = editingPaths[agent.id]
-                const displayVal = editing !== undefined ? editing : (agent.customGlobalPath ?? '')
-                return (
-                  <div key={agent.id}>
-                    <label className="block text-xs font-medium text-ink-secondary mb-1">
-                      {agent.displayName}
-                    </label>
-                    <div className="flex gap-2 items-center">
-                      <input
-                        type="text"
-                        value={displayVal}
-                        onChange={(e) => setEditingPaths((p) => ({ ...p, [agent.id]: e.target.value }))}
-                        placeholder={agent.globalSkillsPath}
-                        className={cn(
-                          'flex-1 rounded-xl border border-border bg-surface px-3 py-2 text-sm font-mono',
-                          'placeholder:text-ink-subtle focus:outline-none focus:ring-2 focus:ring-brand/40',
-                        )}
-                      />
-                      {editing !== undefined && (
-                        <Button
-                          size="sm"
-                          onClick={async () => {
-                            const val = editingPaths[agent.id]?.trim()
-                            await updateAgentPath(agent.id, val || undefined)
-                            setEditingPaths((p) => { const n = { ...p }; delete n[agent.id]; return n })
-                          }}
-                        >
-                          儲存
-                        </Button>
-                      )}
-                    </div>
-                    <p className="mt-1 text-xs text-ink-subtle">預設：{agent.globalSkillsPath}</p>
-                  </div>
-                )
-              })}
-            </div>
-          )}
         </SettingsSection>
         </div>
 

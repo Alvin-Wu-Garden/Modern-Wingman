@@ -548,6 +548,10 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
             {
                 _process.Kill(entireProcessTree: true);
                 await _process.WaitForExitAsync();
+                // Windows 上 neo4j.bat 會再啟動 Java 子程序。父程序結束時，Java 的
+                // Bolt listener 可能仍需數百毫秒才真正釋放；若此時立即刪除資料庫，
+                // 會造成檔案占用或下一次啟動誤判 port conflict。
+                await WaitForManagedPortReleaseAsync();
             }
             catch
             {
@@ -556,6 +560,29 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
         }
         _process?.Dispose();
         _startGate.Dispose();
+    }
+
+    /// <summary>
+    /// 有上限地等待 managed Bolt port 釋放，避免正常關閉因 Java 子程序收尾而競態。
+    /// 最多等待十秒，不讓桌面程式結束流程無限卡住。
+    /// </summary>
+    private async Task WaitForManagedPortReleaseAsync()
+    {
+        if (!TryGetManagedEndpoint(out var address, out var port))
+            return;
+
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (IsPortAvailable(address, port))
+                return;
+            await Task.Delay(100);
+        }
+        _logger.LogWarning(
+            "Neo4j process tree 已結束，但 managed Bolt port {Address}:{Port} " +
+            "在十秒內仍未釋放。",
+            address,
+            port);
     }
 }
 

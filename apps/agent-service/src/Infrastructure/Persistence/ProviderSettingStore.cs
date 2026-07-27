@@ -16,13 +16,16 @@ public sealed class ProviderSettingStore : IProviderSettingStore
 {
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
     private readonly AgentServiceOptions _options;
+    private readonly ISecretProtector _secretProtector;
 
     public ProviderSettingStore(
         IDbContextFactory<AppDbContext> dbFactory,
-        IOptions<AgentServiceOptions> options)
+        IOptions<AgentServiceOptions> options,
+        ISecretProtector secretProtector)
     {
         _dbFactory = dbFactory;
         _options = options.Value;
+        _secretProtector = secretProtector;
     }
 
     // ── 讀取 ─────────────────────────────────────────────────────────────────
@@ -63,7 +66,12 @@ public sealed class ProviderSettingStore : IProviderSettingStore
         // 2. DB 儲存值（同步讀取，避免 GetAsync 引入 async 複雜度在 non-async call path）
         using var db = _dbFactory.CreateDbContext();
         var entity = db.ProviderSettings.Find(profileId);
-        return entity?.ApiKey;
+        return entity?.ProtectedApiKey is not null &&
+               entity.EncryptionScheme is not null
+            ? _secretProtector.Unprotect(
+                entity.ProtectedApiKey,
+                entity.EncryptionScheme)
+            : null;
     }
 
     public async Task SetValidatedCredentialAsync(
@@ -84,7 +92,9 @@ public sealed class ProviderSettingStore : IProviderSettingStore
             db.ProviderSettings.Add(entity);
         }
 
-        entity.ApiKey = apiKey;
+        var protectedSecret = _secretProtector.Protect(apiKey);
+        entity.ProtectedApiKey = protectedSecret.Value;
+        entity.EncryptionScheme = protectedSecret.Scheme;
         entity.BaseUrl = string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl.Trim();
         entity.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -95,7 +105,8 @@ public sealed class ProviderSettingStore : IProviderSettingStore
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
         var entity = await db.ProviderSettings.FindAsync([profileId], ct);
         if (entity is null) return;
-        entity.ApiKey = null;
+        entity.ProtectedApiKey = null;
+        entity.EncryptionScheme = null;
         entity.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
     }
@@ -110,35 +121,14 @@ public sealed class ProviderSettingStore : IProviderSettingStore
         foreach (var (profileId, sortOrder) in order)
         {
             var entity = await db.ProviderSettings.FindAsync([profileId], ct);
-            if (entity is null) continue;
+            if (entity is null)
+            {
+                entity = new ProviderSettingEntity { ProfileId = profileId };
+                db.ProviderSettings.Add(entity);
+            }
             entity.SortOrder = sortOrder;
             entity.UpdatedAt = DateTimeOffset.UtcNow;
         }
-        await db.SaveChangesAsync(ct);
-    }
-
-    // ── 初始化種子資料 ─────────────────────────────────────────────────────────
-
-    public async Task EnsureSeedAsync(
-        IReadOnlyList<string> profileIds,
-        CancellationToken ct = default)
-    {
-        await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        var existing = await db.ProviderSettings
-            .Select(x => x.ProfileId)
-            .ToHashSetAsync(ct);
-
-        var toAdd = profileIds
-            .Where(id => !existing.Contains(id))
-            .Select((id, idx) => new ProviderSettingEntity
-            {
-                ProfileId = id,
-                SortOrder = existing.Count + idx,
-            })
-            .ToList();
-
-        if (toAdd.Count == 0) return;
-        db.ProviderSettings.AddRange(toAdd);
         await db.SaveChangesAsync(ct);
     }
 

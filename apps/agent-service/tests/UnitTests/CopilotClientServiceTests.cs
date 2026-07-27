@@ -71,6 +71,5 @@ public sealed class CopilotClientServiceTests
         public Task SetValidatedCredentialAsync(string profileId, string value, string? baseUrl, CancellationToken ct = default) => Task.CompletedTask;
         public Task RemoveApiKeyAsync(string profileId, CancellationToken ct = default) => Task.CompletedTask;
         public Task ReorderAsync(IReadOnlyList<(string ProfileId, int SortOrder)> order, CancellationToken ct = default) => Task.CompletedTask;
-        public Task EnsureSeedAsync(IReadOnlyList<string> profileIds, CancellationToken ct = default) => Task.CompletedTask;
     }
 }

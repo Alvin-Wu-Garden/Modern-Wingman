@@ -10,10 +10,6 @@ public sealed class SkillPromptBuilderTests
     {
         public IReadOnlyList<SkillDefinition> ListSkills() => skills;
 
-        public Task<string?> ReadSkillContentAsync(string name, CancellationToken ct = default) =>
-            Task.FromResult<string?>(
-                skills.Any(s => s.Name == name) ? $"content-of-{name}" : null);
-
         public void Refresh() { }
     }
 
@@ -25,19 +21,29 @@ public sealed class SkillPromptBuilderTests
     }
 
     [Fact]
-    public void WithSkills_PromptListsNameAndDescription()
+    public void WithSkills_PromptIncludesBoundedUntrustedInstructions()
     {
+        var root = Path.Combine(Path.GetTempPath(), $"mw-skill-prompt-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var skillFile = Path.Combine(root, "SKILL.md");
+        File.WriteAllText(skillFile, "# PDF\ncontent-of-pdf");
         var provider = new FakeSkillProvider([
-            new SkillDefinition { Name = "pdf", Description = "PDF 處理", SkillFilePath = "x" },
-            new SkillDefinition { Name = "xlsx", Description = "試算表", SkillFilePath = "y" },
+            new SkillDefinition { Name = "pdf", Description = "PDF 處理", SkillFilePath = skillFile },
         ]);
 
-        var prompt = SkillPromptBuilder.BuildSkillsPrompt(provider);
+        try
+        {
+            var prompt = SkillPromptBuilder.BuildSkillsPrompt(provider);
 
-        Assert.Contains("**pdf**: PDF 處理", prompt);
-        Assert.Contains("**xlsx**: 試算表", prompt);
-        Assert.Contains("read_skill", prompt);
-        // Progressive disclosure：不含全文
-        Assert.DoesNotContain("content-of-pdf", prompt);
+            Assert.Contains("name=\"pdf\"", prompt);
+            Assert.Contains("description=\"PDF 處理\"", prompt);
+            Assert.Contains("trust=\"untrusted\"", prompt);
+            Assert.Contains("content-of-pdf", prompt);
+            Assert.DoesNotContain("read_skill", prompt);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 }

@@ -1,38 +1,259 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Eye, EyeOff, GitBranch, Loader2, Plus, RefreshCw, Server, Trash2, TriangleAlert } from 'lucide-react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { Eye, EyeOff, GitBranch, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { createProtectedRef, deleteProtectedRef, deleteVcsProfile, getWorkspaceSettings, listProtectedRefs, listVcsProfiles, listVcsRuntimes, saveVcsProfile, saveWorkspaceSettings, testVcsProfile, type SaveVcsProfile, type VcsProfile, type VcsProtectedRef, type VcsRuntime, type WorkspaceSettings } from '@/services/agent-api/vcs'
+import {
+  deleteVcsProfile,
+  listVcsProfiles,
+  saveVcsProfile,
+  testVcsProfile,
+  type SaveVcsProfile,
+  type VcsProfile,
+} from '@/services/agent-api/vcs'
 
-const empty: SaveVcsProfile={name:'',vcsType:'git',baseUrl:'',sslVerificationEnabled:true,defaultWorkspaceRoot:null,commitAuthorName:null,commitAuthorEmail:null,enabled:true,username:null,secretType:'AccessToken',secretValue:null}
-const message=(error:unknown)=>error instanceof Error?error.message:String(error)
+const emptyProfile: SaveVcsProfile = {
+  name: '',
+  vcsType: 'git',
+  baseUrl: '',
+  sslVerificationEnabled: true,
+  defaultWorkspaceRoot: null,
+  enabled: true,
+  username: null,
+  secretType: 'AccessToken',
+  secretValue: null,
+}
 
-export function VersionControlSettingsPanel(){
-  const [profiles,setProfiles]=useState<VcsProfile[]>([]); const [runtimes,setRuntimes]=useState<VcsRuntime[]>([])
-  const [protectedRefs,setProtectedRefs]=useState<VcsProtectedRef[]>([]);const [refType,setRefType]=useState<'git'|'svn'>('git');const [refPattern,setRefPattern]=useState('')
-  const [paths,setPaths]=useState<WorkspaceSettings|null>(null)
-  const [form,setForm]=useState<SaveVcsProfile|null>(null); const [editing,setEditing]=useState<string|null>(null)
-  const [visible,setVisible]=useState(false); const [busy,setBusy]=useState(false); const [error,setError]=useState<string|null>(null); const [notice,setNotice]=useState<string|null>(null)
-  const load=useCallback(async()=>{setError(null);try{const [p,r,refs,workspace]=await Promise.all([listVcsProfiles(),listVcsRuntimes(),listProtectedRefs(),getWorkspaceSettings()]);setProfiles(p);setRuntimes(r);setProtectedRefs(refs);setPaths(workspace)}catch(e){setError(message(e))}},[])
-  useEffect(()=>{void load()},[load])
-  const edit=(profile:VcsProfile)=>{setEditing(profile.id);setForm({name:profile.name,vcsType:profile.vcsType,baseUrl:profile.baseUrl,sslVerificationEnabled:profile.sslVerificationEnabled,defaultWorkspaceRoot:profile.defaultWorkspaceRoot,commitAuthorName:profile.commitAuthorName,commitAuthorEmail:profile.commitAuthorEmail,enabled:profile.enabled,username:profile.username,secretType:profile.vcsType==='git'?'AccessToken':'Password',secretValue:null})}
-  const submit=async()=>{if(!form)return;setBusy(true);setError(null);try{await saveVcsProfile(editing,form);setForm(null);setEditing(null);await load()}catch(e){setError(message(e))}finally{setBusy(false)}}
-  return <div className="space-y-4">
-    <div className="grid gap-2 sm:grid-cols-2">{runtimes.map(runtime=><div key={runtime.vcsType} className="flex items-center gap-3 border border-border bg-surface px-3 py-2"><Server className="h-4 w-4 text-brand"/><div className="min-w-0"><p className="text-sm font-medium text-ink">{runtime.vcsType} Runtime</p><p className="truncate text-xs text-ink-subtle">{runtime.available?`${runtime.source} · ${runtime.version}`:runtime.error}</p></div></div>)}</div>
-    {paths&&<div className="space-y-3 border border-border p-3"><div><p className="text-sm font-medium text-ink">工作區路徑</p><p className="text-xs text-ink-subtle">建立專案時可另行選擇目的路徑；worktree 與 Shadow Git 使用全域隔離根目錄。</p></div>{([['workspaceRoot','專案預設根目錄'],['worktreeRoot','Git worktree 根目錄'],['shadowGitRoot','SVN Shadow Git 根目錄']] as const).map(([key,label])=><label key={key} className="block text-xs text-ink-secondary">{label}<input value={paths[key]} onChange={event=>setPaths({...paths,[key]:event.target.value})} className="mt-1 w-full border border-border bg-surface px-3 py-2 font-mono text-xs"/></label>)}<div className="flex justify-end"><Button size="sm" onClick={async()=>{try{setPaths(await saveWorkspaceSettings(paths));setNotice('工作區路徑已儲存')}catch(e){setError(message(e))}}}>儲存路徑</Button></div></div>}
-    <div className="flex items-center justify-between"><p className="text-sm font-medium text-ink">連線設定</p><div className="flex gap-1"><Button variant="ghost" size="icon" title="重新載入" onClick={()=>void load()}><RefreshCw className="h-4 w-4"/></Button><Button size="sm" onClick={()=>{setEditing(null);setForm({...empty})}}><Plus className="mr-1 h-4 w-4"/>新增</Button></div></div>
-    {profiles.map(profile=><div key={profile.id} className="flex items-center gap-3 border border-border bg-surface px-3 py-3"><GitBranch className="h-4 w-4 text-brand"/><button className="min-w-0 flex-1 text-left" onClick={()=>edit(profile)}><p className="text-sm font-medium text-ink">{profile.name}</p><p className="truncate text-xs text-ink-subtle">{profile.vcsType.toUpperCase()} · {profile.baseUrl} · {profile.hasSecret?'已設定憑證':'未設定憑證'}</p>{profile.lastTestedAt&&<p className="mt-1 text-xs text-ink-subtle">上次測試：{profile.lastTestStatus} · {new Date(profile.lastTestedAt).toLocaleString()}</p>}</button><Button variant="ghost" size="sm" onClick={async()=>{try{const result=await testVcsProfile(profile);setNotice(result.output);await load()}catch(e){setError(message(e));await load()}}}>測試</Button><Button variant="ghost" size="icon" title="刪除" onClick={async()=>{await deleteVcsProfile(profile.id);await load()}}><Trash2 className="h-4 w-4"/></Button></div>)}
-    {profiles.length===0&&!form&&<p className="text-sm text-ink-subtle">尚未建立 Git 或 SVN 連線設定。</p>}
-    {form&&<div className="space-y-3 border-t border-border pt-4">
-      <div className="grid gap-3 sm:grid-cols-2"><label className="text-sm text-ink">名稱<input className="mt-1 w-full border border-border bg-surface px-3 py-2" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label><label className="text-sm text-ink">類型<select className="mt-1 w-full border border-border bg-surface px-3 py-2" value={form.vcsType} onChange={e=>{const vcsType=e.target.value as 'git'|'svn';setForm({...form,vcsType,secretType:vcsType==='git'?'AccessToken':'Password'})}}><option value="git">Git / Bitbucket</option><option value="svn">SVN</option></select></label></div>
-      <label className="block text-sm text-ink">Base URL<input className="mt-1 w-full border border-border bg-surface px-3 py-2" value={form.baseUrl} onChange={e=>setForm({...form,baseUrl:e.target.value})}/></label>
-      <label className="block text-sm text-ink">預設專案根目錄<input className="mt-1 w-full border border-border bg-surface px-3 py-2" value={form.defaultWorkspaceRoot??''} placeholder="例如 D:\\Projects" onChange={e=>setForm({...form,defaultWorkspaceRoot:e.target.value||null})}/></label>
-      {form.vcsType==='git'&&<div className="grid gap-3 sm:grid-cols-2"><label className="text-sm text-ink">Commit 作者<input className="mt-1 w-full border border-border bg-surface px-3 py-2" value={form.commitAuthorName??''} placeholder="未填則使用 repository config" onChange={e=>setForm({...form,commitAuthorName:e.target.value||null})}/></label><label className="text-sm text-ink">Commit Email<input type="email" className="mt-1 w-full border border-border bg-surface px-3 py-2" value={form.commitAuthorEmail??''} placeholder="name@company.local" onChange={e=>setForm({...form,commitAuthorEmail:e.target.value||null})}/></label></div>}
-      <div className="grid gap-3 sm:grid-cols-2"><label className="text-sm text-ink">帳號<input className="mt-1 w-full border border-border bg-surface px-3 py-2" value={form.username??''} onChange={e=>setForm({...form,username:e.target.value||null})}/></label><label className="text-sm text-ink">{form.vcsType==='git'?'Access Token':'密碼'}<span className="relative mt-1 block"><input type={visible?'text':'password'} className="w-full border border-border bg-surface px-3 py-2 pr-10" value={form.secretValue??''} placeholder={editing?'留空以保留現有憑證':''} onChange={e=>setForm({...form,secretValue:e.target.value||null})}/><button type="button" title={visible?'隱藏':'顯示'} className="absolute right-2 top-2" onClick={()=>setVisible(!visible)}>{visible?<EyeOff className="h-4 w-4"/>:<Eye className="h-4 w-4"/>}</button></span></label></div>
-      <label className="flex items-center gap-2 text-sm text-ink"><input type="checkbox" checked={form.sslVerificationEnabled} onChange={e=>setForm({...form,sslVerificationEnabled:e.target.checked})}/>驗證 SSL 憑證</label>
-      {!form.sslVerificationEnabled&&<p className="flex items-center gap-2 text-xs text-danger"><TriangleAlert className="h-4 w-4"/>僅此連線的單次操作會忽略 SSL 驗證，風險會寫入稽核紀錄。</p>}
-      <div className="flex justify-end gap-2"><Button variant="ghost" onClick={()=>setForm(null)}>取消</Button><Button onClick={()=>void submit()} disabled={busy||!form.name||!form.baseUrl}>{busy&&<Loader2 className="mr-1 h-4 w-4 animate-spin"/>}儲存</Button></div>
-    </div>}
-    <div className="space-y-3 border-t border-border pt-4"><div><p className="text-sm font-medium text-ink">受保護分支／路徑</p><p className="text-xs text-ink-subtle">未自訂時 Git 使用 main、master、develop、release/*；SVN 使用 trunk、tags/*。</p></div><div className="flex gap-2"><select value={refType} onChange={event=>setRefType(event.target.value as 'git'|'svn')} className="border border-border bg-surface px-2 py-1.5 text-sm"><option value="git">Git</option><option value="svn">SVN</option></select><input value={refPattern} onChange={event=>setRefPattern(event.target.value)} placeholder={refType==='git'?'feature/protected-*':'branches/release-*'} className="min-w-0 flex-1 border border-border bg-surface px-3 py-1.5 text-sm"/><Button size="sm" disabled={!refPattern.trim()} onClick={async()=>{try{await createProtectedRef(refType,refPattern.trim());setRefPattern('');await load()}catch(e){setError(message(e))}}}><Plus className="mr-1 h-4 w-4"/>新增規則</Button></div><div className="space-y-1">{protectedRefs.map(rule=><div key={rule.id} className="flex items-center gap-2 border border-border px-3 py-2 text-sm"><span className="w-9 text-xs uppercase text-ink-subtle">{rule.vcsType}</span><code className="min-w-0 flex-1 truncate text-ink-secondary">{rule.pattern}</code><Button variant="ghost" size="icon" title="刪除規則" onClick={async()=>{await deleteProtectedRef(rule.id);await load()}}><Trash2 className="h-4 w-4"/></Button></div>)}</div></div>
-    {notice&&<p className="text-xs text-success">{notice}</p>}{error&&<p className="text-xs text-danger">{error}</p>}
-  </div>
+const messageOf = (error: unknown) =>
+  error instanceof Error ? error.message : String(error)
+
+const fieldClass =
+  'mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-brand'
+
+/**
+ * 遠端專案匯入只需要連線 Profile。
+ * 已移除 commit 作者、protected refs、worktree 與 Shadow Git 等寫入流程設定。
+ */
+export function VersionControlSettingsPanel() {
+  const [profiles, setProfiles] = useState<VcsProfile[]>([])
+  const [form, setForm] = useState<SaveVcsProfile | null>(null)
+  const [editing, setEditing] = useState<string | null>(null)
+  const [showSecret, setShowSecret] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      setProfiles(await listVcsProfiles())
+    } catch (reason) {
+      setError(messageOf(reason))
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const edit = (profile: VcsProfile) => {
+    setEditing(profile.id)
+    setForm({
+      name: profile.name,
+      vcsType: profile.vcsType,
+      baseUrl: profile.baseUrl,
+      sslVerificationEnabled: profile.sslVerificationEnabled,
+      defaultWorkspaceRoot: profile.defaultWorkspaceRoot,
+      enabled: profile.enabled,
+      username: profile.username,
+      secretType: profile.vcsType === 'git' ? 'AccessToken' : 'Password',
+      secretValue: null,
+    })
+  }
+
+  const submit = async () => {
+    if (!form || busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await saveVcsProfile(editing, form)
+      setForm(null)
+      setEditing(null)
+      setNotice('連線設定已儲存。')
+      await load()
+    } catch (reason) {
+      setError(messageOf(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium text-ink">Git／SVN 連線</p>
+          <p className="text-xs text-ink-subtle">僅供 clone、pull、checkout 與 update 使用。</p>
+        </div>
+        <div className="flex gap-1">
+          <Button variant="ghost" size="icon" title="重新載入" onClick={() => void load()}>
+            <RefreshCw className="h-4 w-4" />
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => {
+              setEditing(null)
+              setForm({ ...emptyProfile })
+            }}
+          >
+            <Plus className="mr-1 h-4 w-4" />
+            新增
+          </Button>
+        </div>
+      </div>
+
+      {profiles.map((profile) => (
+        <div key={profile.id} className="flex items-center gap-3 rounded-xl border border-border bg-surface px-3 py-3">
+          <GitBranch className="h-4 w-4 text-brand" />
+          <button className="min-w-0 flex-1 text-left" onClick={() => edit(profile)}>
+            <p className="text-sm font-medium text-ink">{profile.name}</p>
+            <p className="truncate text-xs text-ink-subtle">
+              {profile.vcsType.toUpperCase()} · {profile.baseUrl} · {profile.hasSecret ? '已設定憑證' : '未設定憑證'}
+            </p>
+          </button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={async () => {
+              try {
+                const result = await testVcsProfile(profile.id)
+                result.success
+                  ? setNotice(result.output || '連線成功。')
+                  : setError(result.error ?? '連線失敗。')
+              } catch (reason) {
+                setError(messageOf(reason))
+              }
+            }}
+          >
+            測試
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            title="刪除"
+            onClick={async () => {
+              await deleteVcsProfile(profile.id)
+              await load()
+            }}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      ))}
+
+      {profiles.length === 0 && !form && (
+        <p className="text-sm text-ink-subtle">尚未建立 Git 或 SVN 連線設定。</p>
+      )}
+
+      {form && (
+        <div className="space-y-3 border-t border-border pt-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="名稱">
+              <input
+                className={fieldClass}
+                value={form.name}
+                onChange={(event) => setForm({ ...form, name: event.target.value })}
+              />
+            </Field>
+            <Field label="類型">
+              <select
+                className={fieldClass}
+                value={form.vcsType}
+                onChange={(event) => {
+                  const vcsType = event.target.value as 'git' | 'svn'
+                  setForm({
+                    ...form,
+                    vcsType,
+                    secretType: vcsType === 'git' ? 'AccessToken' : 'Password',
+                  })
+                }}
+              >
+                <option value="git">Git</option>
+                <option value="svn">SVN</option>
+              </select>
+            </Field>
+          </div>
+          <Field label="Base URL">
+            <input
+              className={fieldClass}
+              value={form.baseUrl}
+              onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
+            />
+          </Field>
+          <Field label="預設專案根目錄">
+            <input
+              className={fieldClass}
+              value={form.defaultWorkspaceRoot ?? ''}
+              placeholder="例如 D:\Projects"
+              onChange={(event) =>
+                setForm({ ...form, defaultWorkspaceRoot: event.target.value || null })}
+            />
+          </Field>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="帳號">
+              <input
+                className={fieldClass}
+                value={form.username ?? ''}
+                onChange={(event) => setForm({ ...form, username: event.target.value || null })}
+              />
+            </Field>
+            <Field label={form.vcsType === 'git' ? 'Access Token' : '密碼'}>
+              <span className="relative block">
+                <input
+                  type={showSecret ? 'text' : 'password'}
+                  className={`${fieldClass} pr-10`}
+                  value={form.secretValue ?? ''}
+                  placeholder={editing ? '留白以保留現有憑證' : ''}
+                  onChange={(event) =>
+                    setForm({ ...form, secretValue: event.target.value || null })}
+                />
+                <button
+                  type="button"
+                  className="absolute right-2 top-2 text-ink-subtle"
+                  onClick={() => setShowSecret((value) => !value)}
+                >
+                  {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </span>
+            </Field>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-ink">
+            <input
+              type="checkbox"
+              checked={form.sslVerificationEnabled}
+              onChange={(event) =>
+                setForm({ ...form, sslVerificationEnabled: event.target.checked })}
+            />
+            驗證 SSL 憑證
+          </label>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setForm(null)}>取消</Button>
+            <Button disabled={busy || !form.name || !form.baseUrl} onClick={() => void submit()}>
+              {busy && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+              儲存
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {notice && <p className="text-xs text-emerald-700">{notice}</p>}
+      {error && <p className="text-xs text-red-700">{error}</p>}
+    </div>
+  )
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="block text-sm text-ink">
+      {label}
+      {children}
+    </label>
+  )
 }

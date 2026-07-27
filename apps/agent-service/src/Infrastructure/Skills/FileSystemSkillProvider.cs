@@ -6,10 +6,10 @@ using YamlDotNet.Serialization;
 namespace AgentService.Infrastructure.Skills;
 
 /// <summary>
-/// 從檔案系統載入 Wingman Agent 的 skills。
+/// 從檔案系統載入 Modern Wingman 可使用的指示型 Agent Skills。
 ///
 /// 目錄來源：~/.wingman/agents/wingman/skills/&lt;skill-name&gt;/SKILL.md
-/// （由桌面端中央 Skill Library 的同步引擎寫入，junction/symlink/copy）
+/// （由 Marketplace 部署流程以實體複製方式寫入）
 ///
 /// 執行緒安全：清單以 volatile snapshot 保存，Refresh() 原子替換。
 /// </summary>
@@ -38,16 +38,6 @@ public sealed class FileSystemSkillProvider : ISkillProvider
             ".wingman", "agents", "wingman", "skills");
 
     public IReadOnlyList<SkillDefinition> ListSkills() => _snapshot;
-
-    public async Task<string?> ReadSkillContentAsync(string name, CancellationToken ct = default)
-    {
-        var skill = _snapshot.FirstOrDefault(s =>
-            string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase));
-        if (skill is null || !File.Exists(skill.SkillFilePath))
-            return null;
-
-        return await File.ReadAllTextAsync(skill.SkillFilePath, ct);
-    }
 
     public void Refresh()
     {
