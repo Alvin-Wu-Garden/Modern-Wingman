@@ -72,6 +72,111 @@ public sealed class GraphRAGV3ModelTests
     }
 
     [Fact]
+    public void VisualRelationshipCore_PrioritizesConnectedNodesWithinBudget()
+    {
+        // 關係共享端點時應繼續擴充同一個連通核心，不能退回只依種類挑選孤立節點。
+        var result = Neo4jGraphStore.SelectRelationshipCoreNodeIds(
+            [
+                ("entry:order", "code:controller"),
+                ("code:controller", "code:service"),
+                ("data:table-a", "data:table-b"),
+            ],
+            nodeLimit: 3);
+
+        Assert.Equal(
+            ["entry:order", "code:controller", "code:service"],
+            result);
+    }
+
+    [Fact]
+    public void VisualRelationshipCore_NeverAddsOnlyOneEndpoint()
+    {
+        // node budget 不足以容納一條關係的兩端時，應留給後續單節點補位，
+        // 不能加入無法畫出 relationship 的半套核心。
+        var result = Neo4jGraphStore.SelectRelationshipCoreNodeIds(
+            [("entry:order", "code:controller")],
+            nodeLimit: 1);
+
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void VisualRelationshipCore_AllowsSelfLoopWithinSingleNodeBudget()
+    {
+        var result = Neo4jGraphStore.SelectRelationshipCoreNodeIds(
+            [("code:recursive", "code:recursive")],
+            nodeLimit: 1);
+
+        Assert.Equal(["code:recursive"], result);
+    }
+
+    [Fact]
+    public void VisualQueryEndpoints_FillsWholeEdgeWithinRemainingBudget()
+    {
+        var edges = new[]
+        {
+            VisualEdge("edge:a-b", "node:a", "node:b"),
+            VisualEdge("edge:c-d", "node:c", "node:d"),
+        };
+
+        var missing = Neo4jGraphStore.SelectMissingVisualEndpointIds(
+            edges,
+            new HashSet<string>(["node:a"], StringComparer.Ordinal),
+            nodeBudget: 2);
+
+        // 第一條 edge 只缺 B，第二條同時缺 C、D 但剩餘額度不足，因此不可只補其中一端。
+        Assert.Equal(["node:b"], missing);
+    }
+
+    [Fact]
+    public void VisualQueryNodes_ClampsAggregateAndKeepsConnectedPair()
+    {
+        var result = Neo4jGraphStore.SelectBoundedVisualNodeIds(
+            ["node:isolated-a", "node:isolated-b", "node:source", "node:target"],
+            [VisualEdge("edge:source-target", "node:source", "node:target")],
+            nodeLimit: 2);
+
+        Assert.Equal(["node:source", "node:target"], result);
+    }
+
+    [Fact]
+    public void VisualQueryEdges_RemovesOrphansAfterEndpointHydration()
+    {
+        var complete = VisualEdge("edge:a-b", "node:a", "node:b");
+        var orphan = VisualEdge("edge:b-c", "node:b", "node:c");
+
+        var result = Neo4jGraphStore.KeepVisualEdgesWithEndpoints(
+            [orphan, complete],
+            new HashSet<string>(["node:a", "node:b"], StringComparer.Ordinal));
+
+        Assert.Equal([complete], result);
+    }
+
+    [Theory]
+    [InlineData("all", "all")]
+    [InlineData("in", "in")]
+    [InlineData("callers", "in")]
+    [InlineData("out", "out")]
+    [InlineData("callees", "out")]
+    [InlineData("same-file", "same-file")]
+    [InlineData(" CALLERS ", "in")]
+    public void VisualNeighborMode_NormalizesUiAndLegacyValues(
+        string input,
+        string expected)
+    {
+        Assert.Equal(expected, Neo4jGraphStore.NormalizeVisualNeighborMode(input));
+    }
+
+    [Fact]
+    public void VisualNeighborMode_RejectsUnknownValue()
+    {
+        var exception = Assert.Throws<ArgumentException>(
+            () => Neo4jGraphStore.NormalizeVisualNeighborMode("dependencies"));
+
+        Assert.Contains("same-file", exception.Message);
+    }
+
+    [Fact]
     public void EdgeIdentity_IsDeterministicAndDirectional()
     {
         var first = GraphIdentity.Edge("feature:menu:1", GraphEdgeKind.RoutesTo, "entry:web:order/index");
@@ -222,6 +327,17 @@ public sealed class GraphRAGV3ModelTests
         string target,
         GraphEvidence evidence) =>
         new(GraphIdentity.Edge(source, kind, target), source, kind, target, [evidence]);
+
+    private static GraphVisualEdgeV3 VisualEdge(
+        string id,
+        string source,
+        string target) =>
+        new(
+            id,
+            source,
+            target,
+            "CALLS",
+            new Dictionary<string, object?>());
 
     private static GraphEvidence Evidence(string artifact, string reason, int? line = null) =>
         new(

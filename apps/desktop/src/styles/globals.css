@@ -104,6 +104,20 @@ html[data-theme="glass"] {
 }
 
 /*
+ * 知識圖譜是全螢幕工作區，不是蓋在專案解析頁上的玻璃 Modal。
+ * 它必須先建立自己的不透明動態背景，再讓工具列與側欄對這個背景做玻璃折射；
+ * 若直接使用半透明 surface-alt，底下仍留在 DOM 的專案內容會穿透進來。
+ */
+html[data-theme="glass"] [data-knowledge-graph-page] {
+  isolation: isolate;
+  background:
+    radial-gradient(ellipse 55% 40% at 12% 14%, rgba(48, 90, 210, 0.28) 0%, transparent 62%),
+    radial-gradient(ellipse 45% 50% at 88% 85%, rgba(95, 42, 190, 0.22) 0%, transparent 62%),
+    radial-gradient(ellipse 30% 35% at 55% 48%, rgba(0, 70, 170, 0.12) 0%, transparent 55%),
+    linear-gradient(170deg, #04070e 0%, #070c18 45%, #091120 100%);
+}
+
+/*
  * Glass theme — primary button: vivid cyan bg with near-black text for max contrast.
  * Secondary / outline: subtle glass tint with white text.
  */

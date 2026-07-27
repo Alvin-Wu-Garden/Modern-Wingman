@@ -349,7 +349,7 @@ public static class ProjectEndpoints
         INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
-        var readiness = await EnsureProjectGraphReadyAsync(id, repo, neo4jLifecycle, ct);
+        var readiness = await EnsureProjectGraphReadyAsync(id, repo, graphStore, neo4jLifecycle, ct);
         if (readiness is not null) return readiness;
 
         try
@@ -372,7 +372,7 @@ public static class ProjectEndpoints
         INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
-        var readiness = await EnsureProjectGraphReadyAsync(id, repo, neo4jLifecycle, ct);
+        var readiness = await EnsureProjectGraphReadyAsync(id, repo, graphStore, neo4jLifecycle, ct);
         if (readiness is not null) return readiness;
 
         try
@@ -384,6 +384,12 @@ public static class ProjectEndpoints
                 SplitCsv(relations),
                 ct);
             return Results.Ok(graph);
+        }
+        catch (ArgumentException ex)
+        {
+            // NodeKind 與 relationship filter 都採固定白名單；不合法值是請求錯誤，
+            // 不應被包成難以判讀的伺服器 500。
+            return Results.BadRequest(new { error = ex.Message });
         }
         catch (ServiceUnavailableException)
         {
@@ -399,7 +405,7 @@ public static class ProjectEndpoints
         INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
-        var readiness = await EnsureProjectGraphReadyAsync(id, repo, neo4jLifecycle, ct);
+        var readiness = await EnsureProjectGraphReadyAsync(id, repo, graphStore, neo4jLifecycle, ct);
         if (readiness is not null) return readiness;
 
         try
@@ -432,7 +438,7 @@ public static class ProjectEndpoints
         INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
-        var readiness = await EnsureProjectGraphReadyAsync(id, repo, neo4jLifecycle, ct);
+        var readiness = await EnsureProjectGraphReadyAsync(id, repo, graphStore, neo4jLifecycle, ct);
         if (readiness is not null) return readiness;
 
         try
@@ -444,6 +450,11 @@ public static class ProjectEndpoints
                 request.Limit ?? 1000,
                 request.Mode ?? "all",
                 ct));
+        }
+        catch (ArgumentException ex)
+        {
+            // 展開模式與節點參數由 API 契約限制，錯誤輸入明確回傳 400。
+            return Results.BadRequest(new { error = ex.Message });
         }
         catch (ServiceUnavailableException)
         {
@@ -459,6 +470,7 @@ public static class ProjectEndpoints
     private static async Task<IResult?> EnsureProjectGraphReadyAsync(
         string id,
         IProjectRepository repo,
+        IGraphStore graphStore,
         INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
@@ -471,10 +483,46 @@ public static class ProjectEndpoints
                 new { error = "此專案尚未有可用的成功索引，請先完成索引後再查看知識圖譜。" },
                 statusCode: StatusCodes.Status409Conflict);
 
-        return await EnsureGraphAvailableAsync(neo4jLifecycle, ct)
-            ? null
-            : GraphUnavailable(neo4jLifecycle);
+        if (!await EnsureGraphAvailableAsync(neo4jLifecycle, ct))
+            return GraphUnavailable(neo4jLifecycle);
+
+        // SQLite 專案紀錄與 Neo4j active graph 必須指向同一個 manifest。
+        // 若 Neo4j 曾被清空、資料遺失或只留下舊版 graph，不能回傳看似正常的空圖，
+        // 而要明確要求重新索引，避免使用者誤以為索引仍可用。
+        string? activeManifest;
+        try
+        {
+            activeManifest = await graphStore.GetActiveManifestAsync(id, ct);
+        }
+        catch (ServiceUnavailableException)
+        {
+            // 健康檢查與實際讀取之間仍可能發生短暫斷線，統一回傳既有的
+            // Neo4j 503 診斷，避免未處理例外變成不具體的 500。
+            return GraphUnavailable(neo4jLifecycle);
+        }
+        if (!HasMatchingGraphManifest(project.IndexManifestVersion, activeManifest))
+        {
+            return Results.Json(
+                new
+                {
+                    error = "專案索引紀錄與 Neo4j 知識圖譜不一致，請重新執行索引。",
+                    errorCode = "graph_manifest_mismatch",
+                },
+                statusCode: StatusCodes.Status409Conflict);
+        }
+
+        return null;
     }
+
+    /// <summary>
+    /// 判斷 SQLite 專案紀錄與 Neo4j active graph 是否屬於同一次成功索引。
+    /// 保持成無副作用的小函式，讓缺少、相同與版本不一致三種情況都能直接測試。
+    /// </summary>
+    internal static bool HasMatchingGraphManifest(
+        string? projectManifest,
+        string? activeManifest) =>
+        !string.IsNullOrWhiteSpace(projectManifest) &&
+        string.Equals(projectManifest, activeManifest, StringComparison.Ordinal);
 
     private static IReadOnlyList<string> SplitCsv(string? value) =>
         string.IsNullOrWhiteSpace(value)
