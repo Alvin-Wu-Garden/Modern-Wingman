@@ -14,7 +14,7 @@ function Check-Tool {
 
 Write-Host "`n=== Modern Wingman Tool Check ===`n"
 Check-Tool "Node.js"   "node --version"    "24"
-Check-Tool "pnpm"      "pnpm --version"    "9"
+Check-Tool "pnpm"      "pnpm.cmd --version"    "9"
 Check-Tool ".NET SDK"  "dotnet --version"  "10"
 Check-Tool "Git"       "git --version"     "2"
 Check-Tool "Rust"      "rustc --version"   "1"

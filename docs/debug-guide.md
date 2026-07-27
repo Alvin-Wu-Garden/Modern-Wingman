@@ -1,11 +1,11 @@
-# Modern Wingman — AgentService Debug 教學手冊
+# Modern Wingman — VS Code 偵錯與啟動手冊
 
 ## 目錄
 
 1. [前置需求](#1-前置需求)
-2. [Debug 模式說明](#2-debug-模式說明)
-3. [方法一：從 VS Code 直接啟動（推薦）](#3-方法一從-vs-code-直接啟動推薦)
-4. [方法二：附加到已執行的程序](#4-方法二附加到已執行的程序)
+2. [VS Code 組態說明](#2-vs-code-組態說明)
+3. [偵錯 Agent Service 與啟動 Wingman（推薦）](#3-偵錯-agent-service-與啟動-wingman推薦)
+4. [附加到已執行的 Agent Service](#4-附加到已執行的-agent-service)
 5. [設定中斷點](#5-設定中斷點)
 6. [聊天室訊息的呼叫鏈](#6-聊天室訊息的呼叫鏈)
 7. [常見問題排除](#7-常見問題排除)
@@ -25,58 +25,67 @@
 
 ---
 
-## 2. Debug 模式說明
+## 2. VS Code 組態說明
 
-專案提供兩種 debug 配置（定義於 `.vscode/launch.json`）：
+「執行與偵錯」面板提供下列組態（定義於 `.vscode/launch.json`）：
 
 | 配置名稱 | 適用情境 |
 |---------|---------|
-| **Debug AgentService** | 由 VS Code 直接編譯並啟動，適合一般開發 debug |
-| **Attach to AgentService (已在執行)** | 附加到已由 `start-all.ps1` 啟動的程序，不重新啟動服務 |
+| **偵錯 Agent Service + Wingman** | 編譯並偵錯 .NET Agent Service，同時用 `start-all.ps1 -DesktopOnly` 啟動 Tauri/Vite 桌面程式 |
+| **偵錯 Agent Service** | 只由 VS Code 編譯並偵錯 .NET 服務 |
+| **附加至 Agent Service（已在執行）** | 從程序清單附加到已由 `start-all.ps1` 啟動的 `AgentService` |
+| **啟動 Wingman（start-all.ps1）** | 只執行 `start-all.ps1 -DesktopOnly` |
+| **啟動 Agent Service（start-all.ps1）** | 只執行 `start-all.ps1 -AgentOnly` |
+| **啟動全部（start-all.ps1）** | 執行不帶參數的 `start-all.ps1`，開啟 Agent Service 與 Wingman |
 
 ---
 
-## 3. 方法一：從 VS Code 直接啟動（推薦）
+## 3. 偵錯 Agent Service 與啟動 Wingman（推薦）
 
-> 使用此方法時，請確保沒有其他 AgentService 在執行（避免 port 5200 衝突）。
+> 使用此方法時，請先關閉其他已執行的 Agent Service，避免 API 連接埠衝突。
 
 **步驟：**
 
-1. 停止已在執行的服務（若有）：
-   ```powershell
-   Stop-Process -Name "AgentService" -Force
-   ```
+1. 按 `Ctrl+Shift+D` 開啟「執行與偵錯」面板
 
-2. 按 `Ctrl+Shift+D` 開啟「執行與偵錯」面板
+2. 在頂部下拉選單選擇 **「偵錯 Agent Service + Wingman」**
 
-3. 在頂部下拉選單選擇 **「Debug AgentService」**
-
-4. 按 `F5` 啟動
+3. 按 `F5` 啟動
 
 VS Code 會自動執行以下步驟：
 - 編譯 `AgentService.csproj`
-- 啟動服務（監聽 `http://localhost:5200`）
-- 附加 debugger
+- 啟動 Agent Service 並附加 .NET debugger
+- 呼叫 `scripts/dev/start-all.ps1 -DesktopOnly`
+- 自動選擇可用的 Vite 開發連接埠並開啟 Tauri Wingman 視窗
+
+若只需要其中一個程序，可改選 **「偵錯 Agent Service」** 或
+**「啟動 Wingman（start-all.ps1）」**。
 
 ---
 
-## 4. 方法二：附加到已執行的程序
+## 4. 附加到已執行的 Agent Service
 
 > 使用此方法不需停止服務，適合服務已在運行時臨時加入 debug。
 
 **步驟：**
 
-1. 先執行 `start-all.ps1` 啟動所有服務：
+1. 從「執行與偵錯」選擇 **「啟動全部（start-all.ps1）」**，或在終端機執行：
+
    ```powershell
-   cd scripts\dev
-   .\start-all.ps1
+   .\scripts\dev\start-all.ps1
    ```
 
 2. 按 `Ctrl+Shift+D` 開啟「執行與偵錯」面板
 
-3. 在頂部下拉選單選擇 **「Attach to AgentService (已在執行)」**
+3. 在頂部下拉選單選擇 **「附加至 Agent Service（已在執行）」**
 
-4. 按 `F5`，VS Code 會列出程序清單，選擇 `AgentService` 即可
+4. 按 `F5`，在程序清單中選擇 `AgentService.exe`
+
+除了偵錯面板，也可以按 `Ctrl+Shift+P` 執行 **Tasks: Run Task**，再選擇：
+
+- `start: agent-service`
+- `start: wingman`
+- `start: all`
 
 ---
 
@@ -145,7 +154,7 @@ WingmanChatAgent.RunStreamingAsync()  ← 在此設中斷點，可查看送給 L
 
 ## 7. 常見問題排除
 
-### Q: 找不到「Debug AgentService」選項？
+### Q: 找不到「偵錯 Agent Service」選項？
 
 **A:** 確認已安裝 **C# Dev Kit** 擴充套件，並用 `Ctrl+Shift+D` 開啟「執行與偵錯」面板（不是編輯器右上角的播放按鈕）。
 
@@ -187,3 +196,6 @@ Stop-Process -Name "AgentService" -Force
 ```powershell
 Get-Process -Name "AgentService"
 ```
+
+若是從 `dotnet run` 啟動而只看到 `dotnet.exe`，請在 VS Code 的程序選擇器中搜尋
+`AgentService.dll` 的命令列。
