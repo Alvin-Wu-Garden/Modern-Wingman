@@ -13,6 +13,7 @@ import { SidebarNavigation } from '@/components/layout/sidebar-navigation'
 import { Button } from '@/components/ui/button'
 import { SettingsPage } from '@/features/settings/components/SettingsPage'
 import { ProjectsPage } from '@/features/projects/components/ProjectsPage'
+import { useProjectsStore } from '@/features/projects/store/useProjectsStore'
 import { cn } from '@/lib/utils'
 import { useChatStore } from '../store/useChatStore'
 import { ConversationPane } from './ConversationPane'
@@ -30,6 +31,7 @@ type ActiveView = 'home' | 'chat' | 'projects' | 'marketplace' | 'settings'
  */
 export function ChatPage() {
   const [activeView, setActiveView] = useState<ActiveView>('home')
+  const projectProgress = useProjectsStore((state) => state.progress)
   const {
     conversations,
     activeConversationId,
@@ -138,7 +140,8 @@ export function ChatPage() {
   )
 
   return (
-    <AppShell
+    <>
+      <AppShell
       sidebar={(
         <SidebarNavigation
           sections={sidebarSections}
@@ -195,6 +198,26 @@ export function ChatPage() {
           <MarketplacePage />
         </React.Suspense>
       )}
-    </AppShell>
+      </AppShell>
+
+      {projectProgress?.phase === 'summaries' && (
+        <aside
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-5 right-5 z-50 w-80 rounded-xl border border-border bg-surface p-4 shadow-lg"
+        >
+          <div className="flex items-center justify-between gap-3 text-xs">
+            <span className="font-medium text-ink">{projectProgress.message}</span>
+            <span className="shrink-0 text-ink-subtle">{projectProgress.percent}%</span>
+          </div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border">
+            <div
+              className="h-full rounded-full bg-brand transition-all"
+              style={{ width: `${projectProgress.percent}%` }}
+            />
+          </div>
+        </aside>
+      )}
+    </>
   )
 }

@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using AgentService.Application.Contracts;
 using AgentService.Domain.Models;
@@ -7,11 +9,20 @@ using Microsoft.Extensions.Logging;
 
 namespace AgentService.Modules.GraphRAG;
 
-/// <summary>索引執行期使用的資料庫來源；完整連線字串禁止記錄或序列化。</summary>
+/// <summary>
+/// 索引執行期使用的資料庫來源；完整連線字串禁止記錄或序列化。
+/// <paramref name="ConfigurationFingerprint"/> 只由非機密設定與設定版本雜湊而成，
+/// 可用來判斷資料庫目標是否改變，但不可反推出密碼或完整連線字串。
+/// </summary>
+/// <param name="Provider">決定唯讀驅動與 metadata extractor 的資料庫種類。</param>
+/// <param name="ConnectionString">只存在記憶體中的完整連線字串，禁止記錄或持久化。</param>
+/// <param name="DatabaseName">供 Graph identity 使用的非機密資料庫名稱。</param>
+/// <param name="ConfigurationFingerprint">不含密碼與連線字串的設定版本 SHA-256。</param>
 public sealed record GraphDatabaseSource(
     ProjectDatabaseProvider Provider,
     string ConnectionString,
-    string DatabaseName);
+    string DatabaseName,
+    string ConfigurationFingerprint = "legacy");
 
 /// <summary>由專案的 DPAPI 設定建立唯讀資料庫來源。</summary>
 public interface IGraphDatabaseSourceProvider
@@ -29,7 +40,10 @@ public interface IGraphDatabaseSourceProvider
 public sealed class ProjectGraphDatabaseSourceProvider(
     IProjectDatabaseConfigurationStore configurations) : IGraphDatabaseSourceProvider
 {
-    /// <summary>解密專案設定並在記憶體內建立唯讀連線字串。</summary>
+    /// <summary>
+    /// 解密專案設定並在記憶體內建立唯讀連線字串。
+    /// 回傳的設定指紋不含密碼、密文或完整連線字串，可安全納入索引指紋。
+    /// </summary>
     public async Task<GraphDatabaseSource?> GetAsync(
         ProjectEntity project,
         CancellationToken cancellationToken = default)
@@ -56,6 +70,33 @@ public sealed class ProjectGraphDatabaseSourceProvider(
             ProjectDatabaseProvider.Sqlite => BuildSqlite(configuration),
             _ => throw new InvalidOperationException("不支援的專案資料庫種類。"),
         };
+
+    /// <summary>
+    /// 由非機密資料庫識別與設定更新時間建立固定長度指紋。
+    /// 密碼、DPAPI 密文及完整連線字串刻意不參與；同一次設定版本即使記憶體密碼不同，
+    /// 仍會得到相同結果，而正式儲存造成的 UpdatedAt 變更會使既有索引失效。
+    /// </summary>
+    /// <param name="configuration">已通過設定 API 驗證的資料庫設定。</param>
+    /// <returns>小寫十六進位 SHA-256，不含任何可直接辨識的設定值。</returns>
+    internal static string ComputeConfigurationFingerprint(
+        ProjectDatabaseConfiguration configuration)
+    {
+        var material = string.Join(
+            '\0',
+            configuration.Provider.ToString(),
+            configuration.Server?.Trim().ToUpperInvariant() ?? string.Empty,
+            configuration.Port?.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                ?? string.Empty,
+            configuration.DatabaseName?.Trim().ToUpperInvariant() ?? string.Empty,
+            configuration.Authentication?.ToString() ?? string.Empty,
+            configuration.TrustServerCertificate ? "trust" : "verify",
+            NormalizeSqlitePath(configuration.SqlitePath),
+            configuration.UpdatedAt.UtcTicks.ToString(
+                System.Globalization.CultureInfo.InvariantCulture));
+        return Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(material)))
+            .ToLowerInvariant();
+    }
 
     private static GraphDatabaseSource BuildSqlServer(
         ProjectDatabaseConfiguration configuration)
@@ -96,7 +137,8 @@ public sealed class ProjectGraphDatabaseSourceProvider(
         return new GraphDatabaseSource(
             ProjectDatabaseProvider.SqlServer,
             builder.ConnectionString,
-            configuration.DatabaseName);
+            configuration.DatabaseName,
+            ComputeConfigurationFingerprint(configuration));
     }
 
     private static GraphDatabaseSource BuildSqlite(
@@ -120,8 +162,22 @@ public sealed class ProjectGraphDatabaseSourceProvider(
         return new GraphDatabaseSource(
             ProjectDatabaseProvider.Sqlite,
             builder.ConnectionString,
-            Path.GetFileNameWithoutExtension(path));
+            Path.GetFileNameWithoutExtension(path),
+            ComputeConfigurationFingerprint(configuration));
     }
+
+    /// <summary>
+    /// 將 SQLite 路徑正規化後只作雜湊材料，避免相同檔案因大小寫或分隔符差異反覆失效。
+    /// 空路徑回傳空字串；原始路徑不會被寫入 Manifest 或 log。
+    /// </summary>
+    /// <param name="path">設定中的 SQLite 檔案路徑。</param>
+    /// <returns>供雜湊使用的正規化路徑。</returns>
+    private static string NormalizeSqlitePath(string? path) =>
+        string.IsNullOrWhiteSpace(path)
+            ? string.Empty
+            : Path.GetFullPath(path)
+                .Replace('\\', '/')
+                .ToUpperInvariant();
 }
 
 /// <summary>

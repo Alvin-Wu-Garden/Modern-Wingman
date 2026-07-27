@@ -27,7 +27,7 @@ public sealed class CSharpGraphExtractor(ILogger<CSharpGraphExtractor> logger) :
     public string Id => "csharp-roslyn-v3";
 
     /// <inheritdoc />
-    public string Version => "3.7.0";
+    public string Version => "3.8.0";
 
     /// <inheritdoc />
     public async Task<GraphFragment> ExtractAsync(
@@ -1414,6 +1414,14 @@ public sealed class CSharpGraphExtractor(ILogger<CSharpGraphExtractor> logger) :
                relative.EndsWith(".designer.cs", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// 大型 repository 僅保留可能參與畫面、流程、登入、服務與批次協調的 C# 檔案。
+    /// 這是效能與召回率的保守白名單，不代表檔案已被確認屬於某項業務功能；
+    /// SQL 與前端 extractor 仍各自處理其完整來源範圍。
+    /// </summary>
+    /// <param name="root">專案根目錄，用來產生不含外部路徑的相對名稱。</param>
+    /// <param name="path">待判斷的 C# 實體檔案路徑。</param>
+    /// <returns>應納入大型專案 C# type graph 時為 true。</returns>
     internal static bool IsLargeRepositoryCallPathFile(string root, string path)
     {
         var relative = RelativePath(root, path);
@@ -1422,7 +1430,7 @@ public sealed class CSharpGraphExtractor(ILogger<CSharpGraphExtractor> logger) :
         {
             "controller", "service", "business", "report",
             "schedule", "task", "workflow", "handler", "maintain", "confirm",
-            "rmbz",
+            "login", "auth", "password", "account", "security", "rmbz",
         }.Any(marker => searchable.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 

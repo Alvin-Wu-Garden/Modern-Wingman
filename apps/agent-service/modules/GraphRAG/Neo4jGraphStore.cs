@@ -160,6 +160,43 @@ public interface IGraphStore
         int limit,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 批次取得多個 active graph 節點的一階鄰接關係。
+    /// 預設實作保留測試 store 與非 Neo4j store 的相容性；正式 Neo4j store 必須覆寫此方法，
+    /// 以單一查詢處理同一層 frontier，避免 Local Search 形成逐節點 N+1 round trip。
+    /// </summary>
+    /// <param name="projectId">Modern Wingman 專案識別碼。</param>
+    /// <param name="nodeIds">同一遍歷層待展開的去重節點識別碼。</param>
+    /// <param name="limitPerNode">每個中心節點最多保留的鄰居數。</param>
+    /// <param name="cancellationToken">取消整批讀取的 token。</param>
+    /// <returns>以中心節點 ID 分組的鄰接關係；沒有鄰居的節點仍會回傳空集合。</returns>
+    async Task<IReadOnlyDictionary<string, IReadOnlyList<GraphNeighborV3>>>
+        GetNeighborsBatchAsync(
+            string projectId,
+            IReadOnlyList<string> nodeIds,
+            int limitPerNode,
+            CancellationToken cancellationToken = default)
+    {
+        var distinctIds = nodeIds
+            .Where(nodeId => !string.IsNullOrWhiteSpace(nodeId))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var values = await Task.WhenAll(distinctIds.Select(async nodeId =>
+            new
+            {
+                NodeId = nodeId,
+                Neighbors = await GetNeighborsAsync(
+                    projectId,
+                    nodeId,
+                    limitPerNode,
+                    cancellationToken),
+            }));
+        return values.ToDictionary(
+            item => item.NodeId,
+            item => item.Neighbors,
+            StringComparer.Ordinal);
+    }
+
     /// <summary>依 active graph degree 取得入口與核心節點，供 Repo Map 使用。</summary>
     Task<IReadOnlyList<GraphSearchHitV3>> GetCentralNodesAsync(
         string projectId,
@@ -571,6 +608,82 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                     cursor.Current["direction"].As<string>()));
             }
             return (IReadOnlyList<GraphNeighborV3>)result;
+        });
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<GraphNeighborV3>>>
+        GetNeighborsBatchAsync(
+            string projectId,
+            IReadOnlyList<string> nodeIds,
+            int limitPerNode,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
+        ArgumentNullException.ThrowIfNull(nodeIds);
+        limitPerNode = Math.Clamp(limitPerNode, 1, 500);
+        var distinctIds = nodeIds
+            .Where(nodeId => !string.IsNullOrWhiteSpace(nodeId))
+            .Distinct(StringComparer.Ordinal)
+            .Take(500)
+            .ToList();
+        var empty = distinctIds.ToDictionary(
+            nodeId => nodeId,
+            _ => (IReadOnlyList<GraphNeighborV3>)Array.Empty<GraphNeighborV3>(),
+            StringComparer.Ordinal);
+        if (_driver is null || distinctIds.Count == 0) return empty;
+
+        await using var session = OpenReadSession();
+        cancellationToken.ThrowIfCancellationRequested();
+        return await session.ExecuteReadAsync(async transaction =>
+        {
+            var cursor = await transaction.RunAsync(
+                """
+                MATCH (p:ProjectGraph {projectId: $projectId})
+                UNWIND $nodeIds AS nodeId
+                MATCH (center:GraphEntity {
+                    projectId: $projectId,
+                    graphVersion: p.activeManifestVersion,
+                    id: nodeId
+                })-[relationship]-(neighbor:GraphEntity {
+                    projectId: $projectId,
+                    graphVersion: p.activeManifestVersion
+                })
+                WITH center, neighbor, relationship,
+                     CASE WHEN startNode(relationship) = center
+                          THEN 'outgoing' ELSE 'incoming' END AS direction
+                ORDER BY center.id, type(relationship), neighbor.id
+                WITH center.id AS centerId,
+                     collect({
+                         neighbor: neighbor,
+                         relationship: relationship,
+                         direction: direction
+                     })[0..$limitPerNode] AS bounded
+                UNWIND bounded AS item
+                RETURN centerId,
+                       item.neighbor AS neighbor,
+                       item.relationship AS relationship,
+                       item.direction AS direction
+                ORDER BY centerId, type(item.relationship), item.neighbor.id
+                """,
+                new { projectId, nodeIds = distinctIds, limitPerNode });
+            var mutable = distinctIds.ToDictionary(
+                nodeId => nodeId,
+                _ => new List<GraphNeighborV3>(),
+                StringComparer.Ordinal);
+            while (await cursor.FetchAsync())
+            {
+                var centerId = cursor.Current["centerId"].As<string>();
+                var relationship = cursor.Current["relationship"].As<IRelationship>();
+                mutable[centerId].Add(new GraphNeighborV3(
+                    MapNode(cursor.Current["neighbor"].As<INode>()),
+                    MapEdge(relationship),
+                    cursor.Current["direction"].As<string>()));
+            }
+            return mutable.ToDictionary(
+                pair => pair.Key,
+                pair => (IReadOnlyList<GraphNeighborV3>)pair.Value,
+                StringComparer.Ordinal);
         });
     }
 

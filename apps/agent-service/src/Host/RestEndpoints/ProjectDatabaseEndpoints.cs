@@ -17,6 +17,12 @@ public static class ProjectDatabaseEndpoints
         bool? TrustServerCertificate,
         string? SqlitePath);
 
+    /// <summary>
+    /// 註冊專案資料庫設定端點。設定異動只標記既有 Graph 索引失效，
+    /// 不在 HTTP request 內啟動耗時的重新索引。
+    /// </summary>
+    /// <param name="app">ASP.NET Core endpoint builder。</param>
+    /// <returns>原始 builder，供 host 繼續註冊其他端點。</returns>
     public static IEndpointRouteBuilder MapProjectDatabaseEndpoints(
         this IEndpointRouteBuilder app)
     {
@@ -43,11 +49,17 @@ public static class ProjectDatabaseEndpoints
             : Results.Ok(ToDto(configuration));
     }
 
+    /// <summary>
+    /// 驗證並保存一組專案資料庫設定，成功後只將索引標成待更新。
+    /// 此方法不測試或抽取外部資料庫，避免設定 request 被長時間工作阻塞。
+    /// </summary>
+    /// <returns>成功時回傳不含密碼的設定 DTO；輸入不合法時回傳 400。</returns>
     private static async Task<IResult> Save(
         string projectId,
         SaveProjectDatabaseRequest request,
         IProjectRepository projects,
         IProjectDatabaseConfigurationStore configurations,
+        GraphIndexingService indexing,
         CancellationToken ct)
     {
         if (await projects.GetAsync(projectId, ct) is null)
@@ -63,6 +75,9 @@ public static class ProjectDatabaseEndpoints
             return Results.BadRequest(new { error = validation.Error });
 
         await configurations.SaveAsync(validation.Configuration!, ct);
+        // 設定版本不應直接重建圖譜；先使專案呈現 PendingChanges，
+        // 由既有索引操作在使用者可控的時間重新連線與發布。
+        await indexing.MarkPendingChangesAsync(projectId, cancellationToken: ct);
         return Results.Ok(ToDto(
             (await configurations.GetAsync(projectId, false, ct))!));
     }
@@ -166,15 +181,22 @@ public static class ProjectDatabaseEndpoints
             null);
     }
 
+    /// <summary>
+    /// 刪除專案資料庫設定並將既有索引標成待更新。
+    /// 只刪除本機加密設定，不會對使用者的外部資料庫執行任何變更。
+    /// </summary>
+    /// <returns>專案存在時回傳 204，否則回傳 404。</returns>
     private static async Task<IResult> Delete(
         string projectId,
         IProjectRepository projects,
         IProjectDatabaseConfigurationStore configurations,
+        GraphIndexingService indexing,
         CancellationToken ct)
     {
         if (await projects.GetAsync(projectId, ct) is null)
             return Results.NotFound();
         await configurations.DeleteAsync(projectId, ct);
+        await indexing.MarkPendingChangesAsync(projectId, cancellationToken: ct);
         return Results.NoContent();
     }
 

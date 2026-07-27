@@ -248,6 +248,65 @@ public sealed class ProjectDatabaseConfigurationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SaveAndDeleteEndpoints_MarkProjectAsNeedingReindex()
+    {
+        var hostDatabasePath = Path.Combine(_root, "endpoint-status-host.db");
+        var candidateDatabasePath = Path.Combine(_root, "candidate-status.db");
+        await CreateSampleDatabaseAsync(candidateDatabasePath);
+        await using var factory = new DatabaseEndpointFactory(hostDatabasePath);
+        using var client = factory.CreateClient();
+        var projectId = await CreateEndpointProjectAsync(client);
+
+        using var saveResponse = await client.PutAsJsonAsync(
+            $"/api/projects/{projectId}/database",
+            new
+            {
+                provider = "Sqlite",
+                sqlitePath = candidateDatabasePath,
+            });
+        saveResponse.EnsureSuccessStatusCode();
+        await AssertProjectNeedsReindexAsync(client, projectId);
+
+        using var deleteResponse = await client.DeleteAsync(
+            $"/api/projects/{projectId}/database");
+        Assert.Equal(HttpStatusCode.NoContent, deleteResponse.StatusCode);
+        await AssertProjectNeedsReindexAsync(client, projectId);
+    }
+
+    [Fact]
+    public void ConfigurationFingerprint_ExcludesPasswordButTracksConfigurationVersion()
+    {
+        var updatedAt = new DateTimeOffset(
+            2026, 7, 27, 12, 0, 0, TimeSpan.Zero);
+        var first = SqlPasswordConfiguration(password: "first-secret") with
+        {
+            UpdatedAt = updatedAt,
+        };
+        var sameVersionWithAnotherPassword = first with
+        {
+            Password = "second-secret",
+        };
+        var nextVersion = first with
+        {
+            UpdatedAt = updatedAt.AddTicks(1),
+        };
+
+        var firstFingerprint =
+            ProjectGraphDatabaseSourceProvider.ComputeConfigurationFingerprint(first);
+        var sameVersionFingerprint =
+            ProjectGraphDatabaseSourceProvider.ComputeConfigurationFingerprint(
+                sameVersionWithAnotherPassword);
+        var nextVersionFingerprint =
+            ProjectGraphDatabaseSourceProvider.ComputeConfigurationFingerprint(nextVersion);
+
+        Assert.Equal(firstFingerprint, sameVersionFingerprint);
+        Assert.NotEqual(firstFingerprint, nextVersionFingerprint);
+        Assert.DoesNotContain("first-secret", firstFingerprint, StringComparison.Ordinal);
+        Assert.DoesNotContain("second-secret", firstFingerprint, StringComparison.Ordinal);
+        Assert.Matches("^[0-9a-f]{64}$", firstFingerprint);
+    }
+
+    [Fact]
     public async Task DatabaseListEndpoint_RejectsIncompleteCandidateWithoutSavingConfiguration()
     {
         var hostDatabasePath = Path.Combine(_root, "endpoint-catalog-host.db");
@@ -356,6 +415,34 @@ public sealed class ProjectDatabaseConfigurationTests : IAsyncLifetime
         using var document = JsonDocument.Parse(
             await response.Content.ReadAsStreamAsync());
         return document.RootElement.GetProperty("id").GetString()!;
+    }
+
+    /// <summary>
+    /// 從正式專案列表確認資料庫設定異動只留下待重索引狀態，
+    /// 不會在設定 request 中同步執行 Graph 建置。
+    /// </summary>
+    /// <param name="client">測試 host 的 HTTP client。</param>
+    /// <param name="projectId">剛完成資料庫設定異動的專案 ID。</param>
+    private static async Task AssertProjectNeedsReindexAsync(
+        HttpClient client,
+        string projectId)
+    {
+        using var response = await client.GetAsync("/api/projects");
+        response.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(
+            await response.Content.ReadAsStreamAsync());
+        var project = document.RootElement.EnumerateArray().Single(item =>
+            item.GetProperty("id").GetString() == projectId);
+        Assert.Equal(
+            AgentService.Domain.Models.ProjectIndexStatus.PendingChanges.ToString(),
+            project.GetProperty("indexStatus").GetString());
+
+        using var diagnosticsResponse = await client.GetAsync(
+            $"/api/projects/{projectId}/index/manifest");
+        diagnosticsResponse.EnsureSuccessStatusCode();
+        using var diagnostics = JsonDocument.Parse(
+            await diagnosticsResponse.Content.ReadAsStreamAsync());
+        Assert.True(diagnostics.RootElement.GetProperty("isStale").GetBoolean());
     }
 
     private sealed class Factory(DbContextOptions<AppDbContext> options)

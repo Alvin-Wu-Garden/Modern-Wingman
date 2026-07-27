@@ -118,6 +118,18 @@ public sealed class GraphIndexingService
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, GraphIndexRun> _runs =
         new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// 產生目前索引管線的完整版本識別。除了程式組版本，也包含每個 extractor 的
+    /// ID 與版本；因此解析規則升版時，即使原始檔案完全相同也會安全失效 no-op，
+    /// 避免沿用缺少新節點或關係的舊圖譜。
+    /// </summary>
+    private string CurrentIndexerVersion =>
+        $"{IndexerVersion}|{string.Join(
+            ";",
+            _extractors
+                .OrderBy(extractor => extractor.Id, StringComparer.Ordinal)
+                .Select(extractor => $"{extractor.Id}={extractor.Version}"))}";
     private readonly ConcurrentDictionary<string, GraphSnapshot> _activeSnapshots =
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _pendingFiles =
@@ -204,6 +216,7 @@ public sealed class GraphIndexingService
         CancellationToken cancellationToken = default)
     {
         await ReconcileManifestAsync(projectId, cancellationToken);
+        var project = await _projects.GetAsync(projectId, cancellationToken);
         var current = await _manifests.GetCurrentAsync(projectId, cancellationToken);
         var latest = await _manifests.GetLatestAttemptAsync(projectId, cancellationToken);
         var pending = PendingFiles(projectId);
@@ -212,6 +225,7 @@ public sealed class GraphIndexingService
             latest,
             pending,
             pending.Count > 0 ||
+            project?.IndexStatus == ProjectIndexStatus.PendingChanges ||
             latest is { Status: IndexManifestStatus.Failed or IndexManifestStatus.Stale });
     }
 
@@ -264,16 +278,30 @@ public sealed class GraphIndexingService
     }
 
     /// <summary>
-    /// Watcher 入口。無內容變更時回傳 null；目前不確定的變更一律退回 full，
-    /// 不以不完整 delta 冒險遺失反向呼叫或資料依賴。
+    /// Watcher 與設定異動共用的增量入口。只有專案未被標記為 PendingChanges，
+    /// 且原始碼內容也完全相同時才回傳 null；資料庫設定異動即使沒有檔案 hash
+    /// 變更，仍必須進入完整 fingerprint 決策，避免誤把 source-only graph 當成最新版本。
     /// </summary>
+    /// <param name="projectId">需要檢查並視情況重建的專案 ID。</param>
+    /// <param name="cancellationToken">取消檔案掃描、資料庫 fingerprint 或索引工作的權杖。</param>
+    /// <returns>執行索引時回傳最新專案；確定所有輸入皆未改變時回傳 null。</returns>
     public async Task<ProjectEntity?> IncrementalIndexAsync(
         string projectId,
         CancellationToken cancellationToken = default)
     {
         var project = await RequiredProjectAsync(projectId, cancellationToken);
         var current = await _manifests.GetCurrentAsync(projectId, cancellationToken);
-        if (current is not null && !await CatchUpAsync(projectId, cancellationToken))
+        // PendingChanges 與 Stale 都是持久化失效訊號，可能來自資料庫設定或先前
+        // 連線失敗，而非檔案 watcher。CatchUpAsync 只比對 source hash，不能據此清除。
+        var requiresFingerprintRefresh =
+            project.IndexStatus is
+                ProjectIndexStatus.PendingChanges or
+                ProjectIndexStatus.Stale;
+        var sourceChanged = current is not null &&
+                            await CatchUpAsync(projectId, cancellationToken);
+        if (current is not null &&
+            !requiresFingerprintRefresh &&
+            !sourceChanged)
         {
             _pendingFiles.TryRemove(projectId, out _);
             project.PendingFileCount = 0;
@@ -319,10 +347,24 @@ public sealed class GraphIndexingService
                 project.RootPath, files, current?.Files, cancellationToken);
             var databaseSource = await _databaseSources.GetAsync(
                 project, cancellationToken);
-            var databaseFingerprint = databaseSource is null
-                ? "none"
-                : await _databaseExtractor.ComputeFingerprintAsync(
+            string? databaseFingerprint;
+            if (databaseSource is null)
+            {
+                databaseFingerprint = "none";
+            }
+            else
+            {
+                // 明確的唯讀連線前置檢查可把帳密、網路或資料庫不存在等問題
+                // 在抽取前回報，避免使用者誤以為 source-only graph 已完整成功。
+                await _databaseExtractor.TestConnectionAsync(
                     databaseSource, cancellationToken);
+                var metadataFingerprint =
+                    await _databaseExtractor.ComputeFingerprintAsync(
+                        databaseSource, cancellationToken);
+                databaseFingerprint = CombineDatabaseFingerprint(
+                    databaseSource.ConfigurationFingerprint,
+                    metadataFingerprint);
+            }
             var workingFingerprint = WorkingFingerprint(
                 fileManifests, databaseFingerprint);
             stages["scan"] = stage.ElapsedMilliseconds;
@@ -339,7 +381,7 @@ public sealed class GraphIndexingService
                 project.IndexStatus = current!.Status == IndexManifestStatus.Partial
                     ? ProjectIndexStatus.Partial
                     : ProjectIndexStatus.Indexed;
-                project.IndexError = null;
+                project.IndexError = current.Error;
                 await _projects.SaveAsync(project, cancellationToken);
                 stopwatch.Stop();
                 Progress(projectId, runId, mode, "complete", "內容完全相同，已安全略過重建。", 100, stopwatch);
@@ -378,7 +420,7 @@ public sealed class GraphIndexingService
                 [],
                 fileManifests,
                 PendingFiles(projectId),
-                IndexerVersion,
+                CurrentIndexerVersion,
                 startedAt,
                 null,
                 IndexManifestStatus.Indexing,
@@ -443,6 +485,7 @@ public sealed class GraphIndexingService
                 stages["extract:sqlserver-live-database-v3"] =
                     databaseClock.ElapsedMilliseconds;
             }
+            AddConfiguredDatabaseHealthDiagnostic(fragments, databaseSource);
             stages["extract"] = stage.ElapsedMilliseconds;
 
             stage.Restart();
@@ -466,7 +509,7 @@ public sealed class GraphIndexingService
                     databaseFingerprint is null ? "failed" : "indexed",
                     databaseFingerprint is null ? "資料庫 fingerprint 暫時不可用" : null));
             var descriptor = new GraphIndexerDescriptor(
-                IndexerVersion,
+                CurrentIndexerVersion,
                 _extractors.ToDictionary(
                     extractor => extractor.Id,
                     extractor => extractor.Version,
@@ -485,6 +528,12 @@ public sealed class GraphIndexingService
             var partial = snapshot.CapabilityGaps.Count > 0 ||
                           snapshot.Diagnostics.Any(item =>
                               item.Severity == GraphDiagnosticSeverity.Warning);
+            var databaseHealthWarning = snapshot.Diagnostics
+                .FirstOrDefault(item => string.Equals(
+                    item.Code,
+                    "DATABASE_FEATURES_MISSING",
+                    StringComparison.Ordinal))
+                ?.Message;
             var ready = attempt with
             {
                 CompletedAt = DateTimeOffset.UtcNow,
@@ -495,6 +544,7 @@ public sealed class GraphIndexingService
                 AnalysisSnapshotHash = snapshot.CanonicalDigest,
                 IndexMode = mode,
                 RequiresRetry = partial,
+                Error = databaseHealthWarning,
             };
             await _manifests.SaveAttemptAsync(ready, cancellationToken);
 
@@ -554,7 +604,7 @@ public sealed class GraphIndexingService
             project.NodeCount = snapshot.Nodes.Count;
             project.EdgeCount = snapshot.Edges.Count;
             project.PendingFileCount = 0;
-            project.IndexError = null;
+            project.IndexError = databaseHealthWarning;
             project.IndexStatus = partial
                 ? ProjectIndexStatus.Partial
                 : ProjectIndexStatus.Indexed;
@@ -678,7 +728,7 @@ public sealed class GraphIndexingService
             project.IndexedAt = neo4jVersion.CompletedAt;
             project.NodeCount = neo4jVersion.NodeCount;
             project.EdgeCount = neo4jVersion.EdgeCount;
-            project.IndexError = null;
+            project.IndexError = neo4jVersion.Error;
             project.IndexStatus = neo4jVersion.Status == IndexManifestStatus.Partial
                 ? ProjectIndexStatus.Partial
                 : ProjectIndexStatus.Indexed;
@@ -697,7 +747,10 @@ public sealed class GraphIndexingService
         current is { Status: IndexManifestStatus.Fresh or IndexManifestStatus.Partial } &&
         string.Equals(current.Version, neo4jManifest, StringComparison.Ordinal) &&
         string.Equals(current.WorkingTreeFingerprint, workingFingerprint, StringComparison.Ordinal) &&
-        string.Equals(current.IndexerVersion, IndexerVersion, StringComparison.Ordinal) &&
+        string.Equals(
+            current.IndexerVersion,
+            CurrentIndexerVersion,
+            StringComparison.Ordinal) &&
         string.Equals(current.GraphSchemaVersion, GraphAssembler.SchemaVersion, StringComparison.Ordinal) &&
         (databaseSource is null || databaseFingerprint is not null);
 
@@ -719,7 +772,10 @@ public sealed class GraphIndexingService
             activeSnapshot is null ||
             !string.Equals(current.Version, neo4jManifest, StringComparison.Ordinal) ||
             !string.Equals(activeSnapshot.ManifestVersion, current.Version, StringComparison.Ordinal) ||
-            !string.Equals(current.IndexerVersion, IndexerVersion, StringComparison.Ordinal) ||
+            !string.Equals(
+                current.IndexerVersion,
+                CurrentIndexerVersion,
+                StringComparison.Ordinal) ||
             !string.Equals(current.GraphSchemaVersion, GraphAssembler.SchemaVersion, StringComparison.Ordinal) ||
             !DescriptorMatchesCurrentExtractors(activeSnapshot.Indexer) ||
             !DatabaseFingerprintMatches(
@@ -758,7 +814,10 @@ public sealed class GraphIndexingService
     }
 
     private bool DescriptorMatchesCurrentExtractors(GraphIndexerDescriptor descriptor) =>
-        string.Equals(descriptor.IndexerVersion, IndexerVersion, StringComparison.Ordinal) &&
+        string.Equals(
+            descriptor.IndexerVersion,
+            CurrentIndexerVersion,
+            StringComparison.Ordinal) &&
         descriptor.Extractors.Count == _extractors.Count &&
         _extractors.All(extractor =>
             descriptor.Extractors.TryGetValue(extractor.Id, out var version) &&
@@ -999,6 +1058,54 @@ public sealed class GraphIndexingService
         return GraphIdentity.Sha256(builder.ToString());
     }
 
+    /// <summary>
+    /// 將非機密設定指紋與資料庫 metadata 指紋合併成索引指紋。
+    /// 任一部分缺失即回傳 null 並禁止 no-op；原始設定材料與連線字串不會進入
+    /// Manifest、Graph artifact 或 log。
+    /// </summary>
+    /// <param name="configurationFingerprint">資料庫來源提供的非機密設定版本雜湊。</param>
+    /// <param name="metadataFingerprint">唯讀查詢資料庫系統目錄得到的 schema 雜湊。</param>
+    /// <returns>可安全持久化的組合 SHA-256；資料不足時為 null。</returns>
+    private static string? CombineDatabaseFingerprint(
+        string configurationFingerprint,
+        string? metadataFingerprint) =>
+        string.IsNullOrWhiteSpace(configurationFingerprint) ||
+        string.IsNullOrWhiteSpace(metadataFingerprint)
+            ? null
+            : GraphIdentity.Sha256(
+                $"configuration\0{configurationFingerprint}\nmetadata\0{metadataFingerprint}");
+
+    /// <summary>
+    /// 資料庫已設定且抽取成功，卻沒有任何 Feature 時加入可行動的降級診斷。
+    /// 此結果是 deterministic 索引健康事實，不推測缺少哪一張 Menu table；
+    /// 使用者可依訊息檢查資料庫權限、Menu metadata 或 extractor 支援範圍。
+    /// </summary>
+    /// <param name="fragments">本次尚未 canonical merge 的所有抽取片段。</param>
+    /// <param name="databaseSource">已通過連線前置檢查的資料庫來源；未設定時為 null。</param>
+    private static void AddConfiguredDatabaseHealthDiagnostic(
+        ICollection<GraphFragment> fragments,
+        GraphDatabaseSource? databaseSource)
+    {
+        if (databaseSource is null ||
+            fragments.SelectMany(fragment => fragment.Nodes)
+                .Any(node => node.Kind == GraphNodeKind.Feature))
+        {
+            return;
+        }
+
+        var artifact =
+            $"db:{GraphIdentity.NormalizeRequiredToken(databaseSource.DatabaseName, "databaseName")}";
+        var health = new GraphFragment();
+        health.Diagnostics.Add(new GraphDiagnostic(
+            "DATABASE_FEATURES_MISSING",
+            GraphDiagnosticSeverity.Warning,
+            artifact,
+            "資料庫已成功連線並完成結構抽取，但沒有產生任何 Business Feature；" +
+            "請確認索引帳號可讀取 Menu／功能 metadata，或目前資料庫命名是否受 extractor 支援。",
+            Retryable: true));
+        fragments.Add(health);
+    }
+
     private static string DetectLanguages(IReadOnlyList<IndexedFileManifest> files) =>
         string.Join(',', files.Select(item => item.Language)
             .Where(value => value is "csharp" or "java" or "frontend" or "sql")
@@ -1043,6 +1150,8 @@ public sealed class GraphIndexingService
     {
         DirectoryNotFoundException => "專案根目錄不存在，上一個成功圖譜保持不變。",
         UnauthorizedAccessException => "部分專案檔案無法讀取，索引已中止且上一個成功圖譜保持不變。",
+        Microsoft.Data.SqlClient.SqlException or Microsoft.Data.Sqlite.SqliteException =>
+            "專案資料庫唯讀連線失敗；請檢查伺服器、資料庫名稱、帳密、網路與 SELECT 權限。上一個成功圖譜保持不變。",
         InvalidOperationException => "GraphRAG 品質閘門或發布驗證失敗，上一個成功圖譜保持不變。",
         _ => "GraphRAG 索引失敗，上一個成功圖譜保持不變。",
     };

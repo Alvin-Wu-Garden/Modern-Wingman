@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using AgentService.Application.Contracts;
 using AgentService.Application.Models;
@@ -77,10 +78,37 @@ public sealed record GraphAiEnrichmentStatus(
 /// </summary>
 public sealed partial class GraphRetrievalService
 {
+    /// <summary>
+    /// 專案問答的固定證據規則；最後一輪問題優先於歷史，且不得引用 context 外路徑。
+    /// 保持單一文字來源，避免 Local、Global fallback 與 Community prompt 漂移。
+    /// </summary>
+    private const string ProjectAnswerRules = """
+        本輪只能回答最後一個「# 本輪唯一要回答的問題」；對話歷史只供語意參考，
+        不得把上一輪問題或上一輪回答誤認成本輪任務。
+        只能引用 GraphRAG context 或本次附件明確出現的檔案與路徑；
+        不得引用 Modern Wingman AgentService 工作目錄或待分析專案外的路徑。
+        證據不足時列出缺口並建議檢查索引／資料庫設定，不得猜測 auth.*、login.* 等檔名。
+        """;
+
+    /// <summary>
+    /// 每次送往 Graph Store 的 frontier 節點上限。
+    /// 此值只控制資料庫 round trip，不放寬整體 node、edge 或 depth budget。
+    /// </summary>
+    private const int MaximumFrontierBatchSize = 32;
+
+    /// <summary>
+    /// Community AI enrichment 的固定並行上限。
+    /// 小型本機服務以兩個請求平衡完成時間與供應商 rate limit，不提供可無限調高的設定。
+    /// </summary>
+    private const int CommunityEnrichmentConcurrency = 2;
+    private static readonly TimeSpan CommunityEnrichmentTimeout = TimeSpan.FromSeconds(45);
+
     private readonly IGraphStore _store;
     private readonly GraphRetrievalOptions _options;
     private readonly ILogger<GraphRetrievalService> _logger;
     private readonly ILlmCompletionService? _llm;
+    private readonly RepositoryQuestionPlanner _questionPlanner = new();
+    private readonly GraphContextCompiler _contextCompiler = new();
     private readonly ConcurrentDictionary<string, GraphAiEnrichmentStatus> _enrichment =
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _enrichmentGates =
@@ -119,24 +147,34 @@ public sealed partial class GraphRetrievalService
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        var llm = RequiredLlm();
         var gate = _enrichmentGates.GetOrAdd(
             projectId, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken);
         try
         {
+            // LLM 未註冊也屬背景 enrichment 的可降級錯誤，必須在狀態保護區內解析，
+            // 確保前端取得 Degraded terminal，而不是永久輪詢 NotRequested。
+            var llm = RequiredLlm();
             var manifest = await _store.GetActiveManifestAsync(
                 projectId, cancellationToken) ??
                 throw new InvalidOperationException(
                     "專案尚無 active V3 graph，無法建立社群摘要。");
             var reports = await _store.ListCommunityReportsAsync(
                 projectId, cancellationToken);
+            var primaryReports = reports
+                .Where(report => report.Kind == "primary")
+                .OrderBy(report => report.CommunityId, StringComparer.Ordinal)
+                .ToList();
             _enrichment[projectId] = new GraphAiEnrichmentStatus(
-                projectId, manifest, "Summarizing", 0, reports.Count,
+                projectId, manifest, "Summarizing", 0, primaryReports.Count,
                 DateTimeOffset.UtcNow, null, "正在建立業務社群摘要。");
-            var enriched = new List<GraphCommunityReport>(reports.Count);
+            var enriched = reports.ToDictionary(
+                report => report.CommunityId,
+                report => report,
+                StringComparer.Ordinal);
             var failures = 0;
-            for (var index = 0; index < reports.Count; index++)
+            var completed = 0;
+            foreach (var batch in primaryReports.Chunk(CommunityEnrichmentConcurrency))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var active = await _store.GetActiveManifestAsync(
@@ -149,66 +187,40 @@ public sealed partial class GraphRetrievalService
                         CompletedAt = DateTimeOffset.UtcNow,
                         Message = "索引版本已更新，舊版摘要工作已停止。",
                     };
-                    return enriched.Count;
+                    return completed;
                 }
-                var report = reports[index];
-                progress?.Report($"生成社群摘要 {index + 1}/{reports.Count}...");
-                if (report.AiEnriched &&
-                    !string.IsNullOrWhiteSpace(report.CacheKey))
+                progress?.Report(
+                    $"生成業務社群摘要 {completed + 1}-" +
+                    $"{Math.Min(completed + batch.Length, primaryReports.Count)}/" +
+                    $"{primaryReports.Count}...");
+                var results = await Task.WhenAll(batch.Select(report =>
+                    EnrichCommunityReportAsync(report, llm, cancellationToken)));
+                foreach (var result in results)
                 {
-                    // 相同 member evidence 與 prompt version 已有摘要時直接沿用；
-                    // canonical graph 不因 AI cache hit 產生任何變更。
-                    enriched.Add(report);
-                    _enrichment[projectId] = GetEnrichmentStatus(projectId) with
-                    {
-                        CompletedCommunities = index + 1,
-                        Message = $"已完成 {index + 1}/{reports.Count} 個社群摘要。",
-                    };
-                    continue;
+                    enriched[result.Report.CommunityId] = result.Report;
+                    if (result.Failed) failures++;
                 }
-                try
-                {
-                    var prompt = $"""
-                        你是熟悉大型投資交易與風控系統的資深架構師。
-                        請根據以下「已由圖譜證據產生」的業務社群摘要，改寫成 2 到 4 句繁體中文，
-                        說明功能入口、主要程式碼責任與資料依賴。不得新增未提供的類別、資料表或流程。
-
-                        社群：{report.Title}
-                        原摘要：{report.Summary}
-                        成員 ID（最多 80 筆）：
-                        {string.Join('\n', report.MemberIds.Take(80))}
-
-                        只輸出摘要，不要標題或前後綴。
-                        """;
-                    var summary = await llm.CompleteAsync(prompt, cancellationToken);
-                    enriched.Add(report with
-                    {
-                        Summary = summary.Trim(),
-                        AiEnriched = true,
-                    });
-                }
-                catch (Exception) when (!cancellationToken.IsCancellationRequested)
-                {
-                    failures++;
-                    enriched.Add(report);
-                }
+                completed += batch.Length;
                 _enrichment[projectId] = GetEnrichmentStatus(projectId) with
                 {
-                    CompletedCommunities = index + 1,
-                    Message = $"已完成 {index + 1}/{reports.Count} 個社群摘要。",
+                    CompletedCommunities = completed,
+                    Message = $"已完成 {completed}/{primaryReports.Count} 個業務社群摘要。",
                 };
             }
             await _store.SaveCommunityReportsAsync(
-                projectId, manifest, enriched, cancellationToken);
+                projectId,
+                manifest,
+                reports.Select(report => enriched[report.CommunityId]).ToList(),
+                cancellationToken);
             _enrichment[projectId] = GetEnrichmentStatus(projectId) with
             {
                 State = failures == 0 ? "Ready" : "Degraded",
                 CompletedAt = DateTimeOffset.UtcNow,
                 Message = failures == 0
-                    ? $"社群摘要完成（{enriched.Count} 個）。"
-                    : $"完成 {enriched.Count} 個，其中 {failures} 個保留 deterministic 摘要。",
+                    ? $"業務社群摘要完成（{completed} 個）。"
+                    : $"完成 {completed} 個，其中 {failures} 個保留 deterministic 摘要。",
             };
-            return enriched.Count;
+            return completed;
         }
         catch (OperationCanceledException)
         {
@@ -220,123 +232,72 @@ public sealed partial class GraphRetrievalService
             };
             throw;
         }
+        catch (Exception exception)
+        {
+            // 背景摘要即使在讀寫圖資料時失敗，也必須進入終止狀態，
+            // 否則桌面端會把 Summarizing 視為仍在工作而永久輪詢。
+            _enrichment[projectId] = GetEnrichmentStatus(projectId) with
+            {
+                State = "Degraded",
+                CompletedAt = DateTimeOffset.UtcNow,
+                Message = "AI enrichment 發生錯誤；已保留 deterministic 摘要。",
+            };
+            _logger.LogWarning(
+                exception,
+                "Community AI enrichment degraded for project {ProjectId}.",
+                projectId);
+            throw;
+        }
         finally
         {
             gate.Release();
         }
     }
 
-    /// <summary>用 Local Search context 產生有檔案與 evidence 引用的繁體中文答案。</summary>
-    public async Task<string> AnswerLocalAsync(
-        string projectId,
-        string question,
-        CancellationToken cancellationToken = default,
-        string? providerProfileId = null,
-        string? modelId = null)
-    {
-        var context = await LocalSearchAsync(
-            projectId, question, cancellationToken);
-        if (context.Nodes.Count == 0)
-            return context.Diagnostics.FirstOrDefault() ??
-                   "找不到與問題相關的可靠圖譜實體。";
-        var prompt = $"""
-            你是熟悉此企業程式碼庫的資深工程師。請只根據下列 GraphRAG V3 context，
-            用繁體中文回答使用者問題，指出可能要修改的 Feature、EntryPoint、Code、Data，
-            並引用 filePath、line 與 evidence。無法由 context 證明的內容必須標示未知，不得編造。
-
-            # Graph context
-            {FormatContext(context)}
-
-            # 使用者問題
-            {question}
-            """;
-        return await CompleteAsync(
-            prompt,
-            providerProfileId,
-            modelId,
-            cancellationToken);
-    }
-
     /// <summary>
-    /// 以 primary/secondary reports 做 bounded map-reduce 回答跨功能總覽；
-    /// 無摘要時安全退回 Local Search。Map 階段分批萃取與問題相關的已知事實，
-    /// Reduce 階段才整合跨社群結論，避免把 20 份原始報告一次塞入 prompt。
+    /// 將單一 Primary Business Community 的 deterministic summary 交給 LLM 改寫。
+    /// 已有相同 cache key 的 AI 摘要直接沿用；模型失敗時回傳原 report 並標示失敗，
+    /// 呼叫端仍會保存 deterministic summary，且不改動 canonical node 或 edge。
     /// </summary>
-    public async Task<string> AnswerGlobalAsync(
-        string projectId,
-        string question,
-        CancellationToken cancellationToken = default,
-        string? providerProfileId = null,
-        string? modelId = null)
+    /// <param name="report">待加值的 Primary Community report。</param>
+    /// <param name="llm">目前已解析完成的唯讀文字 completion 服務。</param>
+    /// <param name="cancellationToken">取消本次背景摘要工作的 token。</param>
+    /// <returns>加值後 report，以及是否因模型錯誤而降級。</returns>
+    private static async Task<(GraphCommunityReport Report, bool Failed)>
+        EnrichCommunityReportAsync(
+            GraphCommunityReport report,
+            ILlmCompletionService llm,
+            CancellationToken cancellationToken)
     {
-        var reports = await GlobalSearchAsync(
-            projectId, question, 20, cancellationToken);
-        if (reports.Count == 0)
-            return await AnswerLocalAsync(
-                projectId, question, cancellationToken,
-                providerProfileId, modelId);
-        var batches = reports
-            .Select((report, index) => new { report, index })
-            .GroupBy(item => item.index / 4)
-            .Select(group => group.Select(item => item.report).ToList())
-            .ToList();
-        var mapped = await Task.WhenAll(batches.Select(async (batch, index) =>
+        if (report.AiEnriched && !string.IsNullOrWhiteSpace(report.CacheKey))
+            return (report, false);
+        try
         {
-            var mapPrompt = $"""
-                你是 GraphRAG Global Search 的 map worker。請只根據下列社群報告，
-                萃取與使用者問題直接相關的跨功能事實，使用繁體中文條列；每點標示 communityId。
-                若本批沒有相關證據，輸出「本批無直接證據」。不得補造類別、資料表或流程，
-                也不得把 community 摘要當成精確程式碼行號。
+            var prompt = $"""
+                你是熟悉大型投資交易與風控系統的資深架構師。
+                請根據以下「已由圖譜證據產生」的業務社群摘要，改寫成 2 到 4 句繁體中文，
+                說明功能入口、主要程式碼責任與資料依賴。不得新增未提供的類別、資料表或流程。
 
-                # 使用者問題
-                {question}
+                社群：{report.Title}
+                原摘要：{report.Summary}
+                成員 ID（最多 80 筆）：
+                {string.Join('\n', report.MemberIds.Take(80))}
 
-                # 社群報告批次 {index + 1}
-                {string.Join("\n\n", batch.Select(report =>
-                    $"communityId={report.CommunityId}\n" +
-                    $"title={report.Title}\nkind={report.Kind}\nsummary={report.Summary}"))}
+                只輸出摘要，不要標題或前後綴。
                 """;
-            return await CompleteAsync(
-                mapPrompt,
-                providerProfileId,
-                modelId,
-                cancellationToken);
-        }));
-        var prompt = $"""
-            你是 GraphRAG Global Search 的 reduce worker。請只整合下列 map 結果，
-            用繁體中文回答跨模組問題，保留 communityId 引用並區分已知事實與未知資訊。
-            不得新增 map 結果沒有提供的類別、資料表或流程；若需要精確檔案與行號，
-            請明說應再執行 Local Search。
-
-            # 使用者問題
-            {question}
-
-            # Map 結果
-            {string.Join("\n\n", mapped.Select((value, index) =>
-                $"## Map {index + 1}\n{value}"))}
-            """;
-        return await CompleteAsync(
-            prompt,
-            providerProfileId,
-            modelId,
-            cancellationToken);
-    }
-
-    /// <summary>依具體識別字與需求語氣自動選擇 Local 或 Global answer。</summary>
-    public Task<string> AnswerAsync(
-        string projectId,
-        string question,
-        CancellationToken cancellationToken = default,
-        string? providerProfileId = null,
-        string? modelId = null)
-    {
-        return LooksLikeLocalQuestion(question)
-            ? AnswerLocalAsync(
-                projectId, question, cancellationToken,
-                providerProfileId, modelId)
-            : AnswerGlobalAsync(
-                projectId, question, cancellationToken,
-                providerProfileId, modelId);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(CommunityEnrichmentTimeout);
+            var summary = await llm.CompleteAsync(prompt, timeout.Token);
+            return (report with
+            {
+                Summary = summary.Trim(),
+                AiEnriched = true,
+            }, false);
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            return (report, true);
+        }
     }
 
     /// <summary>
@@ -344,25 +305,45 @@ public sealed partial class GraphRetrievalService
     /// 本方法只做檢索與組裝，不直接呼叫模型，因此一般聊天與專案聊天能共用同一條串流、
     /// Provider、Model 與附件處理路徑。
     /// </summary>
+    /// <param name="projectId">Modern Wingman 專案識別碼。</param>
+    /// <param name="projectRoot">專案絕對根目錄；Source Evidence 不得越過此邊界。</param>
+    /// <param name="question">不可為空白的使用者問題。</param>
+    /// <param name="cancellationToken">取消 Graph、Source I/O 與 context 組裝。</param>
+    /// <returns>可交給共用 Agent 的唯讀提示；讀檔失敗時保留 Graph 與缺口診斷。</returns>
     public async Task<string> BuildAnswerPromptAsync(
         string projectId,
+        string projectRoot,
         string question,
         CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectRoot);
         ArgumentException.ThrowIfNullOrWhiteSpace(question);
-        if (LooksLikeLocalQuestion(question))
+        var stopwatch = Stopwatch.StartNew();
+        var plan = _questionPlanner.Plan(question);
+        var manifest = await _store.GetActiveManifestAsync(projectId, cancellationToken)
+            ?? "unpublished";
+        if (plan.Intent != RepositoryQuestionIntent.SystemOverview)
         {
-            var context = await LocalSearchAsync(projectId, question, cancellationToken);
+            var context = await RetrieveWithSingleFallbackAsync(
+                projectId, question, plan, cancellationToken);
+            var source = await ReadSourceEvidenceAsync(
+                projectRoot, manifest, plan, context, cancellationToken);
+            var compiled = _contextCompiler.Compile(plan, context, source);
+            _logger.LogInformation(
+                "專案回答 Context 完成：Intent={Intent}, Terms={TermCount}, Nodes={NodeCount}, Edges={EdgeCount}, Snippets={SnippetCount}, Characters={CharacterCount}, ElapsedMs={ElapsedMs}",
+                plan.Intent, plan.SearchTerms.Count, context.Nodes.Count, context.Edges.Count,
+                source.Snippets.Count, compiled.Length, stopwatch.ElapsedMilliseconds);
             return $"""
                 你正在回答 Modern Wingman 的專案解析問題。
                 只能依據下列 GraphRAG context 與使用者本次附件回答，不得編造不存在的程式碼或資料流。
                 請使用繁體中文，引用 filePath、line、evidence；推論與未知資訊必須明確標示。
                 若問題是 bug 或新需求，只回答應修改的檔案／symbol、原因及做法，不要執行修改。
+                {ProjectAnswerRules}
 
                 # GraphRAG context
-                {FormatContext(context)}
+                {compiled}
 
-                # 使用者問題
+                # 本輪唯一要回答的問題
                 {question}
                 """;
         }
@@ -370,16 +351,20 @@ public sealed partial class GraphRetrievalService
         var reports = await GlobalSearchAsync(projectId, question, 20, cancellationToken);
         if (reports.Count == 0)
         {
-            var context = await LocalSearchAsync(projectId, question, cancellationToken);
+            var context = await RetrieveWithSingleFallbackAsync(
+                projectId, question, plan, cancellationToken);
+            var source = await ReadSourceEvidenceAsync(
+                projectRoot, manifest, plan, context, cancellationToken);
             return $"""
                 你正在回答 Modern Wingman 的專案解析問題。
                 只能依據下列 GraphRAG context 與使用者本次附件回答，不得編造。
                 請使用繁體中文，引用 filePath、line、evidence，並標示未知資訊。
+                {ProjectAnswerRules}
 
                 # GraphRAG context
-                {FormatContext(context)}
+                {_contextCompiler.Compile(plan, context, source)}
 
-                # 使用者問題
+                # 本輪唯一要回答的問題
                 {question}
                 """;
         }
@@ -389,38 +374,303 @@ public sealed partial class GraphRetrievalService
             只能依據下列 GraphRAG 社群摘要與使用者本次附件回答，不得新增摘要未提供的流程、
             類別或資料表。請用繁體中文說明資料流，保留 communityId 引用；
             需要精確檔案與行號但摘要沒有提供時，必須明確標示未知。
+            {ProjectAnswerRules}
 
             # GraphRAG 社群摘要
             {string.Join("\n\n", reports.Select(report =>
                 $"communityId={report.CommunityId}\n" +
                 $"title={report.Title}\nkind={report.Kind}\nsummary={report.Summary}"))}
 
-            # 使用者問題
+            # 本輪唯一要回答的問題
             {question}
             """;
     }
 
-    internal static bool LooksLikeLocalQuestion(string question)
+    /// <summary>
+    /// 執行第一輪 Graph 檢索並檢查 Intent 所需 coverage；不足時只允許以已發現的
+    /// method、資料物件與節點名稱補查一次。兩輪結果仍受原本 node／edge budget，
+    /// 不會形成不受控的 Agent 搜尋循環。
+    /// </summary>
+    /// <param name="projectId">Modern Wingman 專案識別碼。</param>
+    /// <param name="question">使用者原始問題。</param>
+    /// <param name="plan">已由固定規則建立的問題計畫。</param>
+    /// <param name="cancellationToken">取消兩輪檢索的 token。</param>
+    /// <returns>第一輪結果，或與唯一補查結果合併後的有界 context。</returns>
+    private async Task<GraphRetrievalContext> RetrieveWithSingleFallbackAsync(
+        string projectId,
+        string question,
+        RepositoryQuestionPlan plan,
+        CancellationToken cancellationToken)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(question);
-        string[] changeOrDefectSignals =
-        [
-            "bug", "error", "exception", "錯誤", "異常", "失敗", "無法",
-            "沒有", "未能", "修正", "修改", "調整", "新增", "實作", "需求",
-        ];
-        if (changeOrDefectSignals.Any(signal =>
-                question.Contains(signal, StringComparison.OrdinalIgnoreCase)))
-            return true;
+        // 第一輪就帶入 planner 的受控別名；若只送原始中文問題，「登入」可能只
+        // 命中 AccountController，卻漏掉名稱完全不同的 LoginAndPasswordProcess。
+        // 搜尋詞已在 planner 去重並限制十二個，因此不會形成無界 query expansion。
+        var plannedQuery = string.Join(
+            ' ',
+            new[] { question }.Concat(plan.SearchTerms)
+                .Distinct(StringComparer.OrdinalIgnoreCase));
+        var first = await LocalSearchAsync(
+            projectId,
+            plannedQuery,
+            cancellationToken);
+        var coverage = Coverage(first);
+        var discovered = first.Nodes.Select(item => item.Node.Name)
+            .Concat(first.Nodes.SelectMany(item => item.Node.Evidence)
+                .SelectMany(evidence => evidence.Details?.Values ?? []))
+            .Concat(first.Edges.SelectMany(edge => edge.Evidence)
+                .SelectMany(evidence => evidence.Details?.Values ?? []));
+        var fallback = _questionPlanner.PlanFallback(plan, coverage, discovered);
+        if (!fallback.ShouldRun) return first;
 
-        return question.Split(' ', '，', '。', '？', '?', '：', ':')
-            .Any(token =>
-                token.Contains('.') ||
-                token.Contains('/') ||
-                token.Contains('\\') ||
-                token.StartsWith("tbl", StringComparison.OrdinalIgnoreCase) ||
-                token.EndsWith("Controller", StringComparison.OrdinalIgnoreCase) ||
-                token.EndsWith("Service", StringComparison.OrdinalIgnoreCase) ||
-                token.EndsWith("Repository", StringComparison.OrdinalIgnoreCase));
+        var second = await LocalSearchAsync(
+            projectId,
+            string.Join(' ', fallback.SearchTerms),
+            cancellationToken);
+        return MergeContexts(first, second, fallback.MissingEvidence);
+    }
+
+    /// <summary>
+    /// 將 Graph node／edge evidence 轉成安全 Source Reader 候選。
+    /// Edge evidence 通常指向實際 invocation，因此比整個 type 的宣告 evidence 略優先；
+    /// 讀檔失敗只加入診斷，不阻止仍可使用結構化 Graph 回答。
+    /// </summary>
+    /// <param name="projectRoot">目前專案的絕對根目錄。</param>
+    /// <param name="manifest">Active manifest；參與 Source cache 失效鍵，不含機密設定。</param>
+    /// <param name="plan">固定規則產生的 Intent 與搜尋詞。</param>
+    /// <param name="context">已完成有界檢索的 Graph context。</param>
+    /// <param name="cancellationToken">取消 source I/O 的 token。</param>
+    /// <returns>安全片段與所有拒絕、截斷或降級診斷。</returns>
+    private static async Task<SourceEvidenceReadResult> ReadSourceEvidenceAsync(
+        string projectRoot,
+        string manifest,
+        RepositoryQuestionPlan plan,
+        GraphRetrievalContext context,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var scores = context.Nodes.ToDictionary(
+                item => item.Node.Id,
+                item => item.Score,
+                StringComparer.Ordinal);
+            var candidates = context.Nodes.SelectMany(item =>
+                item.Node.Evidence.Select(evidence => new SourceEvidenceCandidate(
+                    evidence,
+                    item.Score + SourceRoleBoost(item.Node.Role) +
+                            SourceQuestionBoost(item.Node, plan.SearchTerms) +
+                            SourceEvidenceQuestionBoost(
+                                evidence,
+                                plan.SearchTerms),
+                        item.Node.Kind,
+                        EvidenceSymbolForQuestion(
+                            item.Node,
+                            evidence,
+                            plan.SearchTerms))))
+                .Concat(context.Edges.SelectMany(edge =>
+                {
+                    var score = Math.Max(
+                        scores.GetValueOrDefault(edge.SourceId),
+                        scores.GetValueOrDefault(edge.TargetId)) +
+                                SourceEdgeBoost(edge.Kind);
+                    return edge.Evidence.Select(evidence => new SourceEvidenceCandidate(
+                        evidence,
+                        score,
+                        null,
+                        EvidenceSymbol(evidence)));
+                }));
+            var reader = new SourceEvidenceReader(projectRoot);
+            var result = await reader.ReadAsync(
+                candidates, plan.Intent, manifest, cancellationToken);
+            return result.Snippets.Count > 0 || context.Nodes.Count > 0
+                ? result
+                : await reader.SearchFallbackAsync(plan.SearchTerms, cancellationToken);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or
+                DirectoryNotFoundException or ArgumentException)
+        {
+            return new SourceEvidenceReadResult(
+                [],
+                ["無法安全讀取 Source Evidence；已保留結構化 Graph 結果。"],
+                false);
+        }
+    }
+
+    /// <summary>
+    /// 從 Compiler／Framework evidence 的安全 details 組合可讀 symbol。
+    /// details 已在索引階段限制為 method 名稱等非機密識別碼。
+    /// </summary>
+    private static string? EvidenceSymbol(GraphEvidence evidence)
+    {
+        if (evidence.Details is null) return null;
+        var values = new[] { "sourceMethod", "targetMethod", "method" }
+            .Where(evidence.Details.ContainsKey)
+            .Select(key => evidence.Details[key])
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        return values.Count == 0 ? null : string.Join(" → ", values);
+    }
+
+    /// <summary>
+    /// Source snippet 排序優先保留可解釋執行責任的 Controller、Service 與 Repository。
+    /// 乘數不改變 Graph 分數，也不會讓沒有 evidence 的節點產生虛構片段。
+    /// </summary>
+    /// <param name="role">Canonical Graph node role。</param>
+    /// <returns>介於 0 到 8 的 source-only quota 優先級。</returns>
+    private static double SourceRoleBoost(string role) => role switch
+    {
+        GraphRoles.Controller => 8,
+        GraphRoles.BusinessService => 7,
+        GraphRoles.Repository => 6,
+        GraphRoles.FrontendPage => 4,
+        _ => 0,
+    };
+
+    /// <summary>
+    /// 問題直接點名的 route、symbol 或資料物件必須早於同角色的一般候選；
+    /// 僅比對既有名稱與 alias，不推測新實體。
+    /// </summary>
+    private static double SourceQuestionBoost(
+        GraphNode node,
+        IReadOnlyList<string> terms) =>
+        terms.Any(term =>
+            node.Name.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+            node.Aliases.Any(alias =>
+                alias.Contains(term, StringComparison.OrdinalIgnoreCase)))
+            ? 20
+            : 0;
+
+    /// <summary>
+    /// Evidence details 內若直接含有使用者點名的方法（例如 ProcessLogin），應優先於
+    /// 只因 Controller 角色而入選的整個類別。只比對 extractor 已產生的 method 等
+    /// 非機密識別碼，不讀取或猜測新內容。
+    /// </summary>
+    /// <param name="evidence">Canonical extractor evidence。</param>
+    /// <param name="terms">Planner 已限制十二個以內的搜尋詞。</param>
+    /// <returns>直接命中時加 24 分，否則不加分。</returns>
+    private static double SourceEvidenceQuestionBoost(
+        GraphEvidence evidence,
+        IReadOnlyList<string> terms)
+    {
+        if (evidence.Details is null || terms.Count == 0) return 0;
+        return evidence.Details.Values.Any(value =>
+            terms.Any(term =>
+                value.Contains(term, StringComparison.OrdinalIgnoreCase)))
+            ? 24
+            : 0;
+    }
+
+    /// <summary>
+    /// 型別 evidence 同時列出多個方法時，挑出問題直接點名的方法名稱，讓 Source
+    /// Reader 能定位方法本體，而不是只從類別宣告行讀到建構子。沒有精確方法時仍
+    /// 使用既有型別名稱，不建立任何新 symbol。
+    /// </summary>
+    private static string EvidenceSymbolForQuestion(
+        GraphNode node,
+        GraphEvidence evidence,
+        IReadOnlyList<string> terms)
+    {
+        if (evidence.Details?.TryGetValue("methods", out var methods) != true ||
+            string.IsNullOrWhiteSpace(methods))
+            return node.Name;
+        var methodNames = methods.Split(
+                " | ",
+                StringSplitOptions.RemoveEmptyEntries |
+                StringSplitOptions.TrimEntries)
+            .Select(signature =>
+            {
+                var beforeParameters = signature.Split('(', 2)[0].Trim();
+                return beforeParameters.Split(
+                    ' ',
+                    StringSplitOptions.RemoveEmptyEntries)[^1];
+            })
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return methodNames.FirstOrDefault(method =>
+                   terms.Any(term => string.Equals(
+                       method,
+                       term,
+                       StringComparison.OrdinalIgnoreCase)))
+               ?? methodNames.FirstOrDefault(method =>
+                   terms.Any(term =>
+                       method.Contains(term, StringComparison.OrdinalIgnoreCase)))
+               ?? node.Name;
+    }
+
+    /// <summary>
+    /// HANDLES 與 CALLS evidence 最能補足「入口如何進入程式」；資料讀寫次之。
+    /// 此加分只決定讀哪些檔案，不改寫或補造任何 canonical edge。
+    /// </summary>
+    /// <param name="kind">Evidence 所屬的既有關係種類。</param>
+    /// <returns>介於 0.5 到 5 的 source-only 優先級；只用來建立片段 quota。</returns>
+    private static double SourceEdgeBoost(GraphEdgeKind kind) => kind switch
+    {
+        GraphEdgeKind.Handles => 5,
+        GraphEdgeKind.Calls or GraphEdgeKind.DispatchesTo => 3,
+        GraphEdgeKind.Reads or GraphEdgeKind.Writes => 2,
+        GraphEdgeKind.RoutesTo => 1,
+        _ => 0.5,
+    };
+
+    /// <summary>
+    /// 計算第一輪是否已涵蓋問題所需的五種最小證據。
+    /// 這裡只判斷 retrieval coverage，不宣稱候選內容已由人工確認。
+    /// </summary>
+    private static RepositoryRetrievalCoverage Coverage(GraphRetrievalContext context) =>
+        new(
+            context.Nodes.Any(item => item.Node.Kind == GraphNodeKind.Feature),
+            context.Nodes.Any(item => item.Node.Kind == GraphNodeKind.EntryPoint),
+            context.Nodes.Any(item => item.Node.Kind == GraphNodeKind.Code),
+            context.Nodes.Any(item => item.Node.Kind == GraphNodeKind.Data),
+            context.Edges.Count > 0);
+
+    /// <summary>
+    /// 合併兩輪 context 並重新套用固定 node／edge 上限。
+    /// 相同節點保留分數較高者，第二輪只補足缺口，不得擴張 retrieval budget。
+    /// </summary>
+    private GraphRetrievalContext MergeContexts(
+        GraphRetrievalContext first,
+        GraphRetrievalContext second,
+        IReadOnlyList<string> originalMissingEvidence)
+    {
+        // 第一輪先占用 budget；第二輪只加入缺少的節點，避免兩輪各自正規化的
+        // 分數讓一般候選擠掉第一輪已形成的完整關係路徑。
+        var firstNodes = first.Nodes.Take(_options.MaximumNodes).ToList();
+        var firstIds = firstNodes.Select(item => item.Node.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        var nodes = firstNodes.Concat(second.Nodes
+                .Where(item => !firstIds.Contains(item.Node.Id)))
+            .GroupBy(item => item.Node.Id, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .Take(_options.MaximumNodes)
+            .ToList();
+        var nodeIds = nodes.Select(item => item.Node.Id).ToHashSet(StringComparer.Ordinal);
+        var edges = first.Edges.Concat(second.Edges)
+            .DistinctBy(edge => edge.Id, StringComparer.Ordinal)
+            .Where(edge => nodeIds.Contains(edge.SourceId) &&
+                           nodeIds.Contains(edge.TargetId))
+            .Take(_options.MaximumEdges)
+            .ToList();
+        var communities = first.Communities.Concat(second.Communities)
+            .DistinctBy(report => report.CommunityId, StringComparer.Ordinal)
+            .Take(10)
+            .ToList();
+        var remaining = _questionPlanner.PlanFallback(
+            _questionPlanner.Plan(first.Query),
+            Coverage(new GraphRetrievalContext(
+                first.Query, nodes, edges, communities, [])),
+            previousAttempts: 1);
+        var diagnostics = first.Diagnostics.Concat(second.Diagnostics)
+            .Append(
+                $"第一輪缺少 {string.Join("、", originalMissingEvidence)}，已完成唯一一次補查。")
+            .Concat(remaining.MissingEvidence.Count == 0
+                ? []
+                : [$"補查後仍缺少：{string.Join("、", remaining.MissingEvidence)}。"])
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        return new GraphRetrievalContext(
+            first.Query, nodes, edges, communities, diagnostics);
     }
 
     /// <summary>產生 type/file-level Repo Map，避免重新引入 Method／Property 節點。</summary>
@@ -456,59 +706,6 @@ public sealed partial class GraphRetrievalService
         _llm ?? throw new InvalidOperationException(
             "GraphRAG AI enrichment／answer 尚未註冊 ILlmCompletionService。");
 
-    private Task<string> CompleteAsync(
-        string prompt,
-        string? providerProfileId,
-        string? modelId,
-        CancellationToken cancellationToken)
-    {
-        var llm = RequiredLlm();
-        return string.IsNullOrWhiteSpace(providerProfileId) &&
-               string.IsNullOrWhiteSpace(modelId)
-            ? llm.CompleteAsync(prompt, cancellationToken)
-            : llm.CompleteAsync(
-                prompt,
-                providerProfileId,
-                modelId,
-                cancellationToken);
-    }
-
-    private static string FormatContext(GraphRetrievalContext context)
-    {
-        var builder = new StringBuilder();
-        builder.AppendLine("## Nodes");
-        foreach (var item in context.Nodes)
-        {
-            var node = item.Node;
-            builder.Append("- [").Append(node.Kind).Append('/').Append(node.Role)
-                .Append("] ").Append(node.Name)
-                .Append(" id=").Append(node.Id)
-                .Append(" score=").Append(item.Score.ToString("0.000"));
-            if (node.FilePath is not null)
-                builder.Append(" location=").Append(node.FilePath)
-                    .Append(':').Append(node.StartLine?.ToString() ?? "?");
-            builder.AppendLine();
-            foreach (var evidence in node.Evidence.Take(3))
-                builder.Append("  evidence: ").Append(evidence.Reason)
-                    .Append(" [").Append(evidence.Artifact)
-                    .Append(':').Append(evidence.StartLine?.ToString() ?? "?")
-                    .AppendLine("]");
-        }
-        builder.AppendLine("## Relationships");
-        foreach (var edge in context.Edges)
-            builder.Append("- ").Append(edge.SourceId).Append(" --")
-                .Append(edge.Kind.ToString().ToUpperInvariant())
-                .Append("--> ").AppendLine(edge.TargetId);
-        if (context.Communities.Count > 0)
-        {
-            builder.AppendLine("## Communities");
-            foreach (var report in context.Communities)
-                builder.Append("- ").Append(report.Title).Append(": ")
-                    .AppendLine(report.Summary);
-        }
-        return builder.ToString();
-    }
-
     /// <summary>
     /// 回答 bug 或新需求的主要入口：先用 BM25 找業務／程式／資料 seed，
     /// 再依關係語意與 hop decay 補齊 Menu→EntryPoint→Code→Data 修改路徑。
@@ -524,14 +721,16 @@ public sealed partial class GraphRetrievalService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        var luceneQuery = BuildLuceneQuery(query);
+        var plan = _questionPlanner.Plan(query);
+        var plannedQuery = string.Join(' ', plan.SearchTerms);
+        var luceneQuery = BuildLuceneQuery(plannedQuery);
         if (luceneQuery.Length == 0)
             return new GraphRetrievalContext(
                 query, [], [], [],
                 ["問題沒有可搜尋的文字或識別碼，未執行圖譜遍歷。"]);
 
         var hits = await SearchSeedHitsAsync(
-            projectId, query, luceneQuery, cancellationToken);
+            projectId, plannedQuery, luceneQuery, cancellationToken);
         if (hits.Count == 0)
             return new GraphRetrievalContext(
                 query, [], [], [],
@@ -556,7 +755,7 @@ public sealed partial class GraphRetrievalService
         // 先完成「使用者意圖直接對應的關係」。一般 BFS 可能被高 degree 的共用 utility
         // 提前填滿 MaximumNodes，導致尚未展開的 WRITES owner 雖是 seed，卻沒有把資料表
         // 與 edge 帶進 context。這裡只追已存在的 evidence-backed edge，不推測新關係。
-        var intentKinds = IntentEdgeKinds(query);
+        var intentKinds = plan.RelationKinds;
         if (intentKinds.Count > 0)
         {
             var seedStates = selected.Values
@@ -564,15 +763,18 @@ public sealed partial class GraphRetrievalService
                 .OrderByDescending(item => item.Score)
                 .ThenBy(item => item.Node.Id, StringComparer.Ordinal)
                 .ToList();
-            var directSets = await Task.WhenAll(seedStates.Select(async seed => new
+            var directNeighbors = await _store.GetNeighborsBatchAsync(
+                projectId,
+                seedStates.Select(seed => seed.Node.Id).ToList(),
+                _options.NeighborsPerNode,
+                cancellationToken);
+            var directSets = seedStates.Select(seed => new
             {
                 Seed = seed,
-                Neighbors = await _store.GetNeighborsAsync(
-                    projectId,
+                Neighbors = directNeighbors.GetValueOrDefault(
                     seed.Node.Id,
-                    _options.NeighborsPerNode,
-                    cancellationToken),
-            }));
+                    Array.Empty<GraphNeighborV3>()),
+            });
             var directIntentNeighbors = directSets
                 .SelectMany(set => set.Neighbors
                     .Where(neighbor => intentKinds.Contains(neighbor.Edge.Kind))
@@ -582,6 +784,7 @@ public sealed partial class GraphRetrievalService
                         Neighbor = neighbor,
                         Score = set.Seed.Score *
                                 EdgeWeight(neighbor.Edge.Kind) *
+                                DirectionWeight(neighbor.Direction, plan.Direction) *
                                 _options.HopDecay,
                     }))
                 .OrderByDescending(item => item.Score)
@@ -608,46 +811,94 @@ public sealed partial class GraphRetrievalService
                 if (edges.Count < _options.MaximumEdges)
                     edges[item.Neighbor.Edge.Id] = item.Neighbor.Edge;
             }
+
+            // Feature seed 通常先找到 ROUTES_TO 的 EntryPoint。若直接進入一般 BFS，
+            // 大量 table reader 可能先填滿 80-node budget，使真正的 Controller 被擠掉；
+            // 因此只額外保留一層 evidence-backed HANDLES，完成入口到程式的最小骨架。
+            var entryPoints = selected.Values
+                .Where(item => item.Node.Kind == GraphNodeKind.EntryPoint)
+                .OrderByDescending(item => item.Score)
+                .Take(_options.SeedLimit)
+                .ToList();
+            var handled = await _store.GetNeighborsBatchAsync(
+                projectId,
+                entryPoints.Select(item => item.Node.Id).ToList(),
+                _options.NeighborsPerNode,
+                cancellationToken);
+            foreach (var entry in entryPoints)
+            {
+                foreach (var neighbor in handled.GetValueOrDefault(
+                             entry.Node.Id, Array.Empty<GraphNeighborV3>())
+                         .Where(value => value.Edge.Kind == GraphEdgeKind.Handles))
+                {
+                    var score = entry.Score * EdgeWeight(GraphEdgeKind.Handles) *
+                                _options.HopDecay;
+                    if (selected.Count >= _options.MaximumNodes &&
+                        !selected.ContainsKey(neighbor.Node.Id))
+                        continue;
+                    if (!selected.TryGetValue(neighbor.Node.Id, out var existing) ||
+                        score > existing.Score)
+                    {
+                        selected[neighbor.Node.Id] = new ScoredGraphNode(
+                            neighbor.Node, score, entry.Depth + 1, false);
+                        frontier.Enqueue(
+                            new TraversalState(
+                                neighbor.Node.Id, score, entry.Depth + 1),
+                            -score);
+                    }
+                    if (edges.Count < _options.MaximumEdges)
+                        edges[neighbor.Edge.Id] = neighbor.Edge;
+                }
+            }
         }
 
         var expandedAtScore = new Dictionary<string, double>(StringComparer.Ordinal);
         while (frontier.Count > 0 && selected.Count < _options.MaximumNodes)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var state = frontier.Dequeue();
-            if (state.Depth >= _options.MaximumDepth) continue;
-            if (expandedAtScore.TryGetValue(state.NodeId, out var prior) &&
-                prior >= state.Score)
-                continue;
-            expandedAtScore[state.NodeId] = state.Score;
-
-            var neighbors = await _store.GetNeighborsAsync(
+            var expansionBatch = DequeueExpansionBatch(
+                frontier,
+                expandedAtScore,
+                Math.Min(_options.MaximumDepth, plan.MaximumDepth));
+            if (expansionBatch.Count == 0) continue;
+            var neighborSets = await _store.GetNeighborsBatchAsync(
                 projectId,
-                state.NodeId,
+                expansionBatch.Select(state => state.NodeId).ToList(),
                 _options.NeighborsPerNode,
                 cancellationToken);
-            foreach (var neighbor in neighbors)
+            foreach (var state in expansionBatch)
             {
-                var relationScore = EdgeWeight(neighbor.Edge.Kind);
-                var nextScore = state.Score * relationScore * _options.HopDecay;
-                var nextDepth = state.Depth + 1;
-                if (nextScore < 0.08) continue;
-
-                var candidate = new ScoredGraphNode(
-                    neighbor.Node, nextScore, nextDepth, false);
-                if (!selected.TryGetValue(neighbor.Node.Id, out var existing) ||
-                    nextScore > existing.Score)
+                var neighbors = neighborSets.GetValueOrDefault(
+                    state.NodeId,
+                    Array.Empty<GraphNeighborV3>());
+                foreach (var neighbor in neighbors)
                 {
-                    if (selected.Count >= _options.MaximumNodes &&
-                        !selected.ContainsKey(neighbor.Node.Id))
-                        continue;
-                    selected[neighbor.Node.Id] = candidate;
-                    frontier.Enqueue(
-                        new TraversalState(neighbor.Node.Id, nextScore, nextDepth),
-                        -nextScore);
+                    var relationScore = EdgeWeight(neighbor.Edge.Kind);
+                    // Planner 關係白名單是有界 traversal 的硬限制，避免共用資料表
+                    // 或 utility 沿與問題無關的高 degree 關係擴散。
+                    if (!plan.RelationKinds.Contains(neighbor.Edge.Kind)) continue;
+                    var nextScore = state.Score * relationScore *
+                                    DirectionWeight(neighbor.Direction, plan.Direction) *
+                                    _options.HopDecay;
+                    var nextDepth = state.Depth + 1;
+                    if (nextScore < 0.08) continue;
+
+                    var candidate = new ScoredGraphNode(
+                        neighbor.Node, nextScore, nextDepth, false);
+                    if (!selected.TryGetValue(neighbor.Node.Id, out var existing) ||
+                        nextScore > existing.Score)
+                    {
+                        if (selected.Count >= _options.MaximumNodes &&
+                            !selected.ContainsKey(neighbor.Node.Id))
+                            continue;
+                        selected[neighbor.Node.Id] = candidate;
+                        frontier.Enqueue(
+                            new TraversalState(neighbor.Node.Id, nextScore, nextDepth),
+                            -nextScore);
+                    }
+                    if (edges.Count < _options.MaximumEdges)
+                        edges[neighbor.Edge.Id] = neighbor.Edge;
                 }
-                if (edges.Count < _options.MaximumEdges)
-                    edges[neighbor.Edge.Id] = neighbor.Edge;
             }
         }
 
@@ -929,6 +1180,52 @@ public sealed partial class GraphRetrievalService
         GraphEdgeKind.DependsOn => 0.70,
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "不允許的 V3 EdgeKind。"),
     };
+
+    /// <summary>
+    /// 讓問題計畫偏好的上下游方向獲得較高分，但不完全刪除反向證據。
+    /// 保留 0.65 的反向分數可避免歷史 Graph 邊方向不一致時遺失有效路徑。
+    /// </summary>
+    /// <param name="actual">Graph Store 回傳的鄰居方向。</param>
+    /// <param name="expected">Planner 依 Intent 選出的主要方向。</param>
+    /// <returns>範圍固定在 0.65 到 1.0 的排序乘數。</returns>
+    private static double DirectionWeight(
+        string actual,
+        RepositoryTraversalDirection expected) =>
+        expected == RepositoryTraversalDirection.Both ||
+        expected == RepositoryTraversalDirection.Outgoing &&
+        actual.Equals("outgoing", StringComparison.OrdinalIgnoreCase) ||
+        expected == RepositoryTraversalDirection.Incoming &&
+        actual.Equals("incoming", StringComparison.OrdinalIgnoreCase)
+            ? 1
+            : 0.65;
+
+    /// <summary>
+    /// 從優先佇列取出一批尚未以相同或更高分數展開的節點。
+    /// 分批只降低 Neo4j round trip；節點仍維持原本的分數、深度與全域數量限制，
+    /// 因此不會因效能最佳化而擴大 LLM 可見的 Graph 範圍。
+    /// </summary>
+    /// <param name="frontier">依關聯分數排序的待展開節點。</param>
+    /// <param name="expandedAtScore">每個節點已展開過的最高分數。</param>
+    /// <param name="maximumDepth">允許向外遍歷的最大深度。</param>
+    /// <returns>最多 32 個可安全批次查詢的 traversal state。</returns>
+    private static IReadOnlyList<TraversalState> DequeueExpansionBatch(
+        PriorityQueue<TraversalState, double> frontier,
+        IDictionary<string, double> expandedAtScore,
+        int maximumDepth)
+    {
+        var result = new List<TraversalState>(MaximumFrontierBatchSize);
+        while (frontier.Count > 0 && result.Count < MaximumFrontierBatchSize)
+        {
+            var state = frontier.Dequeue();
+            if (state.Depth >= maximumDepth) continue;
+            if (expandedAtScore.TryGetValue(state.NodeId, out var prior) &&
+                prior >= state.Score)
+                continue;
+            expandedAtScore[state.NodeId] = state.Score;
+            result.Add(state);
+        }
+        return result;
+    }
 
     private static int KindPriority(GraphNodeKind kind) => kind switch
     {

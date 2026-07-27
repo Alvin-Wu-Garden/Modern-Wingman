@@ -108,7 +108,9 @@ GraphRAG 必須提供一份可供 LLM 使用的 bounded evidence pack，至少�
 重構完成後必須同時滿足：
 
 - 舊 GraphRAG production `.cs` 檔已刪除，不是留在原處標記 obsolete。
-- 新 `modules/GraphRAG` 正式 `.cs` 檔數量 `<= 10`。
+- 新 `modules/GraphRAG` 原始重構目標為正式 `.cs` 檔數量 `<= 10`。目前實際基線已為 11；
+  專案解析回答品質改善期間，以 `project-analysis-answer-quality-todo.md` 的可維護性 Gate
+  為準，正式 `.cs` 總數不得超過 12，且新增 production code 不得超過該 TODO 的行數預算。
 - 不新增 GraphRAG 專屬子專案；新模組直接編入 `AgentService` assembly，避免額外 csproj、adapter 與循環相依。
 - 不建立「每張資料表一個 extractor」、「每種 node 一個 handler」或只有一層轉呼叫的 class。
 - 單一檔案若超過約 1,500 行，必須證明其內部仍為同一責任；不得以「檔案數限制」製造另一個 3,000 行 God class。
@@ -1402,7 +1404,9 @@ foreach (var node in nodes)
 - 移除舊 config。
 - 執行禁止殘留搜尋。
 
-完成條件：正式 `.cs <= 10`、禁止字串搜尋為 0、build／test 全綠。
+原始重構完成條件：正式 `.cs <= 10`、禁止字串搜尋為 0、build／test 全綠。
+此為當時的重構驗收紀錄；後續專案解析回答品質改善以
+`project-analysis-answer-quality-todo.md` 的正式 `.cs <= 12` 與新增行數預算為準。
 
 ### Phase 6：真實系統驗收
 
@@ -1472,7 +1476,9 @@ foreach (var node in nodes)
 
 只有以下全部成立，才算完成 GraphRAG 重構：
 
-- [x] `modules/GraphRAG` 已存在且正式 `.cs` 檔 `<= 10`。
+- [x] `modules/GraphRAG` 已存在且原始重構驗收時正式 `.cs` 檔 `<= 10`。
+  此項保留為歷史完成紀錄；目前回答品質改善工作以
+  `project-analysis-answer-quality-todo.md` 的正式 `.cs <= 12` 上限為準。
 - [x] 只有 4 種 domain NodeKind。
 - [x] 只有 9 種 domain EdgeKind。
 - [x] 無 profile 機制。

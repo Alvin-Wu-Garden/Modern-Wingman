@@ -138,7 +138,13 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
                       projectId,
                       phase: 'summaries',
                       message: `索引可用 · 業務摘要生成中 ${summary.completedCommunities}/${summary.totalCommunities}`,
-                      percent: 100,
+                      percent: summary.totalCommunities > 0
+                        ? Math.round(
+                            (summary.completedCommunities /
+                              summary.totalCommunities) *
+                              100,
+                          )
+                        : 0,
                     },
                 error: summary.state === 'Degraded'
                   ? summary.error ?? summary.message ?? '部分業務摘要生成失敗。'

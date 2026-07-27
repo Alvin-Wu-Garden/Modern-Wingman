@@ -9,7 +9,7 @@ namespace AgentService.UnitTests;
 public sealed class GraphRetrievalServiceV3Tests
 {
     [Fact]
-    public async Task LocalSearch_FollowsFeatureEntryCodeDataPathWithinBudget()
+    public async Task LocalSearch_FollowsFeatureEntryAndCodeWithinDepthBudget()
     {
         var feature = Node("feature:menu:1", GraphNodeKind.Feature, GraphRoles.MenuFeature, "債券交易作廢");
         var entry = Node("entry:web:bond/cancel", GraphNodeKind.EntryPoint, GraphRoles.ControllerAction, "Bond/Cancel");
@@ -40,11 +40,14 @@ public sealed class GraphRetrievalServiceV3Tests
 
         var context = await serviceUnderTest.LocalSearchAsync("project", "債券交易作廢 bug");
 
-        Assert.Equal(5, context.Nodes.Count);
-        Assert.Equal(4, context.Edges.Count);
-        Assert.Contains(context.Nodes, item => item.Node.Id == table.Id);
+        Assert.Equal(4, context.Nodes.Count);
+        Assert.Equal(3, context.Edges.Count);
+        Assert.Contains(context.Nodes, item => item.Node.Id == service.Id);
+        Assert.DoesNotContain(context.Nodes, item => item.Node.Id == table.Id);
         Assert.Equal(0, context.Nodes.Single(item => item.Node.Id == feature.Id).Depth);
-        Assert.Equal(4, context.Nodes.Single(item => item.Node.Id == table.Id).Depth);
+        Assert.Equal(3, context.Nodes.Single(item => item.Node.Id == service.Id).Depth);
+        Assert.True(store.BatchNeighborCalls > 0);
+        Assert.Equal(0, store.SingleNeighborCalls);
     }
 
     [Fact]
@@ -328,58 +331,6 @@ public sealed class GraphRetrievalServiceV3Tests
     }
 
     [Fact]
-    public async Task AnswerGlobalAsync_UsesBoundedMapReduceAcrossCommunityReports()
-    {
-        var reports = Enumerable.Range(0, 9)
-            .Select(index => new GraphCommunityReport(
-                $"primary:batch:{index}",
-                "primary",
-                $"批次報表 {index}",
-                $"批次報表社群 {index} 的排程與資料來源摘要。",
-                []))
-            .ToList();
-        var store = new InMemoryGraphStore([], [], [], reports);
-        var llm = new RecordingLlm();
-        var service = new GraphRetrievalService(
-            store,
-            Options.Create(new GraphRetrievalOptions()),
-            NullLogger<GraphRetrievalService>.Instance,
-            llm);
-
-        var answer = await service.AnswerGlobalAsync(
-            "project",
-            "系統有哪些批次報表鏈？");
-
-        Assert.Equal("reduce-result", answer);
-        Assert.Equal(4, llm.Calls.Count);
-        Assert.Equal(
-            3,
-            llm.Calls.Count(prompt => prompt.Contains("map worker", StringComparison.Ordinal)));
-        Assert.Contains("reduce worker", llm.Calls[^1]);
-        Assert.Contains("Map 結果", llm.Calls[^1]);
-    }
-
-    [Theory]
-    [InlineData("覆核後資料沒有更新")]
-    [InlineData("債券交易作廢發生錯誤")]
-    [InlineData("請新增商品 CSV 格式")]
-    [InlineData("BondController.Save 要怎麼調整")]
-    [InlineData("tblAsyncConfirm 寫入失敗")]
-    public void LooksLikeLocalQuestion_RecognizesDefectsChangesAndCodeIdentifiers(
-        string question)
-    {
-        Assert.True(GraphRetrievalService.LooksLikeLocalQuestion(question));
-    }
-
-    [Theory]
-    [InlineData("系統有哪些批次報表鏈？")]
-    [InlineData("整理交易模組與風控模組的整體關係")]
-    public void LooksLikeLocalQuestion_KeepsCrossModuleQuestionsGlobal(string question)
-    {
-        Assert.False(GraphRetrievalService.LooksLikeLocalQuestion(question));
-    }
-
-    [Fact]
     public async Task BuildCommunitySummariesAsync_ReusesEvidenceCacheWithoutCallingLlm()
     {
         var cached = new GraphCommunityReport(
@@ -404,6 +355,107 @@ public sealed class GraphRetrievalServiceV3Tests
         Assert.Empty(llm.Calls);
         Assert.Equal("已快取的 AI 摘要。", Assert.Single(store.SavedReports).Summary);
         Assert.True(Assert.Single(store.SavedReports).AiEnriched);
+    }
+
+    [Fact]
+    public async Task BuildCommunitySummariesAsync_EnrichesOnlyPrimaryBusinessReports()
+    {
+        var primary = new GraphCommunityReport(
+            "primary:trade",
+            "primary",
+            "交易",
+            "交易功能 deterministic 摘要。",
+            ["feature:menu:trade"],
+            "primary-cache-key");
+        var secondary = new GraphCommunityReport(
+            "secondary:label:shared",
+            "secondary",
+            "探索群組",
+            "結構探索 deterministic 摘要。",
+            ["code:csharp:shared"],
+            "secondary-cache-key");
+        var store = new InMemoryGraphStore([], [], [], [primary, secondary]);
+        var llm = new RecordingLlm();
+        var service = new GraphRetrievalService(
+            store,
+            Options.Create(new GraphRetrievalOptions()),
+            NullLogger<GraphRetrievalService>.Instance,
+            llm);
+
+        var count = await service.BuildCommunitySummariesAsync("project");
+
+        Assert.Equal(1, count);
+        Assert.Single(llm.Calls);
+        Assert.True(store.SavedReports.Single(report =>
+            report.Kind == "primary").AiEnriched);
+        var savedSecondary = store.SavedReports.Single(report =>
+            report.Kind == "secondary");
+        Assert.False(savedSecondary.AiEnriched);
+        Assert.Equal("結構探索 deterministic 摘要。", savedSecondary.Summary);
+    }
+
+    /// <summary>背景模型失敗時必須保留 deterministic summary，且狀態只降級、不阻斷問答。</summary>
+    [Fact]
+    public async Task BuildCommunitySummariesAsync_ModelFailureKeepsDeterministicSummary()
+    {
+        var report = new GraphCommunityReport(
+            "primary:trade", "primary", "交易", "可直接使用的 deterministic 摘要。",
+            ["feature:menu:trade"], "cache-key");
+        var store = new InMemoryGraphStore([], [], [], [report]);
+        var service = new GraphRetrievalService(
+            store, Options.Create(new GraphRetrievalOptions()),
+            NullLogger<GraphRetrievalService>.Instance, new FailingLlm());
+
+        Assert.Equal(1, await service.BuildCommunitySummariesAsync("project"));
+        Assert.Equal("Degraded", service.GetEnrichmentStatus("project").State);
+        Assert.Equal(
+            "可直接使用的 deterministic 摘要。",
+            Assert.Single(store.SavedReports).Summary);
+    }
+
+    /// <summary>圖資料保存失敗時也必須結束輪詢，並保留可用的 deterministic 摘要。</summary>
+    [Fact]
+    public async Task BuildCommunitySummariesAsync_StoreFailureEndsAsDegraded()
+    {
+        var report = new GraphCommunityReport(
+            "primary:trade", "primary", "交易", "可直接使用的 deterministic 摘要。",
+            ["feature:menu:trade"], "cache-key");
+        var store = new InMemoryGraphStore([], [], [], [report])
+        {
+            FailSave = true,
+        };
+        var service = new GraphRetrievalService(
+            store, Options.Create(new GraphRetrievalOptions()),
+            NullLogger<GraphRetrievalService>.Instance, new RecordingLlm());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.BuildCommunitySummariesAsync("project"));
+
+        var status = service.GetEnrichmentStatus("project");
+        Assert.Equal("Degraded", status.State);
+        Assert.NotNull(status.CompletedAt);
+        Assert.Contains("deterministic", status.Message);
+        Assert.Equal(
+            "可直接使用的 deterministic 摘要。",
+            Assert.Single(store.SavedReports).Summary);
+    }
+
+    /// <summary>未註冊 LLM 時必須回報可終止的降級狀態，避免桌面端永久輪詢。</summary>
+    [Fact]
+    public async Task BuildCommunitySummariesAsync_MissingLlmEndsAsDegraded()
+    {
+        var store = new InMemoryGraphStore([], [], [], []);
+        var service = new GraphRetrievalService(
+            store, Options.Create(new GraphRetrievalOptions()),
+            NullLogger<GraphRetrievalService>.Instance);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.BuildCommunitySummariesAsync("project"));
+
+        var status = service.GetEnrichmentStatus("project");
+        Assert.Equal("Degraded", status.State);
+        Assert.NotNull(status.CompletedAt);
+        Assert.Contains("deterministic", status.Message);
     }
 
     private static GraphNode Node(
@@ -448,6 +500,9 @@ public sealed class GraphRetrievalServiceV3Tests
             reports?.ToList() ?? [];
 
         internal IReadOnlyList<GraphCommunityReport> SavedReports => _reports;
+        internal int BatchNeighborCalls { get; private set; }
+        internal int SingleNeighborCalls { get; private set; }
+        internal bool FailSave { get; init; }
 
         public Task<IReadOnlyList<GraphSearchHitV3>> SearchAsync(
             string projectId, string query, int limit, CancellationToken cancellationToken = default) =>
@@ -456,7 +511,28 @@ public sealed class GraphRetrievalServiceV3Tests
         public Task<IReadOnlyList<GraphNeighborV3>> GetNeighborsAsync(
             string projectId, string nodeId, int limit, CancellationToken cancellationToken = default)
         {
-            var result = edges
+            SingleNeighborCalls++;
+            return Task.FromResult(Neighbors(nodeId, limit));
+        }
+
+        public Task<IReadOnlyDictionary<string, IReadOnlyList<GraphNeighborV3>>>
+            GetNeighborsBatchAsync(
+                string projectId,
+                IReadOnlyList<string> nodeIds,
+                int limitPerNode,
+                CancellationToken cancellationToken = default)
+        {
+            BatchNeighborCalls++;
+            IReadOnlyDictionary<string, IReadOnlyList<GraphNeighborV3>> result =
+                nodeIds.Distinct(StringComparer.Ordinal).ToDictionary(
+                    nodeId => nodeId,
+                    nodeId => Neighbors(nodeId, limitPerNode),
+                    StringComparer.Ordinal);
+            return Task.FromResult(result);
+        }
+
+        private IReadOnlyList<GraphNeighborV3> Neighbors(string nodeId, int limit) =>
+            edges
                 .Where(edge => edge.SourceId == nodeId || edge.TargetId == nodeId)
                 .Take(limit)
                 .Select(edge =>
@@ -468,8 +544,6 @@ public sealed class GraphRetrievalServiceV3Tests
                         outgoing ? "outgoing" : "incoming");
                 })
                 .ToList();
-            return Task.FromResult<IReadOnlyList<GraphNeighborV3>>(result);
-        }
 
         public Task<IReadOnlyList<GraphCommunityReport>> ListCommunityReportsAsync(
             string projectId, CancellationToken cancellationToken = default) =>
@@ -504,6 +578,8 @@ public sealed class GraphRetrievalServiceV3Tests
             IReadOnlyList<GraphCommunityReport> reports,
             CancellationToken cancellationToken = default)
         {
+            if (FailSave)
+                throw new InvalidOperationException("simulated community report save failure");
             _reports = reports.ToList();
             return Task.CompletedTask;
         }
@@ -549,6 +625,21 @@ public sealed class GraphRetrievalServiceV3Tests
                     ? "reduce-result"
                     : $"map-result-{Calls.Count}");
         }
+
+        public Task<string> CompleteAsync(
+            string prompt,
+            string? providerProfileId,
+            string? modelId,
+            CancellationToken ct = default) =>
+            CompleteAsync(prompt, ct);
+    }
+
+    private sealed class FailingLlm : ILlmCompletionService
+    {
+        public Task<string> CompleteAsync(
+            string prompt,
+            CancellationToken ct = default) =>
+            Task.FromException<string>(new InvalidOperationException("測試模型失敗"));
 
         public Task<string> CompleteAsync(
             string prompt,

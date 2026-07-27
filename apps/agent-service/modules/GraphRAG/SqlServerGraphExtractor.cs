@@ -187,11 +187,6 @@ public sealed partial class SqlServerGraphExtractor(ILogger<SqlServerGraphExtrac
         {
             await using var connection = new SqlConnection(source.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-            await ExecuteNonQueryAsync(
-                connection,
-                "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;",
-                source.CommandTimeoutSeconds,
-                cancellationToken);
 
             await ExtractSqlModuleDependenciesAsync(
                 connection, source, fragment, cancellationToken);
@@ -2255,19 +2250,6 @@ public sealed partial class SqlServerGraphExtractor(ILogger<SqlServerGraphExtrac
             rows.Add(new DbRow(values));
         }
         return rows;
-    }
-
-    private static async Task ExecuteNonQueryAsync(
-        SqlConnection connection,
-        string commandText,
-        int timeoutSeconds,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.CommandText = commandText;
-        command.CommandType = CommandType.Text;
-        command.CommandTimeout = timeoutSeconds;
-        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static string BuildMenuPath(

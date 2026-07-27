@@ -1,4 +1,5 @@
 using AgentService.Host.RestEndpoints;
+using AgentService.Domain.Models;
 using AgentService.Infrastructure.Persistence;
 using AgentService.Modules.GraphRAG;
 
@@ -61,4 +62,27 @@ public sealed class ReadOnlyGraphAndDatabasePathV3Tests
         Assert.Equal(
             expected,
             ProjectEndpoints.HasMatchingGraphManifest(projectManifest, activeManifest));
+
+    [Theory]
+    [InlineData(ProjectIndexStatus.PendingChanges, true)]
+    [InlineData(ProjectIndexStatus.Stale, true)]
+    [InlineData(ProjectIndexStatus.Indexed, false)]
+    [InlineData(ProjectIndexStatus.Partial, false)]
+    [InlineData(ProjectIndexStatus.Indexing, false)]
+    public void ProjectQuestion_RefreshesOnlyPersistentlyStaleIndexStates(
+        ProjectIndexStatus status,
+        bool expected)
+    {
+        var project = new ProjectEntity
+        {
+            Id = "project-question-refresh",
+            Name = "Project question refresh",
+            RootPath = Path.GetTempPath(),
+            IndexStatus = status,
+        };
+
+        Assert.Equal(
+            expected,
+            ConversationEndpoints.RequiresFullIndexRefreshForProjectQuestion(project));
+    }
 }

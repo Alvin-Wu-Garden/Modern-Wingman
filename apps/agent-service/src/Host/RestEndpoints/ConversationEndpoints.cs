@@ -146,8 +146,13 @@ public static class ConversationEndpoints
                 return;
             }
 
-            if (await indexing.CatchUpAsync(project.Id, ct))
+            // 資料庫設定異動不會改變任何 source file；PendingChanges／Stale 必須直接
+            // 進入完整 fingerprint 決策，不能只靠 CatchUpAsync 的檔案 hash 判斷。
+            if (RequiresFullIndexRefreshForProjectQuestion(project) ||
+                await indexing.CatchUpAsync(project.Id, ct))
+            {
                 project = await indexing.IndexProjectAsync(project.Id, ct);
+            }
             if (project.IndexManifestVersion is null)
             {
                 http.Response.StatusCode = StatusCodes.Status409Conflict;
@@ -160,7 +165,11 @@ public static class ConversationEndpoints
 
             // 只把本次問題拿去檢索；歷史訊息仍由共用 Agent 以正常對話歷史提供。
             // 這可避免舊問題污染 GraphRAG 關鍵字，同時保留多輪對話的語意連續性。
-            prompt = await graphRag.BuildAnswerPromptAsync(project.Id, request.UserMessage, ct);
+            prompt = await graphRag.BuildAnswerPromptAsync(
+                project.Id,
+                project.RootPath,
+                request.UserMessage,
+                ct);
         }
 
         var firstExchange = conversation.Messages.Count == 0;
@@ -295,6 +304,19 @@ public static class ConversationEndpoints
         string.Equals(value, "project", StringComparison.OrdinalIgnoreCase)
             ? ConversationScope.Project
             : ConversationScope.General;
+
+    /// <summary>
+    /// 判斷專案問答是否必須先執行完整索引指紋檢查。
+    /// PendingChanges 包含檔案 watcher 與資料庫設定異動；Stale 表示上一輪更新失敗但
+    /// 仍有舊圖可用。兩者都應在回答前重試，Partial 則保留可用的降級圖，避免每題重建。
+    /// </summary>
+    /// <param name="project">本次專案對話綁定的持久化專案狀態。</param>
+    /// <returns>需要先呼叫 IndexProjectAsync 時為 true。</returns>
+    internal static bool RequiresFullIndexRefreshForProjectQuestion(
+        ProjectEntity project) =>
+        project.IndexStatus is
+            ProjectIndexStatus.PendingChanges or
+            ProjectIndexStatus.Stale;
 
     private static string ToWireValue(ConversationScope scope) =>
         scope == ConversationScope.Project ? "project" : "general";

@@ -6,6 +6,7 @@ using AgentService.Application.Contracts;
 using AgentService.Application.Models;
 using AgentService.Domain.Models;
 using AgentService.Modules.GraphRAG;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -20,6 +21,20 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
     private bool _managedNeo4jUsed;
 
     public GraphIndexingServiceV3Tests() => Directory.CreateDirectory(_root);
+
+    /// <summary>大型專案裁剪必須保留登入與認證模組，否則登入流程只會剩 Controller 外殼。</summary>
+    [Theory]
+    [InlineData("LoginAndPassword/LoginAndPassword.cs")]
+    [InlineData("Security/AuthenticationService.cs")]
+    [InlineData("Account/PasswordValidator.cs")]
+    public void LargeRepositoryCallPath_KeepsAuthenticationFiles(string relativePath)
+    {
+        var path = Path.Combine(
+            _root,
+            relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+        Assert.True(CSharpGraphExtractor.IsLargeRepositoryCallPathFile(_root, path));
+    }
 
     [Fact]
     public async Task ManagedNeo4jRuntime_RejectsOccupiedPortWithoutMatchingOwnership()
@@ -67,6 +82,31 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
         Assert.Equal(ProjectIndexStatus.Indexed, second.IndexStatus);
         Assert.Equal("no-op", fixture.Service.GetLastRun("project")!.Mode);
         Assert.Equal("3.0", fixture.Manifests.Current!.GraphSchemaVersion);
+    }
+
+    /// <summary>
+    /// Extractor 規則升版必須使 no-op 失效；否則來源未變時仍會沿用舊解析結果。
+    /// </summary>
+    [Fact]
+    public async Task IndexProjectAsync_ExtractorVersionChangeInvalidatesNoOp()
+    {
+        await File.WriteAllTextAsync(
+            Path.Combine(_root, "Order.cs"),
+            "public sealed class Order { }");
+        var fixture = CreateFixture();
+        await fixture.Service.IndexProjectAsync("project");
+        await fixture.Service.IndexProjectAsync("project");
+        Assert.Equal("no-op", fixture.Service.GetLastRun("project")!.Mode);
+
+        fixture.Extractor.Version = "2.0.0";
+        await fixture.Service.IndexProjectAsync("project");
+
+        Assert.Equal("full", fixture.Service.GetLastRun("project")!.Mode);
+        Assert.Equal(2, fixture.Store.PublishCount);
+        Assert.Contains(
+            "fixture-v3=2.0.0",
+            fixture.Manifests.Current!.IndexerVersion,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -167,6 +207,120 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
         Assert.Equal(previousPublishCount, fixture.Store.PublishCount);
         Assert.Equal(previousManifest, fixture.Store.ActiveManifest);
         Assert.Equal(ProjectIndexStatus.Stale, saved.IndexStatus);
+        Assert.Contains("資料庫唯讀連線失敗", saved.IndexError);
+    }
+
+    [Fact]
+    public async Task IndexProjectAsync_DatabaseConfigurationFingerprintInvalidatesNoOp()
+    {
+        await File.WriteAllTextAsync(
+            Path.Combine(_root, "Order.cs"),
+            "public sealed class Order { }");
+        var databasePath = Path.Combine(_root, "configuration-fingerprint.db");
+        await CreateSqliteSchemaAsync(databasePath);
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        }.ConnectionString;
+        var databaseSources = new MutableDatabaseSourceProvider
+        {
+            Source = new GraphDatabaseSource(
+                ProjectDatabaseProvider.Sqlite,
+                connectionString,
+                "configuration-fingerprint",
+                "configuration-v1"),
+        };
+        var fixture = CreateCSharpFixture(databaseSources);
+
+        await fixture.Service.IndexProjectAsync("project");
+        var firstFingerprint = fixture.Store.LastSnapshot!.WorkingTreeFingerprint;
+        await fixture.Service.IndexProjectAsync("project");
+        Assert.Equal("no-op", fixture.Service.GetLastRun("project")!.Mode);
+        Assert.Equal(1, fixture.Store.PublishCount);
+
+        databaseSources.Source = databaseSources.Source with
+        {
+            ConfigurationFingerprint = "configuration-v2",
+        };
+        await fixture.Service.IndexProjectAsync("project");
+
+        Assert.Equal("full", fixture.Service.GetLastRun("project")!.Mode);
+        Assert.Equal(2, fixture.Store.PublishCount);
+        Assert.NotEqual(
+            firstFingerprint,
+            fixture.Store.LastSnapshot!.WorkingTreeFingerprint);
+    }
+
+    [Fact]
+    public async Task IndexProjectAsync_ConfiguredDatabaseWithoutFeaturePublishesActionableWarning()
+    {
+        await File.WriteAllTextAsync(
+            Path.Combine(_root, "Order.cs"),
+            "public sealed class Order { }");
+        var databasePath = Path.Combine(_root, "no-business-feature.db");
+        await CreateSqliteSchemaAsync(databasePath);
+        var databaseSources = new MutableDatabaseSourceProvider
+        {
+            Source = new GraphDatabaseSource(
+                ProjectDatabaseProvider.Sqlite,
+                new SqliteConnectionStringBuilder
+                {
+                    DataSource = databasePath,
+                    Mode = SqliteOpenMode.ReadOnly,
+                    Pooling = false,
+                }.ConnectionString,
+                "no-business-feature",
+                "configuration-v1"),
+        };
+        var fixture = CreateCSharpFixture(databaseSources);
+
+        var project = await fixture.Service.IndexProjectAsync("project");
+
+        Assert.Equal(ProjectIndexStatus.Partial, project.IndexStatus);
+        Assert.Contains("沒有產生任何 Business Feature", project.IndexError);
+        var warning = Assert.Single(
+            fixture.Store.LastSnapshot!.Diagnostics,
+            item => item.Code == "DATABASE_FEATURES_MISSING");
+        Assert.Equal(GraphDiagnosticSeverity.Warning, warning.Severity);
+        Assert.True(warning.Retryable);
+    }
+
+    [Fact]
+    public async Task IncrementalIndexAsync_DatabaseSettingChangeRunsFingerprintWhenSourceIsUnchanged()
+    {
+        await File.WriteAllTextAsync(
+            Path.Combine(_root, "Order.cs"),
+            "public sealed class Order { }");
+        var databasePath = Path.Combine(_root, "incremental-setting-change.db");
+        await CreateSqliteSchemaAsync(databasePath);
+        var databaseSources = new MutableDatabaseSourceProvider();
+        var fixture = CreateCSharpFixture(databaseSources);
+        await fixture.Service.IndexProjectAsync("project");
+        Assert.Equal(1, fixture.Store.PublishCount);
+
+        databaseSources.Source = new GraphDatabaseSource(
+            ProjectDatabaseProvider.Sqlite,
+            new SqliteConnectionStringBuilder
+            {
+                DataSource = databasePath,
+                Mode = SqliteOpenMode.ReadOnly,
+                Pooling = false,
+            }.ConnectionString,
+            "incremental-setting-change",
+            "configuration-v1");
+        await fixture.Service.MarkPendingChangesAsync("project");
+
+        var refreshed = await fixture.Service.IncrementalIndexAsync("project");
+
+        Assert.NotNull(refreshed);
+        Assert.Equal("full", fixture.Service.GetLastRun("project")!.Mode);
+        Assert.Equal(2, fixture.Store.PublishCount);
+        Assert.Contains(
+            fixture.Store.LastSnapshot!.Artifacts,
+            artifact => artifact.Kind == "database" &&
+                        artifact.Status == "indexed");
     }
 
     [Fact]
@@ -1138,7 +1292,8 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
         return new Fixture(service, projects, manifests, store, extractor);
     }
 
-    private CSharpFixture CreateCSharpFixture()
+    private CSharpFixture CreateCSharpFixture(
+        IGraphDatabaseSourceProvider? databaseSources = null)
     {
         var project = new ProjectEntity
         {
@@ -1163,10 +1318,180 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
             new AvailableNeo4jRuntime(),
             projects,
             manifests,
-            new NullDatabaseSourceProvider(),
+            databaseSources ?? new NullDatabaseSourceProvider(),
             Options.Create(new GraphIndexingOptions()),
             NullLogger<GraphIndexingService>.Instance);
         return new CSharpFixture(service, store);
+    }
+
+    /// <summary>
+    /// 使用桌面程式目前已發布的投資系統 Graph，驗證十五題回答 context 與一百次 warm retrieval。
+    /// 此測試不重建索引、不呼叫外部 SQL，也不修改使用者專案；只讀取 Neo4j 與 source evidence。
+    /// </summary>
+    [FblNeo4jAcceptanceFact]
+    [Trait("Category", "ExternalAcceptance")]
+    public async Task LiveFblGraph_AnswersGoldenQuestionsAndMeetsWarmP95()
+    {
+        var projectId = Environment.GetEnvironmentVariable("WINGMAN_FBL_LIVE_PROJECT_ID")
+            ?? throw new InvalidOperationException("缺少 WINGMAN_FBL_LIVE_PROJECT_ID。");
+        var root = Path.GetFullPath(
+            Environment.GetEnvironmentVariable("WINGMAN_FBL_ACCEPTANCE_ROOT")
+            ?? throw new InvalidOperationException("缺少 WINGMAN_FBL_ACCEPTANCE_ROOT。"));
+        var configuration = new ConfigurationBuilder().Build();
+        var neo4j = Options.Create(new GraphRagNeo4jOptions
+        {
+            Uri = "bolt://127.0.0.1:17688",
+            Username = "neo4j",
+            Password = GraphRagNeo4jCredentialStore.Resolve(configuration),
+            Database = "neo4j",
+            ConnectionTimeoutSeconds = 5,
+        });
+        await using var store = new Neo4jGraphStore(
+            neo4j,
+            Options.Create(new GraphRagNeo4jRuntimeOptions { Mode = "managed" }),
+            NullLogger<Neo4jGraphStore>.Instance);
+        Assert.NotNull(await store.GetActiveManifestAsync(projectId));
+        var retrieval = new GraphRetrievalService(
+            store,
+            Options.Create(new GraphRetrievalOptions()),
+            NullLogger<GraphRetrievalService>.Instance);
+        (string Question, string[] ExpectedTerms, string[] ExpectedFiles,
+            GraphNodeKind[] RequiredKinds)[] golden =
+        [
+            ("債券交易作廢 bug", ["債券", "Bond", "Confirm"],
+                ["bondtransactioncontroller.cs"], [GraphNodeKind.Feature, GraphNodeKind.Code]),
+            ("新增商品 CSV 格式", ["CSV", "Product", "商品"],
+                ["addproductcontroller.cs"], [GraphNodeKind.Feature, GraphNodeKind.Code]),
+            ("批次報表寄送內容錯誤", ["Batch", "Report", "報表"],
+                ["batchreportcontroller.cs"], [GraphNodeKind.Feature, GraphNodeKind.Code]),
+            ("覆核後資料沒有更新", ["Confirm", "覆核", "維護"],
+                ["announcementcontroller.cs"], [GraphNodeKind.Feature, GraphNodeKind.Code]),
+            ("關於庫存，給我解釋整個資料流是怎麼運行的？", ["庫存", "Inventory", "Position"],
+                ["inventoryreportcontroller.cs"], [GraphNodeKind.Feature, GraphNodeKind.EntryPoint, GraphNodeKind.Code]),
+            ("會計公報分類資料維護如何讀取 tblRawData？請列出 Controller、主要方法、SQL 與行號。",
+                ["AccountingPurposeCSV", "tblRawData"],
+                ["accountingpurposecsvcontroller.cs"], [GraphNodeKind.Feature, GraphNodeKind.Code, GraphNodeKind.Data]),
+            ("債券交易有哪些功能？", ["債券", "Bond"],
+                ["bondtransactioncontroller.cs"], [GraphNodeKind.Feature, GraphNodeKind.Code]),
+            ("股票交易在哪裡實作？", ["股票", "Stock", "Equity"],
+                ["equitytransactioncontroller.cs"], [GraphNodeKind.Feature, GraphNodeKind.Code]),
+            ("基金交易存檔流程怎麼走？", ["基金", "Fund"],
+                ["alternativefundtransactioncontroller.cs"], [GraphNodeKind.Feature, GraphNodeKind.Code]),
+            ("交割日被哪些程式與資料表使用？", ["SettlementDate", "SettleDate", "ValueDate"],
+                ["transactionmanagerbondcontroller.cs"], [GraphNodeKind.Code, GraphNodeKind.Data]),
+            ("日結批次如何執行？", ["DailyClosing", "EOD", "日結"],
+                ["batchdayend.cs"], [GraphNodeKind.Feature, GraphNodeKind.Code]),
+            ("損益報表使用哪些資料？", ["ProfitLoss", "PnL", "損益"],
+                ["positionprofit_reportkernel.cs"], [GraphNodeKind.Code, GraphNodeKind.Data]),
+            ("交易存檔後為什麼沒有更新部位？", ["Position", "Holding", "Inventory", "部位"],
+                ["positionprocesscontroller.cs", "inventoryreportcontroller.cs"], [GraphNodeKind.Code]),
+            ("修改交割日會影響哪些地方？", ["SettlementDate", "SettleDate", "ValueDate"],
+                ["transactionmanagerbondcontroller.cs"], [GraphNodeKind.Code, GraphNodeKind.Data]),
+            ("整個系統有哪些批次與報表流程？", ["Batch", "Report", "Schedule", "報表"],
+                [], [GraphNodeKind.Feature]),
+            ("登入流程是什麼？", ["AccountController", "ProcessLogin", "LoginAndPassword"],
+                ["loginandpassword.cs"],
+                [GraphNodeKind.Code]),
+        ];
+
+        var matched = 0;
+        var relevantFileMatched = 0;
+        var coldDurations = new List<double>();
+        foreach (var item in golden)
+        {
+            var context = await retrieval.LocalSearchAsync(projectId, item.Question);
+            var searchable = string.Join(' ', context.Nodes.Select(node =>
+                $"{node.Node.Name} {node.Node.SearchableText} {node.Node.FilePath} " +
+                $"{string.Join(' ', node.Node.Aliases)}"));
+            if (item.Question.StartsWith("登入流程", StringComparison.Ordinal))
+            {
+                Assert.Contains(
+                    context.Nodes,
+                    value => string.Equals(
+                        value.Node.FilePath,
+                        "loginandpassword/loginandpassword.cs",
+                        StringComparison.OrdinalIgnoreCase));
+            }
+            if (context.Nodes.Count > 0 && item.ExpectedTerms.Any(term =>
+                    searchable.Contains(term, StringComparison.OrdinalIgnoreCase)))
+                matched++;
+            Assert.All(item.RequiredKinds, kind => Assert.Contains(
+                context.Nodes, value => value.Node.Kind == kind));
+            var coldClock = Stopwatch.StartNew();
+            var prompt = await retrieval.BuildAnswerPromptAsync(
+                projectId, root, item.Question);
+            coldClock.Stop();
+            coldDurations.Add(coldClock.Elapsed.TotalMilliseconds);
+            if (item.Question.StartsWith("登入流程", StringComparison.Ordinal))
+            {
+                Assert.Contains(
+                    "## loginandpassword/loginandpassword.cs",
+                    prompt,
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            Console.WriteLine(string.Join(" | ", prompt.Split('\n')
+                .Where(line => line.Contains("## ", StringComparison.Ordinal) &&
+                               line.Contains(':', StringComparison.Ordinal))
+                .Take(12)));
+            Assert.True(
+                prompt.Contains("# GraphRAG context", StringComparison.Ordinal) ||
+                prompt.Contains("# GraphRAG 社群摘要", StringComparison.Ordinal),
+                $"[{item.Question}] 沒有 Graph 或 Community context。");
+            if (item.ExpectedFiles.Length == 0 ||
+                item.ExpectedFiles.Any(file =>
+                    prompt.Contains(file, StringComparison.OrdinalIgnoreCase)))
+                relevantFileMatched++;
+            Assert.True(prompt.Length <= 25_000,
+                $"[{item.Question}] prompt 長度 {prompt.Length} 超過安全預算。");
+            Console.WriteLine(
+                $"FBL live question={item.Question}, nodes={context.Nodes.Count}, " +
+                $"edges={context.Edges.Count}, prompt={prompt.Length}");
+        }
+        var minimumRecallCount = (int)Math.Ceiling(golden.Length * 0.8);
+        Assert.True(matched >= minimumRecallCount,
+            $"{golden.Length} 題只有 {matched} 題命中預期領域詞，低於 80% Recall。");
+        Assert.True(relevantFileMatched >= minimumRecallCount,
+            $"{golden.Length} 題只有 {relevantFileMatched} 題引用 Golden 相關檔案，低於 80% Recall。");
+
+        // 先暖機，再以十五題輪詢至至少一百次。此計時涵蓋 Graph、Source Reader、
+        // Roslyn member 展開、fallback 與 Context Compiler，但不包含模型生成。
+        foreach (var item in golden)
+            await retrieval.BuildAnswerPromptAsync(projectId, root, item.Question);
+        var durations = new List<double>();
+        for (var index = 0; index < 105; index++)
+        {
+            var clock = Stopwatch.StartNew();
+            await retrieval.BuildAnswerPromptAsync(
+                projectId, root, golden[index % golden.Length].Question);
+            clock.Stop();
+            durations.Add(clock.Elapsed.TotalMilliseconds);
+        }
+        durations.Sort();
+        var p95 = durations[(int)Math.Ceiling(durations.Count * 0.95) - 1];
+        Console.WriteLine(
+            $"FBL cold retrieval max={coldDurations.Max():F1}ms, " +
+            $"warm full-context P95={p95:F1}ms, samples={durations.Count}");
+        Assert.True(p95 < 2_000, $"Warm retrieval P95 {p95:F1}ms 超過 2 秒。");
+    }
+
+    /// <summary>
+    /// 建立不含 Menu／功能 metadata 的最小 SQLite schema，
+    /// 供資料庫指紋與 Feature 健康診斷測試使用。
+    /// </summary>
+    /// <param name="databasePath">測試資料庫的完整路徑。</param>
+    private static async Task CreateSqliteSchemaAsync(string databasePath)
+    {
+        await using var connection = new SqliteConnection(
+            new SqliteConnectionStringBuilder
+            {
+                DataSource = databasePath,
+                Pooling = false,
+            }.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            "CREATE TABLE orders(id INTEGER PRIMARY KEY, settlement_date TEXT);";
+        await command.ExecuteNonQueryAsync();
     }
 
     private CSharpFixture CreateCSharpAndSqlFixture()
@@ -1352,7 +1677,7 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
     private sealed class FixtureExtractor : IGraphExtractor
     {
         public string Id => "fixture-v3";
-        public string Version => "1.0.0";
+        public string Version { get; set; } = "1.0.0";
         public IReadOnlyList<string> LastFiles { get; private set; } = [];
 
         public Task<GraphFragment> ExtractAsync(
