@@ -1,3 +1,4 @@
+using AgentService.Host.RestEndpoints;
 using AgentService.Infrastructure.Persistence;
 using AgentService.Modules.GraphRAG;
 
@@ -47,4 +48,17 @@ public sealed class ReadOnlyGraphAndDatabasePathV3Tests
             DatabasePathResolver.GetProductionDatabasePath(),
             StringComparison.OrdinalIgnoreCase);
     }
+
+    [Theory]
+    [InlineData("manifest-v3", "manifest-v3", true)]
+    [InlineData("manifest-v3", null, false)]
+    [InlineData("manifest-v3", "older-manifest", false)]
+    [InlineData(null, "manifest-v3", false)]
+    public void KnowledgeGraph_RequiresMatchingSqliteAndNeo4jManifest(
+        string? projectManifest,
+        string? activeManifest,
+        bool expected) =>
+        Assert.Equal(
+            expected,
+            ProjectEndpoints.HasMatchingGraphManifest(projectManifest, activeManifest));
 }

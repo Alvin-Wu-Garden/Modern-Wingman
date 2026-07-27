@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -63,7 +64,11 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<Neo4jRuntime> _logger;
     private readonly SemaphoreSlim _startGate = new(1, 1);
+    private readonly int _agentProcessId = Environment.ProcessId;
+    private readonly long _agentProcessStartTimeUtcTicks =
+        GetProcessStartTimeUtcTicks(Environment.ProcessId);
     private Process? _process;
+    private bool _ownsManagedProcess;
 
     /// <summary>建立 managed/external/disabled runtime。</summary>
     public Neo4jRuntime(
@@ -141,6 +146,15 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
                 return false;
             if (!IsPortAvailable(address, port))
             {
+                // Agent Service 被強制關閉時，Windows 不保證連帶結束由 bat 啟動的
+                // Neo4j 子程序。只有 ownership 檔能同時對上 endpoint、launcher PID
+                // 與 process start time 時才允許沿用，避免把任意外部資料庫誤認成內建服務。
+                if (await TryUseRecordedManagedProcessAsync(
+                        address,
+                        port,
+                        cancellationToken))
+                    return true;
+
                 Status = "port-conflict";
                 LastError =
                     $"Wingman 管理的 Neo4j 連接埠 {address}:{port} 已被其他程序占用；" +
@@ -402,6 +416,26 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
                 Path.GetDirectoryName(Path.GetDirectoryName(java))!;
             _process = Process.Start(start);
             if (_process is null) return false;
+            _ownsManagedProcess = true;
+            try
+            {
+                WriteManagedOwnership(home, _process);
+            }
+            catch (Exception exception)
+            {
+                // 沒有 ownership 記錄就無法在下一次啟動安全辨識此程序，
+                // 因此立即收回剛啟動的 process tree，不留下新的 port conflict。
+                _logger.LogWarning(
+                    "無法寫入 Neo4j managed ownership。ExceptionType={ExceptionType}",
+                    exception.GetType().Name);
+                _process.Kill(entireProcessTree: true);
+                await _process.WaitForExitAsync(CancellationToken.None);
+                _process.Dispose();
+                _process = null;
+                _ownsManagedProcess = false;
+                LastError = "無法建立 Neo4j managed ownership 記錄。";
+                return false;
+            }
             _process.OutputDataReceived += (_, args) =>
             {
                 if (!string.IsNullOrWhiteSpace(args.Data))
@@ -447,6 +481,213 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
             return false;
         }
     }
+
+    /// <summary>
+    /// 只沿用 ownership 檔明確記錄的 Wingman Neo4j。
+    /// 若原 Agent Service 還活著，本 instance 只共用連線、不取得關閉權；
+    /// 若原 owner 已結束，則接管 launcher，讓本 instance 結束時能完整回收 process tree。
+    /// </summary>
+    private async Task<bool> TryUseRecordedManagedProcessAsync(
+        IPAddress address,
+        int port,
+        CancellationToken cancellationToken)
+    {
+        var ownership = ReadManagedOwnership();
+        if (ownership is null ||
+            !string.Equals(
+                ownership.Endpoint,
+                ManagedEndpointKey(address, port),
+                StringComparison.OrdinalIgnoreCase) ||
+            !IsWithinRuntimeRoot(ownership.Home) ||
+            !TryGetMatchingProcess(
+                ownership.LauncherProcessId,
+                ownership.LauncherProcessStartTimeUtcTicks,
+                out var launcher))
+            return false;
+
+        if (!await _store.PingAsync(cancellationToken))
+        {
+            launcher.Dispose();
+            return false;
+        }
+
+        await _store.EnsureSchemaAsync(cancellationToken);
+        if (IsCurrentAgent(ownership) ||
+            !IsMatchingProcess(
+                ownership.OwnerProcessId,
+                ownership.OwnerProcessStartTimeUtcTicks))
+        {
+            // 原 owner 已不存在時，由目前 Agent Service 成為唯一 lifecycle owner。
+            _process = launcher;
+            _ownsManagedProcess = true;
+            WriteManagedOwnership(ownership.Home, launcher);
+            _logger.LogInformation(
+                "已安全接管先前由 Wingman 啟動的 Neo4j managed process。");
+        }
+        else
+        {
+            // 另一個仍存活的 Wingman instance 負責關閉 Neo4j；
+            // 此 instance 不持有 process，避免任一桌面視窗關閉時中斷其他 instance。
+            launcher.Dispose();
+            _process = null;
+            _ownsManagedProcess = false;
+            _logger.LogInformation(
+                "已共用另一個 Wingman instance 管理中的 Neo4j process。");
+        }
+
+        Status = "running";
+        LastError = null;
+        return true;
+    }
+
+    /// <summary>以 PID 與啟動時間雙重比對，避免 Windows 重用舊 PID 後誤接管程序。</summary>
+    private static bool TryGetMatchingProcess(
+        int processId,
+        long processStartTimeUtcTicks,
+        out Process process)
+    {
+        process = null!;
+        try
+        {
+            var candidate = Process.GetProcessById(processId);
+            if (candidate.HasExited ||
+                candidate.StartTime.ToUniversalTime().Ticks != processStartTimeUtcTicks)
+            {
+                candidate.Dispose();
+                return false;
+            }
+            process = candidate;
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>判斷指定 PID／啟動時間的 process 是否仍是同一個存活程序。</summary>
+    private static bool IsMatchingProcess(
+        int processId,
+        long processStartTimeUtcTicks)
+    {
+        if (!TryGetMatchingProcess(
+                processId,
+                processStartTimeUtcTicks,
+                out var process))
+            return false;
+        process.Dispose();
+        return true;
+    }
+
+    /// <summary>讀取 process 啟動時間並立即釋放查詢 handle。</summary>
+    private static long GetProcessStartTimeUtcTicks(int processId)
+    {
+        using var process = Process.GetProcessById(processId);
+        return process.StartTime.ToUniversalTime().Ticks;
+    }
+
+    private bool IsCurrentAgent(ManagedProcessOwnership ownership) =>
+        ownership.OwnerProcessId == _agentProcessId &&
+        ownership.OwnerProcessStartTimeUtcTicks == _agentProcessStartTimeUtcTicks;
+
+    /// <summary>寫入不含帳密的原子 ownership 記錄，供 Agent Service 重啟後安全辨識。</summary>
+    private void WriteManagedOwnership(string home, Process launcher)
+    {
+        Directory.CreateDirectory(RuntimeRoot);
+        var ownership = new ManagedProcessOwnership(
+            ManagedEndpointKey(),
+            Path.GetFullPath(home),
+            _agentProcessId,
+            _agentProcessStartTimeUtcTicks,
+            launcher.Id,
+            launcher.StartTime.ToUniversalTime().Ticks);
+        var temporary = $"{ManagedOwnershipPath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(
+                temporary,
+                JsonSerializer.Serialize(ownership),
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.Move(temporary, ManagedOwnershipPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary))
+                File.Delete(temporary);
+        }
+    }
+
+    /// <summary>讀取 ownership；檔案損壞時只拒絕接管，不放寬 managed 安全邊界。</summary>
+    private ManagedProcessOwnership? ReadManagedOwnership()
+    {
+        try
+        {
+            return File.Exists(ManagedOwnershipPath)
+                ? JsonSerializer.Deserialize<ManagedProcessOwnership>(
+                    File.ReadAllText(ManagedOwnershipPath, Encoding.UTF8))
+                : null;
+        }
+        catch (JsonException exception)
+        {
+            _logger.LogWarning(
+                "Neo4j managed ownership 格式無效。ExceptionType={ExceptionType}",
+                exception.GetType().Name);
+            return null;
+        }
+        catch (IOException exception)
+        {
+            _logger.LogWarning(
+                "無法讀取 Neo4j managed ownership。ExceptionType={ExceptionType}",
+                exception.GetType().Name);
+            return null;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            _logger.LogWarning(
+                "沒有權限讀取 Neo4j managed ownership。ExceptionType={ExceptionType}",
+                exception.GetType().Name);
+            return null;
+        }
+    }
+
+    /// <summary>只接受位於 Wingman runtime root 內的 Neo4j home。</summary>
+    private static bool IsWithinRuntimeRoot(string path)
+    {
+        try
+        {
+            var root = Path.GetFullPath(RuntimeRoot)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                Path.DirectorySeparatorChar;
+            var candidate = Path.GetFullPath(path)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                Path.DirectorySeparatorChar;
+            return candidate.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    private string ManagedEndpointKey()
+    {
+        if (!TryGetManagedEndpoint(out var address, out var port))
+            throw new InvalidOperationException(
+                "無法為無效的 managed Neo4j URI 建立 ownership。");
+        return ManagedEndpointKey(address, port);
+    }
+
+    private static string ManagedEndpointKey(IPAddress address, int port) =>
+        $"{address}:{port}";
 
     private async Task<bool> VerifyManagedProcessAsync(
         CancellationToken cancellationToken)
@@ -539,10 +780,13 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
         ".wingman",
         "neo4j");
 
+    private static string ManagedOwnershipPath =>
+        Path.Combine(RuntimeRoot, "managed-v3-owner.json");
+
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
-        if (_process is { HasExited: false })
+        if (_ownsManagedProcess && _process is { HasExited: false })
         {
             try
             {
@@ -558,8 +802,36 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
                 // App 結束時是 best effort；OS 最終仍會回收 child process。
             }
         }
+        DeleteManagedOwnershipIfOwned();
         _process?.Dispose();
         _startGate.Dispose();
+    }
+
+    /// <summary>
+    /// 只刪除仍由目前 Agent Service 持有的 ownership，
+    /// 避免較舊 instance 關閉時移除較新 instance 已接管的記錄。
+    /// </summary>
+    private void DeleteManagedOwnershipIfOwned()
+    {
+        var ownership = ReadManagedOwnership();
+        if (ownership is null || !IsCurrentAgent(ownership))
+            return;
+        try
+        {
+            File.Delete(ManagedOwnershipPath);
+        }
+        catch (IOException exception)
+        {
+            _logger.LogWarning(
+                "無法移除 Neo4j managed ownership。ExceptionType={ExceptionType}",
+                exception.GetType().Name);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            _logger.LogWarning(
+                "沒有權限移除 Neo4j managed ownership。ExceptionType={ExceptionType}",
+                exception.GetType().Name);
+        }
     }
 
     /// <summary>
@@ -584,6 +856,18 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
             address,
             port);
     }
+
+    /// <summary>
+    /// managed Neo4j 的跨 Agent Service 生命週期記錄。
+    /// 僅保存 endpoint、安裝路徑與 process identity，絕不保存 Neo4j 帳密。
+    /// </summary>
+    private sealed record ManagedProcessOwnership(
+        string Endpoint,
+        string Home,
+        int OwnerProcessId,
+        long OwnerProcessStartTimeUtcTicks,
+        int LauncherProcessId,
+        long LauncherProcessStartTimeUtcTicks);
 }
 
 /// <summary>

@@ -67,8 +67,19 @@ interface GraphContextMenu {
   node: GraphNode
 }
 
+interface CanvasTheme {
+  background: string
+  labelBackground: string
+  labelText: string
+  nodeStroke: string
+  isDark: boolean
+}
+
+type GraphOperation = 'load' | 'query'
+
 const DEFAULT_LIMIT = 1000
-const LIMITS = [1000, 2000, 5000, 10000]
+// 後端目前最多只接受 5,000 個節點，前端選項必須保持相同上限。
+const LIMITS = [1000, 2000, 5000]
 const NODE_PALETTE = ['#52D1DC', '#7C8CFF', '#30DAA2', '#FFC94F', '#FF7A90', '#B48CFF', '#FF9F43', '#8FE388']
 const REL_PALETTE = ['#67E8F9', '#A7F3D0', '#FDE68A', '#F9A8D4', '#C4B5FD', '#FDBA74']
 const VIEW_TABS: { value: ViewMode; icon: LucideIcon; label: string }[] = [
@@ -78,7 +89,7 @@ const VIEW_TABS: { value: ViewMode; icon: LucideIcon; label: string }[] = [
 ]
 
 const DEFAULT_QUERY = `MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})
-OPTIONAL MATCH (n)-[r]->(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})
+OPTIONAL MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})-[r]->(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})
 RETURN n, r, m
 LIMIT $limit`
 
@@ -129,12 +140,33 @@ function saveStyles(projectId: string, styles: GraphStyleSettings) {
   localStorage.setItem(styleKey(projectId), JSON.stringify(styles))
 }
 
+function readCanvasTheme(): CanvasTheme {
+  const root = document.documentElement
+  const computed = getComputedStyle(root)
+  const readToken = (name: string, fallback: string) => (
+    computed.getPropertyValue(name).trim() || fallback
+  )
+
+  return {
+    background: readToken('--color-surface-alt', '#EEF0F0'),
+    labelBackground: readToken('--color-surface', '#FFFFFF'),
+    labelText: readToken('--color-ink', '#0C0E1F'),
+    nodeStroke: readToken('--color-ink-secondary', '#494A57'),
+    isDark: root.dataset.theme === 'dark' || root.dataset.theme === 'glass',
+  }
+}
+
 function mergeGraphData(base: CodeGraphVisualData | null, incoming: CodeGraphVisualData): CodeGraphVisualData {
   if (!base) return incoming
 
   const nodes = new Map(base.nodes.map((node) => [node.id, node]))
   const edges = new Map(base.edges.map((edge) => [edge.id, edge]))
-  incoming.nodes.forEach((node) => nodes.set(node.id, node))
+  incoming.nodes.forEach((node) => {
+    const existing = nodes.get(node.id)
+    nodes.set(node.id, existing
+      ? { ...node, degree: Math.max(existing.degree, node.degree) }
+      : node)
+  })
   incoming.edges.forEach((edge) => edges.set(edge.id, edge))
 
   return {
@@ -152,6 +184,37 @@ function endpointId(endpoint: string | number | { id?: string | number } | null 
   return String(endpoint)
 }
 
+function cleanGraphData(data: CodeGraphVisualData | null): CodeGraphVisualData | null {
+  if (!data) return null
+
+  return {
+    nodes: data.nodes.map((node) => ({
+      id: node.id,
+      kind: node.kind,
+      role: node.role,
+      name: node.name,
+      filePath: node.filePath,
+      startLine: node.startLine,
+      endLine: node.endLine,
+      language: node.language,
+      degree: node.degree,
+      properties: node.properties,
+    })),
+    edges: data.edges.map((edge) => ({
+      id: edge.id,
+      // ForceGraph 會把 source/target 原地換成節點物件；匯出前固定轉回 API 的 id。
+      source: endpointId(edge.source),
+      target: endpointId(edge.target),
+      type: edge.type,
+      properties: edge.properties,
+    })),
+    totalNodes: data.totalNodes,
+    loadedNodes: data.loadedNodes,
+    loadedEdges: data.loadedEdges,
+    hasMore: data.hasMore,
+  }
+}
+
 function hexToRgba(hex: string, alpha: number) {
   const normalized = hex.replace('#', '')
   const full = normalized.length === 3
@@ -162,6 +225,16 @@ function hexToRgba(hex: string, alpha: number) {
   const g = (value >> 8) & 255
   const b = value & 255
   return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
+function darkenHex(hex: string, factor: number) {
+  const normalized = hex.replace('#', '')
+  const full = normalized.length === 3
+    ? normalized.split('').map((char) => `${char}${char}`).join('')
+    : normalized
+  const value = Number.parseInt(full, 16)
+  const channel = (shift: number) => Math.round(((value >> shift) & 255) * factor)
+  return `rgb(${channel(16)}, ${channel(8)}, ${channel(0)})`
 }
 
 function renderValue(value: unknown) {
@@ -195,6 +268,7 @@ function downloadText(filename: string, content: string, type: string) {
 export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps) {
   const graphRef = useRef<ForceGraphMethods<GraphNode, GraphLink> | undefined>(undefined)
   const canvasWrapRef = useRef<HTMLDivElement>(null)
+  const graphRequestGenerationRef = useRef(0)
   const [canvasSize, setCanvasSize] = useState({ width: 900, height: 640 })
   const [schema, setSchema] = useState<CodeGraphSchema | null>(null)
   const [graph, setGraph] = useState<CodeGraphVisualData | null>(null)
@@ -210,9 +284,38 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   const [selectedKinds, setSelectedKinds] = useState<string[]>([])
   const [selectedRelations, setSelectedRelations] = useState<string[]>([])
   const [styles, setStyles] = useState<GraphStyleSettings>(() => defaultStyles())
-  const [loading, setLoading] = useState(false)
-  const [querying, setQuerying] = useState(false)
+  const [canvasTheme, setCanvasTheme] = useState<CanvasTheme>(() => readCanvasTheme())
+  const [activeGraphOperation, setActiveGraphOperation] = useState<GraphOperation | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const loading = activeGraphOperation === 'load'
+  const querying = activeGraphOperation === 'query'
+
+  const loadGraph = useCallback(async () => {
+    // 篩選、Cypher、展開共用同一代數，避免不同操作的舊回應覆蓋最新畫面。
+    const requestGeneration = ++graphRequestGenerationRef.current
+    setActiveGraphOperation('load')
+    setError(null)
+    try {
+      const nextGraph = await getProjectGraph(project.id, {
+        limit,
+        kinds: selectedKinds,
+        relations: selectedRelations,
+      })
+      if (requestGeneration !== graphRequestGenerationRef.current) return
+      setGraph(nextGraph)
+      setQueryResult(null)
+      setSelectedNode(null)
+      setSelectedLink(null)
+      setContextMenu(null)
+      setViewMode('graph')
+      setTimeout(() => graphRef.current?.zoomToFit(700, 64), 120)
+    } catch (err) {
+      if (requestGeneration !== graphRequestGenerationRef.current) return
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      if (requestGeneration === graphRequestGenerationRef.current) setActiveGraphOperation(null)
+    }
+  }, [limit, project.id, selectedKinds, selectedRelations])
 
   useEffect(() => {
     const node = canvasWrapRef.current
@@ -220,8 +323,9 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     const observer = new ResizeObserver(([entry]) => {
       if (!entry) return
       setCanvasSize({
-        width: Math.max(320, Math.floor(entry.contentRect.width)),
-        height: Math.max(320, Math.floor(entry.contentRect.height)),
+        // Canvas 尺寸不得大於父層，否則 Windows 最小視窗寬度時會被左右裁切。
+        width: Math.max(1, Math.floor(entry.contentRect.width)),
+        height: Math.max(1, Math.floor(entry.contentRect.height)),
       })
     })
     observer.observe(node)
@@ -240,25 +344,40 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   }, [contextMenu, onClose])
 
   useEffect(() => {
+    // AppProviders 會透過 html[data-theme] 切換主題；Canvas 不會自動解析
+    // Tailwind class，因此在屬性變更時重新讀取同一組全域設計 token。
+    const html = document.documentElement
+    const syncCanvasTheme = () => setCanvasTheme(readCanvasTheme())
+    const observer = new MutationObserver(syncCanvasTheme)
+    observer.observe(html, { attributes: true, attributeFilter: ['data-theme'] })
+    syncCanvasTheme()
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
     const load = async () => {
-      setLoading(true)
       setError(null)
       try {
         const nextSchema = await getProjectGraphSchema(project.id)
         setSchema(nextSchema)
         const nextStyles = loadStyles(project.id, nextSchema)
         setStyles(nextStyles)
-        const nextGraph = await getProjectGraph(project.id, { limit })
-        setGraph(nextGraph)
-        setTimeout(() => graphRef.current?.zoomToFit(700, 64), 120)
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
-      } finally {
-        setLoading(false)
       }
     }
     void load()
-  }, [project.id, limit])
+  }, [project.id])
+
+  useEffect(() => {
+    // 種類、關係與載入上限都屬於即時篩選條件；任一條件改變便重抓圖譜，
+    // 避免 UI 顯示已選取條件，Canvas 卻仍停留在舊資料。
+    void loadGraph()
+    return () => {
+      // 條件切換或頁面卸載時，讓尚未完成的舊回應失效。
+      graphRequestGenerationRef.current += 1
+    }
+  }, [loadGraph])
 
   useEffect(() => {
     if (!schema) return
@@ -266,8 +385,14 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   }, [project.id, schema, styles])
 
   const graphData = useMemo(() => ({
-    nodes: (graph?.nodes ?? []) as GraphNode[],
-    links: (graph?.edges ?? []) as GraphLink[],
+    // D3 會在節點加入座標並將 edge 端點換成物件，因此提供獨立 view-model，
+    // 確保 React state 仍維持後端 API 的乾淨資料結構。
+    nodes: (graph?.nodes ?? []).map((node) => ({ ...node })) as GraphNode[],
+    links: (graph?.edges ?? []).map((edge) => ({
+      ...edge,
+      source: endpointId(edge.source),
+      target: endpointId(edge.target),
+    })) as GraphLink[],
   }), [graph])
 
   useEffect(() => {
@@ -309,45 +434,33 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     styles.relationColors[link.type] ?? '#94A3B8'
   ), [styles.relationColors])
 
-  const loadGraph = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const nextGraph = await getProjectGraph(project.id, {
-        limit,
-        kinds: selectedKinds,
-        relations: selectedRelations,
-      })
-      setGraph(nextGraph)
-      setSelectedNode(null)
-      setSelectedLink(null)
-      setTimeout(() => graphRef.current?.zoomToFit(700, 64), 120)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
-    }
-  }, [limit, project.id, selectedKinds, selectedRelations])
-
   const runQuery = useCallback(async () => {
-    setQuerying(true)
+    const requestGeneration = ++graphRequestGenerationRef.current
+    setActiveGraphOperation('query')
     setError(null)
     try {
       const result = await queryProjectGraph(project.id, queryText, limit)
+      if (requestGeneration !== graphRequestGenerationRef.current) return
       setQueryResult(result)
-      setGraph((current) => mergeGraphData(current, result.graph))
+      // 手動 Cypher 是一個新的檢視結果，不能殘留先前圖譜；只有「展開」才合併節點。
+      setGraph(result.graph)
+      setSelectedNode(null)
+      setSelectedLink(null)
+      setContextMenu(null)
       setViewMode(result.graph.nodes.length > 0 ? 'graph' : 'table')
       setTimeout(() => graphRef.current?.zoomToFit(700, 64), 120)
     } catch (err) {
+      if (requestGeneration !== graphRequestGenerationRef.current) return
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setQuerying(false)
+      if (requestGeneration === graphRequestGenerationRef.current) setActiveGraphOperation(null)
     }
   }, [limit, project.id, queryText])
 
   const expandNodes = useCallback(async (mode: ExpandMode, node = selectedNode) => {
     if (!node) return
-    setLoading(true)
+    const requestGeneration = ++graphRequestGenerationRef.current
+    setActiveGraphOperation('load')
     setError(null)
     try {
       const nextGraph = await expandProjectGraphNeighbors(project.id, [node.id], {
@@ -355,25 +468,30 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
         limit,
         mode,
       })
+      if (requestGeneration !== graphRequestGenerationRef.current) return
       setGraph((current) => mergeGraphData(current, nextGraph))
+      setQueryResult(null)
       setContextMenu(null)
+      setViewMode('graph')
       setTimeout(() => graphRef.current?.zoomToFit(500, 64), 80)
     } catch (err) {
+      if (requestGeneration !== graphRequestGenerationRef.current) return
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setLoading(false)
+      if (requestGeneration === graphRequestGenerationRef.current) setActiveGraphOperation(null)
     }
   }, [limit, project.id, selectedNode])
 
   const searchNode = useCallback(() => {
     const keyword = searchText.trim().toLowerCase()
-    if (!keyword || !graph) return
-    const found = graph.nodes.find((node) => (
+    if (!keyword) return
+    // 搜尋 ForceGraph 的 view-model，才能取得模擬完成後的 x/y 並正確置中。
+    const found = graphData.nodes.find((node) => (
       node.name.toLowerCase().includes(keyword) ||
       node.id.toLowerCase().includes(keyword) ||
       node.role.toLowerCase().includes(keyword) ||
       (node.filePath?.toLowerCase().includes(keyword) ?? false)
-    )) as GraphNode | undefined
+    ))
     if (!found) {
       setError('目前載入的圖譜中找不到符合節點。')
       return
@@ -384,7 +502,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       graphRef.current?.centerAt(found.x, found.y, 700)
       graphRef.current?.zoom(3.4, 700)
     }
-  }, [graph, searchText])
+  }, [graphData.nodes, searchText])
 
   const drawNode = useCallback((
     node: NodeObject<GraphNode>,
@@ -424,7 +542,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
 
     ctx.shadowBlur = 0
     ctx.lineWidth = selected ? 2.2 / globalScale : 1.2 / globalScale
-    ctx.strokeStyle = selected ? '#ffffff' : 'rgba(255,255,255,0.72)'
+    ctx.strokeStyle = selected ? canvasTheme.labelText : canvasTheme.nodeStroke
     ctx.stroke()
 
     const labelZoomThreshold = graphData.nodes.length > 2500
@@ -446,14 +564,16 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       const text = label.length > 34 ? `${label.slice(0, 31)}...` : label
       const metrics = ctx.measureText(text)
       const textY = y + radius + 4 / globalScale
-      ctx.fillStyle = 'rgba(5,10,18,0.76)'
+      ctx.globalAlpha = dimmed ? 0.2 : 0.92
+      ctx.fillStyle = canvasTheme.labelBackground
       ctx.fillRect(x - metrics.width / 2 - 5 / globalScale, textY - 2 / globalScale, metrics.width + 10 / globalScale, fontSize + 5 / globalScale)
-      ctx.fillStyle = 'rgba(255,255,255,0.92)'
+      ctx.globalAlpha = dimmed ? 0.2 : 1
+      ctx.fillStyle = canvasTheme.labelText
       ctx.fillText(text, x, textY)
     }
 
     ctx.restore()
-  }, [hoverNode, nodeColor, selectedNeighborIds, selectedNode, styles.caption, styles.halo])
+  }, [canvasTheme, graphData.nodes.length, hoverNode, nodeColor, selectedNeighborIds, selectedNode, styles.caption, styles.halo])
 
   const paintNodePointer = useCallback((
     node: NodeObject<GraphNode>,
@@ -485,7 +605,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   const exportJson = () => {
     downloadText(
       `${project.name}-knowledge-graph.json`,
-      JSON.stringify({ project, schema, graph, queryResult }, null, 2),
+      JSON.stringify({ project, schema, graph: cleanGraphData(graph) }, null, 2),
       'application/json',
     )
   }
@@ -518,21 +638,24 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   const queryRows = queryResult?.rows ?? []
 
   return (
-    <div className="fixed inset-0 z-[80] flex flex-col bg-[#070B12] text-white">
-      <div className="h-14 shrink-0 border-b border-white/10 bg-[#0B101A] px-4 flex items-center gap-3">
-        <div className="h-9 w-9 rounded-lg bg-cyan-400/12 border border-cyan-300/30 flex items-center justify-center">
-          <Network className="w-4 h-4 text-cyan-200" />
+    <div
+      className="fixed inset-0 z-[80] flex flex-col bg-surface-alt text-ink"
+      data-knowledge-graph-page
+    >
+      <div className="h-14 shrink-0 border-b border-border bg-surface px-4 flex items-center gap-3" data-glass-panel>
+        <div className="h-9 w-9 rounded-lg bg-brand/12 border border-brand/30 flex items-center justify-center">
+          <Network className="w-4 h-4 text-brand" />
         </div>
         <div className="min-w-0">
           <h1 className="text-sm font-semibold truncate">{project.name}</h1>
-          <p className="text-[11px] text-white/45 font-mono truncate">{project.rootPath}</p>
+          <p className="text-[11px] text-ink-subtle font-mono truncate">{project.rootPath}</p>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={loadGraph}>
+          <Button variant="ghost" size="sm" className="whitespace-nowrap" onClick={loadGraph}>
             <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
             重新載入
           </Button>
-          <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={() => graphRef.current?.zoomToFit(650, 72)}>
+          <Button variant="ghost" size="sm" className="whitespace-nowrap" onClick={() => graphRef.current?.zoomToFit(650, 72)}>
             <Maximize2 className="w-3.5 h-3.5" />
             Fit
           </Button>
@@ -540,7 +663,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
             type="button"
             onClick={onClose}
             title="關閉"
-            className="h-9 w-9 rounded-lg text-white/65 hover:text-white hover:bg-white/10 transition-colors flex items-center justify-center"
+            className="h-9 w-9 rounded-lg text-ink-secondary hover:text-ink hover:bg-surface-alt transition-colors flex items-center justify-center"
           >
             <X className="w-5 h-5" />
           </button>
@@ -548,36 +671,36 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       </div>
 
       {error && (
-        <div className="mx-4 mt-3 shrink-0 rounded-lg border border-red-300/30 bg-red-500/10 px-3 py-2 text-sm text-red-100 flex items-center justify-between">
+        <div className="mx-4 mt-3 shrink-0 rounded-lg border border-error/30 bg-error/10 px-3 py-2 text-sm text-error flex items-center justify-between">
           <span className="truncate">{error}</span>
-          <button type="button" onClick={() => setError(null)} className="text-red-100/70 hover:text-red-50">
+          <button type="button" onClick={() => setError(null)} className="text-error/70 hover:text-error">
             <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
-      <div className="min-h-0 flex-1 grid grid-cols-[288px_minmax(0,1fr)_360px]">
-        <aside className="min-h-0 border-r border-white/10 bg-[#0B101A] overflow-y-auto">
+      <div className="min-h-0 flex-1 grid grid-cols-[clamp(220px,20vw,288px)_minmax(0,1fr)_clamp(280px,25vw,360px)]">
+        <aside className="min-h-0 border-r border-border bg-surface overflow-y-auto">
           <div className="p-4 space-y-4">
             <section className="space-y-2">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-white/50">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-ink-secondary">
                 <Database className="w-3.5 h-3.5" />
                 Schema
               </div>
               <div className="grid grid-cols-2 gap-2">
-                <div className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2">
-                  <p className="text-[10px] text-white/45">Nodes</p>
+                <div className="rounded-lg border border-border bg-surface-alt px-3 py-2">
+                  <p className="text-[10px] text-ink-subtle">Nodes</p>
                   <p className="text-lg font-semibold">{schema?.totalNodes ?? graph?.totalNodes ?? 0}</p>
                 </div>
-                <div className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2">
-                  <p className="text-[10px] text-white/45">Edges</p>
+                <div className="rounded-lg border border-border bg-surface-alt px-3 py-2">
+                  <p className="text-[10px] text-ink-subtle">Edges</p>
                   <p className="text-lg font-semibold">{schema?.totalEdges ?? graph?.loadedEdges ?? 0}</p>
                 </div>
               </div>
             </section>
 
             <section className="space-y-2">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-white/50">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-ink-secondary">
                 <Filter className="w-3.5 h-3.5" />
                 Nodes
               </div>
@@ -586,7 +709,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                 onClick={() => setSelectedKinds([])}
                 className={cn(
                   'w-full rounded-lg px-3 py-1.5 text-left text-xs transition-colors',
-                  selectedKinds.length === 0 ? 'bg-cyan-400/15 text-cyan-100' : 'text-white/55 hover:bg-white/7',
+                  selectedKinds.length === 0 ? 'bg-brand/15 text-brand' : 'text-ink-secondary hover:bg-surface-alt',
                 )}
               >
                 全部
@@ -596,22 +719,24 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                   const color = styles.nodeColors[facet.name] ?? NODE_PALETTE[index % NODE_PALETTE.length]
                   const active = selectedKinds.length === 0 || selectedKinds.includes(facet.name)
                   return (
-                    <div key={facet.name} className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1.5">
+                    <div key={facet.name} className="flex items-center gap-2 rounded-lg border border-border bg-surface-alt px-2 py-1.5">
                       <button
                         type="button"
                         onClick={() => toggleKind(facet.name)}
-                        className={cn('h-3 w-3 rounded-full border border-white/50', active ? 'opacity-100' : 'opacity-30')}
-                        style={{ backgroundColor: color }}
-                        title={facet.name}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleKind(facet.name)}
-                        className={cn('min-w-0 flex-1 text-left text-xs truncate', active ? 'text-white/85' : 'text-white/35')}
+                        aria-pressed={active}
+                        className={cn(
+                          'min-w-0 flex flex-1 items-center gap-2 rounded px-1 py-0.5 text-left text-xs transition-opacity',
+                          active ? 'text-ink opacity-100' : 'text-ink-subtle opacity-55',
+                        )}
                       >
-                        {facet.name}
+                        <span
+                          aria-hidden="true"
+                          className="h-3 w-3 shrink-0 rounded-full border border-border"
+                          style={{ backgroundColor: color }}
+                        />
+                        <span className="min-w-0 flex-1 truncate">{facet.name}</span>
+                        <span className="text-[10px] text-ink-subtle">{facet.count}</span>
                       </button>
-                      <span className="text-[10px] text-white/35">{facet.count}</span>
                       <input
                         type="color"
                         value={color}
@@ -626,7 +751,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
             </section>
 
             <section className="space-y-2">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-white/50">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-ink-secondary">
                 <ChevronDown className="w-3.5 h-3.5" />
                 Relations
               </div>
@@ -635,7 +760,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                 onClick={() => setSelectedRelations([])}
                 className={cn(
                   'w-full rounded-lg px-3 py-1.5 text-left text-xs transition-colors',
-                  selectedRelations.length === 0 ? 'bg-emerald-400/15 text-emerald-100' : 'text-white/55 hover:bg-white/7',
+                  selectedRelations.length === 0 ? 'bg-brand-green/15 text-brand-green' : 'text-ink-secondary hover:bg-surface-alt',
                 )}
               >
                 全部
@@ -645,22 +770,24 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                   const color = styles.relationColors[facet.name] ?? REL_PALETTE[index % REL_PALETTE.length]
                   const active = selectedRelations.length === 0 || selectedRelations.includes(facet.name)
                   return (
-                    <div key={facet.name} className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1.5">
+                    <div key={facet.name} className="flex items-center gap-2 rounded-lg border border-border bg-surface-alt px-2 py-1.5">
                       <button
                         type="button"
                         onClick={() => toggleRelation(facet.name)}
-                        className={cn('h-2.5 w-5 rounded-full border border-white/40', active ? 'opacity-100' : 'opacity-30')}
-                        style={{ backgroundColor: color }}
-                        title={facet.name}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleRelation(facet.name)}
-                        className={cn('min-w-0 flex-1 text-left text-xs truncate', active ? 'text-white/85' : 'text-white/35')}
+                        aria-pressed={active}
+                        className={cn(
+                          'min-w-0 flex flex-1 items-center gap-2 rounded px-1 py-0.5 text-left text-xs transition-opacity',
+                          active ? 'text-ink opacity-100' : 'text-ink-subtle opacity-55',
+                        )}
                       >
-                        {facet.name}
+                        <span
+                          aria-hidden="true"
+                          className="h-2.5 w-5 shrink-0 rounded-full border border-border"
+                          style={{ backgroundColor: color }}
+                        />
+                        <span className="min-w-0 flex-1 truncate">{facet.name}</span>
+                        <span className="text-[10px] text-ink-subtle">{facet.count}</span>
                       </button>
-                      <span className="text-[10px] text-white/35">{facet.count}</span>
                       <input
                         type="color"
                         value={color}
@@ -675,26 +802,26 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
             </section>
 
             <section className="space-y-2">
-              <div className="text-xs font-semibold uppercase tracking-wide text-white/50">Style</div>
-              <label className="block text-[11px] text-white/45">
+              <div className="text-xs font-semibold uppercase tracking-wide text-ink-secondary">Style</div>
+              <label className="block text-[11px] text-ink-secondary">
                 Caption
                 <select
                   value={styles.caption}
                   onChange={(event) => setStyles((current) => ({ ...current, caption: event.target.value as GraphStyleSettings['caption'] }))}
-                  className="mt-1 w-full rounded-lg border border-white/10 bg-[#111827] px-2 py-1.5 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/30"
+                  className="mt-1 w-full rounded-lg border border-border bg-input-bg px-2 py-1.5 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-brand/30"
                 >
                   <option value="name">Name</option>
                   <option value="role">Role</option>
                   <option value="kind">Kind</option>
                 </select>
               </label>
-              <label className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-white/70">
+              <label className="flex items-center justify-between rounded-lg border border-border bg-surface-alt px-3 py-2 text-xs text-ink-secondary">
                 Halo
                 <input
                   type="checkbox"
                   checked={styles.halo}
                   onChange={(event) => setStyles((current) => ({ ...current, halo: event.target.checked }))}
-                  className="h-4 w-4 accent-cyan-300"
+                  className="h-4 w-4 accent-brand"
                 />
               </label>
             </section>
@@ -702,50 +829,46 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
         </aside>
 
         <main className="min-w-0 min-h-0 flex flex-col">
-          <div className="h-12 shrink-0 border-b border-white/10 bg-[#080D15] px-3 flex items-center gap-2">
-            <div className="relative w-72">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/35" />
+          <div className="min-h-12 shrink-0 overflow-x-auto border-b border-border bg-surface-alt px-3 py-2 flex items-center gap-2">
+            <div className="relative min-w-40 max-w-72 flex-1">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-ink-subtle" />
               <input
                 value={searchText}
                 onChange={(event) => setSearchText(event.target.value)}
                 onKeyDown={(event) => event.key === 'Enter' && searchNode()}
                 placeholder="搜尋節點"
-                className="h-8 w-full rounded-lg border border-white/10 bg-white/[0.05] pl-8 pr-3 text-xs text-white placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-cyan-300/30"
+                className="h-8 w-full rounded-lg border border-border bg-input-bg pl-8 pr-3 text-xs text-ink placeholder:text-ink-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
               />
             </div>
-            <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={searchNode}>
+            <Button variant="ghost" size="sm" className="shrink-0" onClick={searchNode} title="搜尋">
               <Search className="w-3.5 h-3.5" />
             </Button>
             <select
               value={limit}
               onChange={(event) => setLimit(Number(event.target.value))}
-              className="h-8 rounded-lg border border-white/10 bg-white/[0.05] px-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/30"
+              className="h-8 shrink-0 rounded-lg border border-border bg-input-bg px-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-brand/30"
             >
               {LIMITS.map((value) => (
                 <option key={value} value={value}>{value} nodes</option>
               ))}
             </select>
-            <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={loadGraph}>
-              <Filter className="w-3.5 h-3.5" />
-              套用
-            </Button>
-            <div className="ml-auto flex items-center gap-1">
-              <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={() => void expandNodes('all')} disabled={!selectedNode}>
+            <div className="ml-auto flex shrink-0 items-center gap-1">
+              <Button variant="ghost" size="sm" className="whitespace-nowrap" onClick={() => void expandNodes('all')} disabled={!selectedNode}>
                 <Expand className="w-3.5 h-3.5" />
                 展開
               </Button>
-              <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={exportPng}>
+              <Button variant="ghost" size="sm" className="whitespace-nowrap" onClick={exportPng}>
                 <Download className="w-3.5 h-3.5" />
                 PNG
               </Button>
-              <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={exportJson}>
+              <Button variant="ghost" size="sm" className="whitespace-nowrap" onClick={exportJson}>
                 <FileJson className="w-3.5 h-3.5" />
                 JSON
               </Button>
             </div>
           </div>
 
-          <div ref={canvasWrapRef} className="relative min-h-0 flex-1 overflow-hidden bg-[#05080D]">
+          <div ref={canvasWrapRef} className="relative min-h-0 flex-1 overflow-hidden bg-surface-alt">
             <ForceGraph2D<GraphNode, GraphLink>
               ref={graphRef}
               graphData={graphData}
@@ -754,12 +877,15 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
               linkTarget="target"
               width={canvasSize.width}
               height={canvasSize.height}
-              backgroundColor="#05080D"
+              backgroundColor={canvasTheme.background}
               warmupTicks={80}
               cooldownTicks={180}
               d3AlphaDecay={0.018}
               d3VelocityDecay={0.26}
               nodeRelSize={5}
+              // 節點名稱已由 nodeCanvasObject 自繪；空字串可關閉套件內建 tooltip，
+              // 避免 hover 時同一名稱顯示兩次。
+              nodeLabel={() => ''}
               nodeCanvasObject={drawNode}
               nodePointerAreaPaint={paintNodePointer}
               linkColor={(link) => {
@@ -767,13 +893,22 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                 const source = endpointId(graphLink.source)
                 const target = endpointId(graphLink.target)
                 const dimmed = !!selectedNode && !selectedNeighborIds.has(source) && !selectedNeighborIds.has(target)
-                return hexToRgba(linkColor(graphLink), dimmed ? 0.12 : 0.56)
+                const color = linkColor(graphLink)
+                // 淺色 Canvas 上的 pastel 關係色需要提高對比，否則即使有 edge 也像沒有連線。
+                return canvasTheme.isDark
+                  ? hexToRgba(color, dimmed ? 0.12 : 0.56)
+                  : dimmed
+                    ? hexToRgba(color, 0.18)
+                    : darkenHex(color, 0.58)
               }}
               linkWidth={(link) => {
                 const graphLink = link as GraphLink
                 const source = endpointId(graphLink.source)
                 const target = endpointId(graphLink.target)
-                return selectedNode && (source === selectedNode.id || target === selectedNode.id) ? 1.9 : 0.8
+                if (selectedNode && (source === selectedNode.id || target === selectedNode.id)) {
+                  return canvasTheme.isDark ? 1.9 : 2.2
+                }
+                return canvasTheme.isDark ? 0.8 : 1.05
               }}
               linkDirectionalArrowLength={3.5}
               linkDirectionalArrowRelPos={0.92}
@@ -795,7 +930,14 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                 event.preventDefault()
                 setSelectedNode(node as GraphNode)
                 setSelectedLink(null)
-                setContextMenu({ x: event.clientX, y: event.clientY, node: node as GraphNode })
+                // 右鍵選單需限制在目前視窗內，避免靠近右下角的節點讓操作項目被裁掉。
+                const menuWidth = 176
+                const menuHeight = 180
+                setContextMenu({
+                  x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+                  y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+                  node: node as GraphNode,
+                })
               }}
               onNodeHover={(node) => setHoverNode(node as GraphNode | null)}
               onLinkClick={(link) => {
@@ -812,23 +954,31 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
             />
 
             {loading && (
-              <div className="absolute inset-0 pointer-events-none flex items-center justify-center bg-[#05080D]/35">
-                <div className="rounded-lg border border-white/10 bg-black/50 px-4 py-2 text-sm text-white/80 flex items-center gap-2">
-                  <Loader2 className="w-4 h-4 animate-spin text-cyan-200" />
+              <div className="absolute inset-0 pointer-events-none flex items-center justify-center bg-surface-alt/50">
+                <div className="rounded-lg border border-border bg-surface/90 px-4 py-2 text-sm text-ink flex items-center gap-2 shadow-lg">
+                  <Loader2 className="w-4 h-4 animate-spin text-brand" />
                   載入中
                 </div>
               </div>
             )}
 
-            <div className="absolute left-3 bottom-3 rounded-lg border border-white/10 bg-black/45 px-3 py-2 text-[11px] text-white/60 backdrop-blur">
+            {!loading && graph && graph.loadedNodes === 0 && (
+              <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                <p className="rounded-lg border border-border bg-surface/90 px-4 py-3 text-sm text-ink-secondary shadow-sm">
+                  沒有節點符合目前篩選或查詢
+                </p>
+              </div>
+            )}
+
+            <div className="absolute left-3 bottom-3 rounded-lg border border-border bg-surface/85 px-3 py-2 text-[11px] text-ink-secondary backdrop-blur">
               {graph?.loadedNodes ?? 0} / {graph?.totalNodes ?? 0} nodes · {graph?.loadedEdges ?? 0} edges
             </div>
           </div>
         </main>
 
-        <aside className="min-h-0 border-l border-white/10 bg-[#0B101A] flex flex-col">
-          <div className="shrink-0 border-b border-white/10 p-3">
-            <div className="flex rounded-lg border border-white/10 bg-white/[0.04] p-0.5">
+        <aside className="min-h-0 border-l border-border bg-surface flex flex-col">
+          <div className="shrink-0 border-b border-border p-3">
+            <div className="flex rounded-lg border border-border bg-surface-alt p-0.5">
               {VIEW_TABS.map(({ value, icon: Icon, label }) => (
                 <button
                   key={value}
@@ -836,7 +986,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                   onClick={() => setViewMode(value)}
                   className={cn(
                     'flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors flex items-center justify-center gap-1.5',
-                    viewMode === value ? 'bg-cyan-300 text-[#061018]' : 'text-white/55 hover:text-white hover:bg-white/7',
+                    viewMode === value ? 'bg-brand text-white' : 'text-ink-secondary hover:text-ink hover:bg-surface',
                   )}
                 >
                   <Icon className="w-3.5 h-3.5" />
@@ -850,69 +1000,69 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
             {viewMode === 'graph' && (
               <div className="p-4 space-y-4">
                 <section className="space-y-2">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-white/50">Inspector</p>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-ink-secondary">Inspector</p>
                   {selectedNode ? (
                     <div className="space-y-3">
                       <div>
-                        <p className="text-sm font-semibold text-white break-words">{selectedNode.name}</p>
-                        <p className="text-xs text-cyan-200 mt-1">{selectedNode.kind}</p>
+                        <p className="text-sm font-semibold text-ink break-words">{selectedNode.name}</p>
+                        <p className="text-xs text-brand mt-1">{selectedNode.kind}</p>
                       </div>
-                      <code className="block rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] leading-relaxed text-white/70 break-words">
+                      <code className="block rounded-lg border border-border bg-surface-alt px-3 py-2 text-[11px] leading-relaxed text-ink-secondary break-words">
                         {selectedNode.role}
                       </code>
                       {selectedNode.filePath && (
-                        <p className="text-[11px] text-white/45 font-mono break-words">
+                        <p className="text-[11px] text-ink-subtle font-mono break-words">
                           {selectedNode.filePath}{selectedNode.startLine ? `:${selectedNode.startLine}` : ''}
                         </p>
                       )}
                       <div className="grid grid-cols-2 gap-2">
-                        <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={() => void expandNodes('all')}>
+                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('all')}>
                           全部鄰居
                         </Button>
-                        <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={() => void expandNodes('same-file')}>
+                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('same-file')}>
                           同檔案
                         </Button>
-                        <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={() => void expandNodes('callers')}>
-                          呼叫者
+                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('callers')}>
+                          傳入關係
                         </Button>
-                        <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={() => void expandNodes('callees')}>
-                          被呼叫
+                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('callees')}>
+                          傳出關係
                         </Button>
                       </div>
                       <div className="space-y-1.5">
                         {Object.entries(selectedNode.properties).slice(0, 24).map(([key, value]) => (
-                          <div key={key} className="rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5">
-                            <p className="text-[10px] text-white/35">{key}</p>
-                            <p className="text-[11px] text-white/70 break-words">{renderValue(value)}</p>
+                          <div key={key} className="rounded-lg border border-border bg-surface-alt px-2.5 py-1.5">
+                            <p className="text-[10px] text-ink-subtle">{key}</p>
+                            <p className="text-[11px] text-ink-secondary break-words">{renderValue(value)}</p>
                           </div>
                         ))}
                       </div>
                     </div>
                   ) : selectedLink ? (
                     <div className="space-y-2">
-                      <p className="text-sm font-semibold text-white">{selectedLink.type}</p>
-                      <p className="text-[11px] text-white/45 font-mono break-all">
+                      <p className="text-sm font-semibold text-ink">{selectedLink.type}</p>
+                      <p className="text-[11px] text-ink-subtle font-mono break-all">
                         {endpointId(selectedLink.source)} → {endpointId(selectedLink.target)}
                       </p>
                       {Object.entries(selectedLink.properties).map(([key, value]) => (
-                        <div key={key} className="rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5">
-                          <p className="text-[10px] text-white/35">{key}</p>
-                          <p className="text-[11px] text-white/70 break-words">{renderValue(value)}</p>
+                        <div key={key} className="rounded-lg border border-border bg-surface-alt px-2.5 py-1.5">
+                          <p className="text-[10px] text-ink-subtle">{key}</p>
+                          <p className="text-[11px] text-ink-secondary break-words">{renderValue(value)}</p>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <p className="text-sm text-white/45">未選取</p>
+                    <p className="text-sm text-ink-subtle">未選取</p>
                   )}
                 </section>
 
                 <section className="space-y-2">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-white/50">Cypher</p>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-ink-secondary">Cypher</p>
                   <textarea
                     value={queryText}
                     onChange={(event) => setQueryText(event.target.value)}
                     spellCheck={false}
-                    className="h-40 w-full resize-none rounded-lg border border-white/10 bg-[#05080D] px-3 py-2 font-mono text-xs leading-relaxed text-white/80 placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-cyan-300/30"
+                    className="h-40 w-full resize-none rounded-lg border border-border bg-input-bg px-3 py-2 font-mono text-xs leading-relaxed text-ink placeholder:text-ink-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
                   />
                   <Button variant="primary" size="sm" className="w-full" onClick={runQuery} isLoading={querying} leftIcon={<Play className="w-3.5 h-3.5" />}>
                     執行 read-only 查詢
@@ -923,9 +1073,9 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
 
             {viewMode === 'table' && (
               <div className="p-3">
-                <div className="overflow-auto rounded-lg border border-white/10">
+                <div className="overflow-auto rounded-lg border border-border">
                   <table className="min-w-full text-left text-xs">
-                    <thead className="bg-white/[0.06] text-white/50">
+                    <thead className="bg-surface-alt text-ink-secondary">
                       <tr>
                         {(queryResult?.columns.length ? queryResult.columns : ['result']).map((column) => (
                           <th key={column} className="px-3 py-2 font-semibold">{column}</th>
@@ -935,15 +1085,15 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                     <tbody>
                       {queryRows.length === 0 ? (
                         <tr>
-                          <td className="px-3 py-8 text-center text-white/35" colSpan={queryResult?.columns.length || 1}>
+                          <td className="px-3 py-8 text-center text-ink-subtle" colSpan={queryResult?.columns.length || 1}>
                             No rows
                           </td>
                         </tr>
                       ) : (
                         queryRows.map((row, rowIndex) => (
-                          <tr key={rowIndex} className="border-t border-white/10">
+                          <tr key={rowIndex} className="border-t border-border">
                             {queryResult?.columns.map((column) => (
-                              <td key={column} className="max-w-[220px] px-3 py-2 text-white/70 align-top">
+                              <td key={column} className="max-w-[220px] px-3 py-2 text-ink-secondary align-top">
                                 <span className="line-clamp-4 break-words">{renderValue(row[column])}</span>
                               </td>
                             ))}
@@ -957,7 +1107,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
             )}
 
             {viewMode === 'raw' && (
-              <pre className="m-3 overflow-auto rounded-lg border border-white/10 bg-[#05080D] p-3 text-[11px] leading-relaxed text-white/65">
+              <pre className="m-3 overflow-auto rounded-lg border border-border bg-input-bg p-3 text-[11px] leading-relaxed text-ink-secondary">
                 {JSON.stringify(queryResult ?? { graph }, null, 2)}
               </pre>
             )}
@@ -967,20 +1117,20 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
 
       {contextMenu && (
         <div
-          className="fixed z-[90] min-w-[156px] rounded-lg border border-white/10 bg-[#101827] py-1 shadow-2xl"
+          className="fixed z-[90] min-w-[156px] rounded-lg border border-border bg-surface py-1 text-ink shadow-2xl"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onClick={(event) => event.stopPropagation()}
         >
           {[
             ['all', '展開全部鄰居'],
-            ['callers', '展開呼叫者'],
-            ['callees', '展開被呼叫'],
+            ['callers', '展開傳入關係'],
+            ['callees', '展開傳出關係'],
             ['same-file', '展開同檔案'],
           ].map(([mode, label]) => (
             <button
               key={mode}
               type="button"
-              className="block w-full px-3 py-2 text-left text-sm text-white/75 hover:bg-white/10 hover:text-white"
+              className="block w-full px-3 py-2 text-left text-sm text-ink-secondary hover:bg-surface-alt hover:text-ink"
               onClick={() => void expandNodes(mode as ExpandMode, contextMenu.node)}
             >
               {label}

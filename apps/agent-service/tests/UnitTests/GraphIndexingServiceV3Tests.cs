@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 using AgentService.Application.Contracts;
 using AgentService.Application.Models;
@@ -18,6 +20,35 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
     private bool _managedNeo4jUsed;
 
     public GraphIndexingServiceV3Tests() => Directory.CreateDirectory(_root);
+
+    [Fact]
+    public async Task ManagedNeo4jRuntime_RejectsOccupiedPortWithoutMatchingOwnership()
+    {
+        // 使用 OS 配發的暫時連接埠，驗證沒有 Wingman ownership 時即使 store
+        // test double 可回應，managed runtime 也不得把任意 listener 當成內建 Neo4j。
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var neo4j = Options.Create(new GraphRagNeo4jOptions
+        {
+            Uri = $"bolt://127.0.0.1:{port}",
+            Username = "neo4j",
+            Password = "unit-test-only",
+            Database = "neo4j",
+        });
+        var runtimeOptions = Options.Create(
+            new GraphRagNeo4jRuntimeOptions { Mode = "managed" });
+        await using var runtime = new Neo4jRuntime(
+            runtimeOptions,
+            neo4j,
+            new InMemoryGraphStore(),
+            new DefaultHttpClientFactory(),
+            NullLogger<Neo4jRuntime>.Instance);
+
+        Assert.False(await runtime.EnsureAvailableAsync());
+        Assert.Equal("port-conflict", runtime.Status);
+        Assert.Contains("managed 模式已拒絕啟動", runtime.LastError);
+    }
 
     [Fact]
     public async Task IndexProjectAsync_PublishesFullThenUsesVerifiedNoOp()
@@ -454,6 +485,61 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
             await store.PublishAsync(third);
             Assert.Equal(third.ManifestVersion,
                 await store.GetActiveManifestAsync(projectId));
+
+            // 可視化初始圖必須以 relationship 為核心，並保留 UI 使用的語意化展開模式。
+            var visual = await store.GetVisualGraphAsync(
+                projectId,
+                limit: 2,
+                kinds: null,
+                relationshipTypes: null);
+            Assert.Equal(2, visual.LoadedNodes);
+            Assert.Single(visual.Edges);
+
+            var callers = await store.GetVisualNeighborsAsync(
+                projectId,
+                ["code:csharp:acceptance.target"],
+                depth: 1,
+                limit: 10,
+                mode: "callers");
+            Assert.Equal(2, callers.LoadedNodes);
+            Assert.Single(callers.Edges);
+
+            var callees = await store.GetVisualNeighborsAsync(
+                projectId,
+                ["code:csharp:acceptance.caller"],
+                depth: 1,
+                limit: 10,
+                mode: "callees");
+            Assert.Equal(2, callees.LoadedNodes);
+            Assert.Single(callees.Edges);
+
+            var sameFile = await store.GetVisualNeighborsAsync(
+                projectId,
+                ["code:csharp:acceptance.caller"],
+                depth: 1,
+                limit: 10,
+                mode: "same-file");
+            Assert.Single(sameFile.Nodes);
+            Assert.Equal("code:csharp:acceptance.caller", sameFile.Nodes[0].Id);
+            Assert.Empty(sameFile.Edges);
+
+            // 只 RETURN relationship 時仍必須補齊兩端 node，禁止回傳 orphan edge。
+            var relationshipOnly = await store.QueryVisualGraphAsync(
+                projectId,
+                """
+                MATCH (source:GraphEntity {
+                    projectId: $projectId,
+                    graphVersion: $graphVersion
+                })-[relationship]->(target:GraphEntity {
+                    projectId: $projectId,
+                    graphVersion: $graphVersion
+                })
+                RETURN relationship
+                LIMIT $limit
+                """,
+                limit: 10);
+            Assert.Equal(2, relationshipOnly.Graph.LoadedNodes);
+            Assert.Single(relationshipOnly.Graph.Edges);
 
             await using var driver = GraphDatabase.Driver(
                 neo4jValue.Uri,
