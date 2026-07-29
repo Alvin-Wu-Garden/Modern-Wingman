@@ -40,7 +40,8 @@ public sealed class AgentSchemaMigratorTests
                 'agent_schedules',
                 'mcp_servers',
                 'marketplace_update_checks',
-                'marketplace_activity_events'
+                'marketplace_activity_events',
+                'jira_analysis_runs'
               )
             ORDER BY name;
             """;
@@ -58,6 +59,7 @@ public sealed class AgentSchemaMigratorTests
                 "discovery_records",
                 "discovery_score_snapshots",
                 "installability_results",
+                "jira_analysis_runs",
                 "marketplace_sync_runs",
                 "project_index_manifests",
             ],

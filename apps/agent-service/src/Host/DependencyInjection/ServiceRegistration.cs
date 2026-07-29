@@ -1,6 +1,7 @@
 using AgentService.Application.Contracts;
 using AgentService.Host.RestEndpoints;
 using AgentService.Infrastructure.AgentFramework;
+using AgentService.Infrastructure.Atlassian;
 using AgentService.Infrastructure.Orchestration;
 using AgentService.Infrastructure.Persistence;
 using AgentService.Infrastructure.Providers;
@@ -40,6 +41,16 @@ public static class ServiceRegistration
                 CheckCertificateRevocationList = false,
             });
 
+        services.AddHttpClient("atlassian", client =>
+            {
+                client.Timeout = TimeSpan.FromSeconds(30);
+                client.DefaultRequestHeaders.Add("User-Agent", "Modern-Wingman/1.0");
+            })
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+            {
+                CheckCertificateRevocationList = false,
+            });
+
         // ── Options / BYOK 設定綁定 ────────────────────────────────────────────
         services.Configure<AgentServiceOptions>(
             configuration.GetSection(AgentServiceOptions.SectionName));
@@ -57,6 +68,9 @@ public static class ServiceRegistration
         services.AddSingleton<IVcsProfileRepository, VcsProfileRepository>();
         services.AddSingleton<IProviderSettingStore, ProviderSettingStore>();
         services.AddSingleton<IApiKeyStore, ApiKeyStore>();
+        services.AddSingleton<IAtlassianConnectionRepository, AtlassianConnectionRepository>();
+        services.AddSingleton<IJiraHttpClient, JiraHttpClient>();
+        services.AddSingleton<JiraAnalysisRunRepository>();
 
         // ── Copilot CLI 生命週期（Singleton Hosted Service）───────────────────
         services.AddSingleton<CopilotClientService>();
@@ -137,6 +151,7 @@ public static class ServiceRegistration
         app.MapSpeechEndpoints();
         app.MapVcsProfileEndpoints();
         app.MapMarketplaceEndpoints();
+        app.MapAtlassianEndpoints();
 
         app.MapGet("/", () => "Modern Wingman Agent Service — REST on :5002");
         return app;

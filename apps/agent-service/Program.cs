@@ -24,6 +24,8 @@ using (var scope = app.Services.CreateScope())
     await using var db = await dbFactory.CreateDbContextAsync();
     await db.Database.EnsureCreatedAsync();
     await AgentSchemaMigrator.ApplyAsync(db);
+    // ApplyAsync 可能 DROP 了殘缺的 atlassian_connections，再次呼叫以確保 EF 補建。
+    await db.Database.EnsureCreatedAsync();
 
     // Provider 清單直接由 appsettings 定義；SQLite 只在使用者實際儲存 Key、
     // 自訂網址或排序時才建立資料列，因此全新安裝保持零設定資料。
