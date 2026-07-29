@@ -5,6 +5,7 @@ using AgentService.Application.Contracts;
 using AgentService.Domain.Models;
 using AgentService.Infrastructure.Atlassian;
 using AgentService.Infrastructure.AgentFramework;
+using AgentService.Modules.GraphRAG;
 
 namespace AgentService.Host.RestEndpoints;
 
@@ -178,6 +179,9 @@ public static class AtlassianEndpoints
         IModelProviderService providers,
         IJiraHttpClient jiraClient,
         JiraAnalysisRunRepository analysisRuns,
+        JiraFeatureIdentifierExtractor featureExtractor,
+        JiraGraphRagRetrievalService graphRagRetrieval,
+        INeo4jRuntime neo4j,
         WingmanChatAgent agent,
         ILoggerFactory loggerFactory,
         HttpContext http,
@@ -235,20 +239,12 @@ public static class AtlassianEndpoints
             ct);
         await analysisRuns.SetConversationAsync(runId, conversation.Id, ct);
 
-        // ── 組裝 Prompt 並新增 User 訊息 ─────────────────────────────────────
-        // 系統指令以前置方式嵌入 userPrompt；MessageRole 無 System 角色。
-        var userPrompt = JiraPromptBuilder.BuildSystemPrompt()
-            + "\n\n"
-            + JiraPromptBuilder.BuildUserPrompt(issue);
-        await conversations.AddMessageAsync(conversation.Id, MessageRole.User, userPrompt, ct);
-
         // ── 開始 SSE 串流 ─────────────────────────────────────────────────────
         http.Response.Headers.ContentType = "text/event-stream; charset=utf-8";
         http.Response.Headers.CacheControl = "no-cache";
         http.Response.Headers["X-Accel-Buffering"] = "no";
         http.Response.Headers.AccessControlAllowOrigin = "*";
 
-        // 傳送 metadata（conversationId 讓前端可跳轉）
         await WriteSseAsync(http, new
         {
             conversationId = conversation.Id,
@@ -258,10 +254,71 @@ public static class AtlassianEndpoints
 
         var fullResponse = new StringBuilder();
 
-                
-
         try
         {
+            // ── 辨識功能代號與功能名稱 ──────────────────────────────────────────
+            await WriteSseProgressAsync(http, "辨識功能代號與功能名稱", ct);
+            var identifiers = featureExtractor.Extract(issue);
+
+            logger.LogInformation(
+                "JIRA 功能識別完成。RunId={RunId}, ProjectId={ProjectId}, JiraKey={JiraKey}, FeatureCount={FeatureCount}",
+                runId, request.ProjectId, fullKey, identifiers.Count);
+
+            // ── GraphRAG 三階段檢索 ─────────────────────────────────────────────
+            JiraGraphRagContext graphRagContext;
+            bool neo4jAvailable = await neo4j.EnsureAvailableAsync(null, ct);
+
+            if (!neo4jAvailable)
+            {
+                graphRagContext = JiraGraphRagContext.Degraded("Neo4j 圖譜資料庫目前無法連線，改以純 JIRA 內容繼續分析。");
+                await WriteSseProgressAsync(http, "GraphRAG 資料庫無法連線，改以純 JIRA 內容繼續分析", ct);
+            }
+            else
+            {
+                await WriteSseProgressAsync(http, "搜尋功能 Controller 與程式入口", ct);
+                graphRagContext = await graphRagRetrieval.RetrieveAsync(
+                    request.ProjectId, issue, identifiers, ct);
+
+                if (graphRagContext.HasResults)
+                {
+                    var entryCount = graphRagContext.ConfirmedEntryPoints.Count
+                        + graphRagContext.CandidateEntryPoints.Count;
+                    await WriteSseProgressAsync(
+                        http,
+                        $"已找到 {entryCount} 個程式入口，展開 {graphRagContext.IncludedHitCount} 個相關節點",
+                        ct);
+                }
+                else
+                {
+                    await WriteSseProgressAsync(http, "未找到相關程式碼，本次以 JIRA 內容繼續分析", ct);
+                }
+
+                logger.LogInformation(
+                    "JIRA GraphRAG 完成。RunId={RunId}, ProjectId={ProjectId}, JiraKey={JiraKey}, ConfirmedEntries={Confirmed}, CandidateEntries={Candidates}, Hits={Hits}, Degraded={Degraded}",
+                    runId, request.ProjectId, fullKey,
+                    graphRagContext.ConfirmedEntryPoints.Count,
+                    graphRagContext.CandidateEntryPoints.Count,
+                    graphRagContext.IncludedHitCount,
+                    graphRagContext.WasDegraded);
+            }
+
+            // ── 組裝 Prompt 並新增 User 訊息 ─────────────────────────────────────
+            await WriteSseProgressAsync(http, "整理 GraphRAG 分析內容，建立專案對話", ct);
+
+            var systemPrompt = graphRagContext.HasResults
+                ? JiraPromptBuilder.BuildSystemPromptWithGraphRAG()
+                : JiraPromptBuilder.BuildSystemPrompt();
+
+            var taskPrompt = graphRagContext.HasResults
+                ? JiraPromptBuilder.BuildUserPromptWithGraphRAG(issue, identifiers, graphRagContext)
+                : JiraPromptBuilder.BuildUserPrompt(issue);
+
+            var userPrompt = systemPrompt + "\n\n" + taskPrompt;
+            await conversations.AddMessageAsync(conversation.Id, MessageRole.User, userPrompt, ct);
+
+            // ── AI 生成三項分析 ───────────────────────────────────────────────────
+            await WriteSseProgressAsync(http, "AI 生成三項分析", ct);
+
             await foreach (var token in agent.RunStreamingAsync(
                 userPrompt,
                 conversation.Messages,
@@ -381,6 +438,9 @@ public static class AtlassianEndpoints
         await ctx.Response.WriteAsync($"data: {json}\n\n", ct);
         await ctx.Response.Body.FlushAsync(ct);
     }
+
+    private static Task WriteSseProgressAsync(HttpContext ctx, string message, CancellationToken ct) =>
+        WriteSseAsync(ctx, new { progress = message }, ct);
     private static async Task TryDeleteConversationAsync(
         IConversationRepository conversations,
         string conversationId,

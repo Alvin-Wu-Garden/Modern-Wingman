@@ -71,6 +71,8 @@ public static class ServiceRegistration
         services.AddSingleton<IAtlassianConnectionRepository, AtlassianConnectionRepository>();
         services.AddSingleton<IJiraHttpClient, JiraHttpClient>();
         services.AddSingleton<JiraAnalysisRunRepository>();
+        services.AddSingleton<JiraFeatureIdentifierExtractor>();
+        services.AddSingleton<JiraGraphRagRetrievalService>();
 
         // ── Copilot CLI 生命週期（Singleton Hosted Service）───────────────────
         services.AddSingleton<CopilotClientService>();
