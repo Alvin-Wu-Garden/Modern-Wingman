@@ -1,4 +1,5 @@
 using AgentService.Application.Contracts;
+using AgentService.Application.Atlassian;
 using AgentService.Host.RestEndpoints;
 using AgentService.Infrastructure.AgentFramework;
 using AgentService.Infrastructure.Atlassian;
@@ -73,6 +74,9 @@ public static class ServiceRegistration
         services.AddSingleton<JiraAnalysisRunRepository>();
         services.AddSingleton<JiraFeatureIdentifierExtractor>();
         services.AddSingleton<JiraGraphRagRetrievalService>();
+        services.Configure<LocalJiraFileOptions>(
+            configuration.GetSection(LocalJiraFileOptions.SectionName));
+        services.AddSingleton<LocalJiraFileRepository>();
 
         // ── Copilot CLI 生命週期（Singleton Hosted Service）───────────────────
         services.AddSingleton<CopilotClientService>();

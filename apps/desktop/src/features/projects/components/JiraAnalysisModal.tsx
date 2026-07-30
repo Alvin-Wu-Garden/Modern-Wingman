@@ -1,12 +1,15 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Modal } from '@/components/ui/modal'
+import { ProviderModelPicker } from '@/features/chat/components/ProviderModelPicker'
 import {
   analyzeJiraIssue,
   atlassianErrorMessage,
+  listLocalJiraFiles,
   previewJiraIssue,
   type JiraIssuePreview,
+  type LocalJiraFileSummary,
 } from '@/services/agent-api/atlassian'
 
 /** 使用者輸入 HD-1128 或 NR-208（不含 INNES1 前綴）*/
@@ -37,7 +40,18 @@ export function JiraAnalysisModal({
   const [error, setError] = useState<string | null>(null)
   const [progress, setProgress] = useState<string[]>([])
   const [streamText, setStreamText] = useState('')
+  const [localFiles, setLocalFiles] = useState<LocalJiraFileSummary[]>([])
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null)
+  const [selectedModelId, setSelectedModelId] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const [localPreviewKey, setLocalPreviewKey] = useState<string>('')
+
+  // 嘗試載入本機測試檔案清單（Enabled=false 或目錄不存在時回傳空陣列）
+  useEffect(() => {
+    listLocalJiraFiles()
+      .then(setLocalFiles)
+      .catch(() => setLocalFiles([]))
+  }, [])
 
   // 前端格式驗證（使用者輸入層）
   const normalizedInput = userInput.trim().toUpperCase()
@@ -51,6 +65,9 @@ export function JiraAnalysisModal({
     try {
       const result = await previewJiraIssue(fullKey)
       setPreview(result)
+      if (localFiles.length > 0 && preview?.key) {
+        setLocalPreviewKey(preview.key)
+      }
       setStage('preview')
     } catch (reason) {
       const msg = reason instanceof Error ? reason.message : String(reason)
@@ -71,10 +88,10 @@ export function JiraAnalysisModal({
     abortRef.current = new AbortController()
 
     await analyzeJiraIssue(
-      { projectId, jiraKey: fullKey, providerProfileId: null },
+      { projectId, jiraKey: fullKey, providerProfileId: selectedProviderId, modelId: selectedModelId, localFileKey: localPreviewKey },
       {
         onMeta: (_convId, _key, summary) => {
-          setProgress((p) => [...p, `議題：${summary}`])
+          setProgress((p) => [...p, `議題：${_key} ${summary}`])
         },
         onToken: (token) => {
           setStreamText((t) => t + token)
@@ -157,6 +174,34 @@ export function JiraAnalysisModal({
             )}
           </label>
 
+          {/* ── 本機測試檔案（LocalJiraFiles.Enabled=true 且有檔案時顯示） ── */}
+          {localFiles.length > 0 && stage === 'input' && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <p className="mb-2 text-xs font-medium text-amber-700">本機測試檔案（開發模式）</p>
+              <div className="space-y-1">
+                {localFiles.map((f) => (
+                  <button
+                    key={f.key}
+                    type="button"
+                    className="flex w-full items-start gap-2 rounded px-2 py-1.5 text-left hover:bg-amber-100 disabled:opacity-50"
+                    disabled={busy}
+                    onClick={() => {
+                      // 從完整 key (INNES1HD-1504) 取出去除前綴的部分 (HD-1504)
+                      const shortKey = f.key.replace(/^INNES1/, '')
+                      setUserInput(shortKey)
+                      setPreview(null)
+                      setStage('input')
+                      setError(null)
+                    }}
+                  >
+                    <span className="shrink-0 font-mono text-xs font-semibold text-amber-800">{f.key}</span>
+                    <span className="truncate text-xs text-amber-700">{f.summary}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{error}</p>}
 
           {/* ── 預覽資訊 ── */}
@@ -174,6 +219,19 @@ export function JiraAnalysisModal({
                 {preview.updated && <span>更新：{preview.updated.slice(0, 10)}</span>}
                 <span>專案：{preview.projectName}</span>
               </div>
+            </div>
+          )}
+
+          {/* ── 模型選擇（預覽時顯示）── */}
+          {stage === 'preview' && (
+            <div>
+              <p className="mb-1.5 text-xs font-medium text-ink-secondary">使用模型</p>
+              <ProviderModelPicker
+                selectedProviderId={selectedProviderId}
+                selectedModel={selectedModelId}
+                onProviderChange={setSelectedProviderId}
+                onModelChange={setSelectedModelId}
+              />
             </div>
           )}
 

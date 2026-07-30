@@ -15,12 +15,10 @@ public static class JiraIssueNormalizer
     /// </summary>
     private static readonly Dictionary<string, string> KnownCustomFields = new()
     {
-        // 調整為目標 JIRA 環境的實際 custom field ID
-        ["customfield_10100"] = "問題分析",
-        ["customfield_10101"] = "測試案例",
-        ["customfield_10102"] = "IT 負責人",
-        ["customfield_10103"] = "預計交測日",
-        ["customfield_10104"] = "完成率",
+        // INNES1HD 白名單欄位 ID（依 INNES1HD_欄位白名單.md）
+        // 若 JIRA 上已填寫這兩欄，作為補充 context 送給 LLM；未填寫則自動略過。
+        ["customfield_16506"] = "問題分析",
+        ["customfield_16507"] = "測試案例／情境",
     };
 
     public static NormalizedJiraIssue? Normalize(
@@ -75,10 +73,7 @@ public static class JiraIssueNormalizer
             return new NormalizedJiraIssue
             {
                 Preview = preview,
-                Resolution = GetNestedOrNull(fields.Value, "resolution", "name"),
                 Components = ParseStringArray(fields.Value, "components", "name"),
-                Versions = ParseStringArray(fields.Value, "versions", "name"),
-                Reporter = GetNestedOrNull(fields.Value, "reporter", "displayName"),
                 DescriptionMarkdown = string.IsNullOrWhiteSpace(descriptionMd) ? null : descriptionMd,
                 ClassifiedFields = classified,
                 LinkedIssues = linkedIssues,

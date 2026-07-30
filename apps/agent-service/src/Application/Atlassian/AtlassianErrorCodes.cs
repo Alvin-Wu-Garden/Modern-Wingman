@@ -28,4 +28,5 @@ public static class AtlassianErrorCodes
     public const string AiProviderNotConfigured = "AI_PROVIDER_NOT_CONFIGURED";
     public const string AiAnalysisFailed        = "AI_ANALYSIS_FAILED";
     public const string AnalysisCancelled       = "ANALYSIS_CANCELLED";
+    public const string AnalysisQuotaExceeded    = "ANALYSIS_QUOTA_EXCEEDED";
 }

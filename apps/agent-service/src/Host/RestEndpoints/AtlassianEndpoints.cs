@@ -32,7 +32,17 @@ public static class AtlassianEndpoints
     public sealed record AnalyzeJiraIssueRequest(
         string ProjectId,
         string JiraKey,
-        string? ProviderProfileId);
+        string? ProviderProfileId,
+        /// <summary>
+        /// 若設定此欄位且後端 LocalJiraFiles.Enabled = true，
+        /// 將略過 JIRA 連線直接從本機檔案讀取，供無法連線 JIRA 的測試環境使用。
+        /// </summary>
+        string? LocalFileKey = null,
+        /// <summary>
+        /// 使用者在前端選擇的模型 ID。
+        /// 若未提供，則沿用供應商設定的預設模型（profile.ModelId）。
+        /// </summary>
+        string? ModelId = null);
 
     public static IEndpointRouteBuilder MapAtlassianEndpoints(this IEndpointRouteBuilder app)
     {
@@ -41,6 +51,7 @@ public static class AtlassianEndpoints
         group.MapPost("/connections/{serviceType}/validate", ValidateAndSave);
         group.MapDelete("/connections/{serviceType}", DeleteConnection);
         group.MapPost("/jira/preview", PreviewIssue);
+        group.MapGet("/jira/local-files", ListLocalFiles);
         group.MapPost("/jira/analyze", AnalyzeIssue);
         return app;
     }
@@ -144,17 +155,30 @@ public static class AtlassianEndpoints
         return Results.NoContent();
     }
 
+    // ── GET /api/atlassian/jira/local-files ──────────────────────────────────
+
+    private static IResult ListLocalFiles(LocalJiraFileRepository localFiles) =>
+        Results.Ok(localFiles.ListFiles());
+
     // ── POST /api/atlassian/jira/preview ─────────────────────────────────────
 
     private static async Task<IResult> PreviewIssue(
         PreviewJiraIssueRequest request,
         IAtlassianConnectionRepository repo,
         IJiraHttpClient jiraClient,
+        LocalJiraFileRepository localFiles,
         CancellationToken ct)
     {
         var keyValidation = ValidateFullKey(request.JiraKey);
         if (keyValidation is not null)
             return Results.BadRequest(new { error = keyValidation });
+
+        var fullKey = request.JiraKey.Trim().ToUpperInvariant();
+
+        // 本機檔案模式：若找到對應 JSON，直接回傳 Preview（跳過 JIRA 連線）
+        var localIssue = localFiles.Load(fullKey);
+        if (localIssue is not null)
+            return Results.Ok(localIssue.Preview);
 
         var conn = await repo.GetAsync(AtlassianServiceType.Jira, ct);
         if (conn is null || !conn.HasSecret)
@@ -162,7 +186,7 @@ public static class AtlassianEndpoints
         if (conn.SecretValue is null)
             return Results.UnprocessableEntity(new { error = AtlassianErrorCodes.SecretNotFound });
 
-        var result = await jiraClient.GetIssuePreviewAsync(conn, request.JiraKey.Trim().ToUpperInvariant(), ct);
+        var result = await jiraClient.GetIssuePreviewAsync(conn, fullKey, ct);
         if (!result.IsSuccess)
             return Results.UnprocessableEntity(new { error = result.ErrorCode, detail = result.ErrorDetail });
 
@@ -181,6 +205,7 @@ public static class AtlassianEndpoints
         JiraAnalysisRunRepository analysisRuns,
         JiraFeatureIdentifierExtractor featureExtractor,
         JiraGraphRagRetrievalService graphRagRetrieval,
+        LocalJiraFileRepository localFiles,
         INeo4jRuntime neo4j,
         WingmanChatAgent agent,
         ILoggerFactory loggerFactory,
@@ -205,25 +230,56 @@ public static class AtlassianEndpoints
             return;
         }
 
-        var conn = await atlassianRepo.GetAsync(AtlassianServiceType.Jira, ct);
-        if (conn is null || !conn.HasSecret || conn.SecretValue is null)
-        {
-            http.Response.StatusCode = StatusCodes.Status422UnprocessableEntity;
-            await http.Response.WriteAsJsonAsync(
-                new { error = AtlassianErrorCodes.NotConfigured }, ct);
-            return;
-        }
+        // ── 取得完整 JIRA 內容（本機檔案或遠端連線） ─────────────────────────
+        NormalizedJiraIssue issue;
 
-        // ── 取得完整 JIRA 內容 ────────────────────────────────────────────────
-        var issueResult = await jiraClient.GetFullIssueAsync(conn, fullKey, ct);
-        if (!issueResult.IsSuccess)
+        // 明確指定 localFileKey，或 LocalJiraFiles.Enabled = true 且存在對應本機檔案時，
+        // 直接從本機讀取，略過 JIRA 連線。
+        var localFileKey = !string.IsNullOrWhiteSpace(request.LocalFileKey)
+            ? request.LocalFileKey!.Trim()
+            : null;
+        var localIssue = localFileKey is not null
+            ? localFiles.Load(localFileKey)
+            : localFiles.Load(fullKey);   // Enabled=false 時 Load() 直接回傳 null，無副作用
+
+        if (localIssue is not null)
         {
-            http.Response.StatusCode = StatusCodes.Status422UnprocessableEntity;
-            await http.Response.WriteAsJsonAsync(
-                new { error = issueResult.ErrorCode, detail = issueResult.ErrorDetail }, ct);
-            return;
+            issue = localIssue;
+            logger.LogInformation(
+                "以本機檔案模式載入 JIRA 議題。Key={Key}, ProjectId={ProjectId}",
+                fullKey, request.ProjectId);
         }
-        var issue = issueResult.Value!;
+        else
+        {
+            if (localFileKey is not null)
+            {
+                // 明確要求本機檔案但找不到 → 回傳錯誤
+                http.Response.StatusCode = StatusCodes.Status404NotFound;
+                await http.Response.WriteAsJsonAsync(
+                    new { error = $"找不到本機 JIRA 檔案：{localFileKey}.json" }, ct);
+                return;
+            }
+
+            var conn = await atlassianRepo.GetAsync(AtlassianServiceType.Jira, ct);
+            if (conn is null || !conn.HasSecret || conn.SecretValue is null)
+            {
+                http.Response.StatusCode = StatusCodes.Status422UnprocessableEntity;
+                await http.Response.WriteAsJsonAsync(
+                    new { error = AtlassianErrorCodes.NotConfigured }, ct);
+                return;
+            }
+
+            var issueResult = await jiraClient.GetFullIssueAsync(conn, fullKey, ct);
+            if (!issueResult.IsSuccess)
+            {
+                http.Response.StatusCode = StatusCodes.Status422UnprocessableEntity;
+                await http.Response.WriteAsJsonAsync(
+                    new { error = issueResult.ErrorCode, detail = issueResult.ErrorDetail }, ct);
+                return;
+            }
+
+            issue = issueResult.Value!;
+        }
 
         // ── 建立追蹤紀錄 ─────────────────────────────────────────────────────
         var runId = await analysisRuns.CreateAsync(
@@ -231,6 +287,8 @@ public static class AtlassianEndpoints
 
         // ── 建立新對話 ───────────────────────────────────────────────────────
         var profile = await providers.GetProfileAsync(request.ProviderProfileId, ct);
+        var resolvedModelId = !string.IsNullOrWhiteSpace(request.ModelId)
+            ? request.ModelId : profile.ModelId;
         var conversation = await conversations.CreateAsync(
             profile.Id, ConversationScope.Project, request.ProjectId, ct);
         await conversations.SetTitleAsync(
@@ -323,7 +381,7 @@ public static class AtlassianEndpoints
                 userPrompt,
                 conversation.Messages,
                 profile,
-                profile.ModelId,
+                resolvedModelId,
                 onUsage: _ => { },
                 attachments: [],
                 includeSkills: false,
@@ -383,28 +441,57 @@ public static class AtlassianEndpoints
         }
         catch (Exception ex)
         {
-            logger.LogError(
-                ex,
-                "JIRA 分析失敗。RunId={RunId}, ProjectId={ProjectId}, JiraKey={JiraKey}, ConversationId={ConversationId}",
-                runId,
-                request.ProjectId,
-                fullKey,
-                conversation.Id);
+            //Session error: 402 {"error":{"message":"You have exceeded your monthly quota","code":"quota_exceeded"}} (Request ID: 87C5:B58DB:1DC2C9F:21A0F96:6A6B009F)
+            if (ex.Message.Contains("quota") && ex.Message.Contains("exceeded"))
+            {
+                logger.LogInformation(
+                    "JIRA 分析已取消（例外訊息包含 'quota_exceeded'）。RunId={RunId}, ProjectId={ProjectId}, JiraKey={JiraKey}, ConversationId={ConversationId}",
+                    runId,
+                    request.ProjectId,
+                    fullKey,
+                    conversation.Id);
 
-            await analysisRuns.FailAsync(
-                runId,
-                AtlassianErrorCodes.AiAnalysisFailed,
-                CancellationToken.None);
+                await analysisRuns.FailAsync(
+                    runId,
+                    AtlassianErrorCodes.AnalysisQuotaExceeded,
+                    CancellationToken.None);
 
-            await TryDeleteConversationAsync(
-                conversations,
-                conversation.Id,
-                logger);
+                await TryDeleteConversationAsync(
+                    conversations,
+                    conversation.Id,
+                    logger);
 
-            await TryWriteSseErrorAsync(
-                http,
-                AtlassianErrorCodes.AiAnalysisFailed,
-                logger);
+                await TryWriteSseErrorAsync(
+                    http,
+                    AtlassianErrorCodes.AnalysisQuotaExceeded,
+                    logger);
+
+                return;
+            }
+            else {
+                logger.LogError(
+                    ex,
+                    "JIRA 分析失敗。RunId={RunId}, ProjectId={ProjectId}, JiraKey={JiraKey}, ConversationId={ConversationId}",
+                    runId,
+                    request.ProjectId,
+                    fullKey,
+                    conversation.Id);
+
+                await analysisRuns.FailAsync(
+                    runId,
+                    AtlassianErrorCodes.AiAnalysisFailed,
+                    CancellationToken.None);
+
+                await TryDeleteConversationAsync(
+                    conversations,
+                    conversation.Id,
+                    logger);
+
+                await TryWriteSseErrorAsync(
+                    http,
+                    AtlassianErrorCodes.AiAnalysisFailed,
+                    logger);
+            }
         }
     }
 

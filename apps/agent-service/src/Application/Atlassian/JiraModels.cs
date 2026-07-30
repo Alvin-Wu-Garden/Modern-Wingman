@@ -1,4 +1,75 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 namespace AgentService.Application.Atlassian;
+
+/// <summary>
+/// 將 ClassifiedFields 的 JSON 值正規化為字串。
+/// 支援 string、number、bool、null 以及 string 陣列（join 為「、」分隔）。
+/// 確保 sample JSON 中 Labels 等陣列型欄位不會造成反序列化失敗。
+/// </summary>
+internal sealed class FlexibleStringDictionaryConverter
+    : JsonConverter<IReadOnlyDictionary<string, string>>
+{
+    public override IReadOnlyDictionary<string, string> Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.StartObject)
+            return new Dictionary<string, string>();
+
+        var dict = new Dictionary<string, string>();
+        while (reader.Read())
+        {
+            if (reader.TokenType == JsonTokenType.EndObject)
+                break;
+
+            var key = reader.GetString() ?? string.Empty;
+            reader.Read();
+
+            var value = reader.TokenType switch
+            {
+                JsonTokenType.String => reader.GetString() ?? string.Empty,
+                JsonTokenType.Number => reader.TryGetInt64(out var i) ? i.ToString() : reader.GetDouble().ToString(),
+                JsonTokenType.True => "是",
+                JsonTokenType.False => "否",
+                JsonTokenType.Null => string.Empty,
+                JsonTokenType.StartArray => ReadStringArray(ref reader),
+                _ => string.Empty,
+            };
+
+            if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value))
+                dict[key] = value;
+        }
+
+        return dict;
+    }
+
+    private static string ReadStringArray(ref Utf8JsonReader reader)
+    {
+        var items = new List<string>();
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+        {
+            if (reader.TokenType == JsonTokenType.String)
+                items.Add(reader.GetString() ?? string.Empty);
+            else if (reader.TokenType == JsonTokenType.Number)
+                items.Add(reader.TryGetInt64(out var n) ? n.ToString() : reader.GetDouble().ToString());
+        }
+        return string.Join("、", items.Where(s => !string.IsNullOrWhiteSpace(s)));
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        IReadOnlyDictionary<string, string> value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteStartObject();
+        foreach (var (k, v) in value)
+            writer.WriteString(k, v);
+        writer.WriteEndObject();
+    }
+}
 
 /// <summary>
 /// 所有 Atlassian / JIRA 操作的統一回傳結果容器。
@@ -62,13 +133,12 @@ public sealed record JiraAttachmentInfo
 public sealed record NormalizedJiraIssue
 {
     public required JiraIssuePreview Preview { get; init; }
-    public string? Resolution { get; init; }
-    public IReadOnlyList<string> Components { get; init; } = [];
-    public IReadOnlyList<string> Versions { get; init; } = [];
-    public string? Reporter { get; init; }
+     public IReadOnlyList<string> Components { get; init; } = [];
     public string? DescriptionMarkdown { get; init; }
 
-    /// <summary>白名單自訂欄位，以「欄位顯示名稱 → Markdown 文字」格式儲存。</summary>
+    /// <summary>白名單自訂欄位，以「欄位顯示名稱 → Markdown 文字」格式儲存。
+    /// 值可為字串或陣列（陣列自動以「、」join）。</summary>
+    [JsonConverter(typeof(FlexibleStringDictionaryConverter))]
     public IReadOnlyDictionary<string, string> ClassifiedFields { get; init; } =
         new Dictionary<string, string>();
 

@@ -48,10 +48,17 @@ export interface JiraIssuePreview {
   projectName: string
 }
 
+export interface LocalJiraFileSummary {
+  key: string
+  summary: string
+}
+
 export interface AnalyzeJiraInput {
   projectId: string
   jiraKey: string
   providerProfileId: string | null
+  modelId?: string | null
+  localFileKey?: string
 }
 
 // ── API 函式 ──────────────────────────────────────────────────────────────────
@@ -81,6 +88,9 @@ export const deleteAtlassianConnection = (serviceType: AtlassianServiceType): Pr
   fetch(`${AGENT_API_BASE_URL}/api/atlassian/connections/${serviceType}`, {
     method: 'DELETE',
   }).then(json<void>)
+
+export const listLocalJiraFiles = (): Promise<LocalJiraFileSummary[]> =>
+  fetch(`${AGENT_API_BASE_URL}/api/atlassian/jira/local-files`).then(json<LocalJiraFileSummary[]>)
 
 export const previewJiraIssue = (jiraKey: string): Promise<JiraIssuePreview> =>
   fetch(`${AGENT_API_BASE_URL}/api/atlassian/jira/preview`, {
@@ -166,6 +176,7 @@ export function atlassianErrorMessage(code: string): string {
     JIRA_RATE_LIMITED: 'JIRA 請求過於頻繁，請稍後再試。',
     JIRA_CONTENT_TOO_LARGE: '議題內容過大，無法處理。',
     AI_PROVIDER_NOT_CONFIGURED: '尚未設定 AI 供應商，請先至設定頁新增 API Key。',
+    ANALYSIS_QUOTA_EXCEEDED: 'AI點數已達上線，請確認剩餘點數或更換 API Key。',
     AI_ANALYSIS_FAILED: 'AI 分析失敗，請確認 API Key 有效後重試。',
     ANALYSIS_CANCELLED: '分析已取消。',
   }

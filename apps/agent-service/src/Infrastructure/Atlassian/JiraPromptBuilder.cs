@@ -324,20 +324,10 @@ public static class JiraPromptBuilder
         sb.AppendLine("### 基本資訊");
         sb.AppendLine($"- **類型**：{p.IssueType}");
         sb.AppendLine($"- **狀態**：{p.Status}");
-        if (!string.IsNullOrWhiteSpace(issue.Resolution))
-            sb.AppendLine($"- **Resolution**：{issue.Resolution}");
         if (!string.IsNullOrWhiteSpace(p.Priority))
             sb.AppendLine($"- **優先程度**：{p.Priority}");
         if (issue.Components.Count > 0)
             sb.AppendLine($"- **Component**：{string.Join("、", issue.Components)}");
-        if (issue.Versions.Count > 0)
-            sb.AppendLine($"- **版本**：{string.Join("、", issue.Versions)}");
-        if (!string.IsNullOrWhiteSpace(issue.Reporter))
-            sb.AppendLine($"- **Reporter**：{issue.Reporter}");
-        if (!string.IsNullOrWhiteSpace(p.Assignee))
-            sb.AppendLine($"- **Assignee**：{p.Assignee}");
-        if (!string.IsNullOrWhiteSpace(p.Updated))
-            sb.AppendLine($"- **Updated**：{p.Updated}");
         sb.AppendLine($"- **專案**：{p.ProjectName} ({p.ProjectKey})");
         sb.AppendLine();
 
