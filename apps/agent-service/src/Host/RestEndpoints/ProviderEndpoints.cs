@@ -75,9 +75,9 @@ public static class ProviderEndpoints
         var profile = providerService.ListProfiles().FirstOrDefault(p => p.Id == id);
         if (profile is null) return Results.NotFound();
 
-        var hasEnvVar = settingStore.HasEnvVar(id);
-        var hasStoredKey = !hasEnvVar && settingStore.GetApiKey(id) is not null;
         var dbSetting = await settingStore.GetAsync(id, ct);
+        var hasEnvVar = settingStore.HasEnvVar(id);
+        var hasStoredKey = !string.IsNullOrWhiteSpace(dbSetting?.ProtectedApiKey);
 
         CopilotRuntimeStatusDto? runtimeStatus = null;
         if (profile.Kind == ProviderKind.CopilotDefault)
@@ -114,12 +114,19 @@ public static class ProviderEndpoints
         var profile = providerService.ListProfiles().FirstOrDefault(p => p.Id == id);
         if (profile is null) return Results.NotFound();
 
+        var apiKey = settingStore.GetApiKey(profile.Id);
+        if (string.IsNullOrWhiteSpace(apiKey))
+            return Results.Ok(Array.Empty<ProviderModelDto>());
+
         var models = profile.Kind switch
         {
             ProviderKind.CopilotDefault => await ListCopilotModelsAsync(copilotClientService, ct),
-            _ when IsOpenRouterProfile(profile) =>
-                await ListOpenRouterModelsAsync(profile, settingStore, httpClientFactory, ct),
-            _ => GetByokFixedModels(profile),
+            _ => await ListByokModelsAsync(
+                profile,
+                apiKey,
+                settingStore,
+                httpClientFactory,
+                ct),
         };
 
         return Results.Ok(models);
@@ -151,54 +158,40 @@ public static class ProviderEndpoints
                 ));
             }
 
-            // 依 Group → Id 排序
-            return result.Count > 0
-                ? [.. result.OrderBy(m => m.Group).ThenBy(m => m.Id)]
-                : GetCopilotFallbackModels();
+            return [.. result.OrderBy(m => m.Group).ThenBy(m => m.Id)];
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
-            // SDK 呼叫失敗時，退回已知常見模型清單
-            return GetCopilotFallbackModels();
+            return [];
         }
     }
 
-    /// <summary>SDK 無法取得時的備用 Copilot 模型清單。</summary>
-    private static List<ProviderModelDto> GetCopilotFallbackModels() =>
-    [
-        new("gpt-4.1",            "GPT-4.1",            "gpt-4"),
-        new("gpt-4o",             "GPT-4o",             "gpt-4"),
-        new("gpt-4o-mini",        "GPT-4o mini",        "gpt-4"),
-        new("o3",                 "o3",                 "o-series"),
-        new("o4-mini",            "o4-mini",            "o-series"),
-        new("claude-sonnet-4",    "Claude Sonnet 4",    "claude"),
-        new("claude-sonnet-4-5",  "Claude Sonnet 4.5",  "claude"),
-        new("claude-sonnet-4.6",  "Claude Sonnet 4.6",  "claude"),
-        new("gemini-2.0-flash",   "Gemini 2.0 Flash",   "gemini"),
-        new("gemini-2.5-pro",     "Gemini 2.5 Pro",     "gemini"),
-    ];
-
-    private static async Task<List<ProviderModelDto>> ListOpenRouterModelsAsync(
+    private static async Task<List<ProviderModelDto>> ListByokModelsAsync(
         ModelProviderProfile profile,
+        string apiKey,
         IProviderSettingStore settingStore,
         IHttpClientFactory httpClientFactory,
         CancellationToken ct)
     {
-        var baseUrl = (profile.BaseUrl ?? "https://openrouter.ai/api/v1").TrimEnd('/');
         var http = httpClientFactory.CreateClient("key-validator");
 
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/models");
-            var apiKey = settingStore.GetApiKey(profile.Id);
-            if (!string.IsNullOrWhiteSpace(apiKey))
-                req.Headers.Add("Authorization", $"Bearer {apiKey}");
+            var setting = await settingStore.GetAsync(profile.Id, ct);
+            using var req = ProviderModelsRequestFactory.Create(
+                profile,
+                apiKey,
+                setting?.BaseUrl);
 
             using var res = await http.SendAsync(req, ct);
-            if (!res.IsSuccessStatusCode) return GetOpenRouterFallbackModels();
+            if (!res.IsSuccessStatusCode) return [];
 
             await using var stream = await res.Content.ReadAsStreamAsync(ct);
-            var payload = await JsonSerializer.DeserializeAsync<OpenRouterModelsResponse>(
+            var payload = await JsonSerializer.DeserializeAsync<ProviderModelsResponse>(
                 stream,
                 cancellationToken: ct);
 
@@ -212,55 +205,17 @@ public static class ProviderEndpoints
                 .ThenBy(m => m.Id)
                 .ToList();
 
-            return models is { Count: > 0 } ? models : GetOpenRouterFallbackModels();
+            return models ?? [];
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
-            return GetOpenRouterFallbackModels();
+            return [];
         }
     }
-
-    private static List<ProviderModelDto> GetOpenRouterFallbackModels() =>
-    [
-        new("openrouter/auto",                     "OpenRouter Auto",       "openrouter"),
-        new("openai/gpt-4o",                       "GPT-4o",                "gpt-4"),
-        new("openai/gpt-4o-mini",                  "GPT-4o mini",           "gpt-4"),
-        new("anthropic/claude-sonnet-4.5",         "Claude Sonnet 4.5",     "claude-4"),
-        new("google/gemini-2.5-pro",               "Gemini 2.5 Pro",        "gemini"),
-        new("meta-llama/llama-3.3-70b-instruct",   "Llama 3.3 70B Instruct", "llama"),
-        new("mistralai/mistral-large",             "Mistral Large",         "mistral"),
-    ];
-
-    /// <summary>BYOK provider 的固定模型清單（依 providerType）。</summary>
-    private static List<ProviderModelDto> GetByokFixedModels(ModelProviderProfile profile) =>
-        profile.ProviderType switch
-        {
-            "anthropic" =>
-            [
-                new("claude-opus-4-5",           "Claude Opus 4.5",          "claude-4"),
-                new("claude-sonnet-4-5",         "Claude Sonnet 4.5",        "claude-4"),
-                new("claude-haiku-4-5",          "Claude Haiku 4.5",         "claude-4"),
-                new("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet",        "claude-3"),
-                new("claude-3-5-haiku-20241022",  "Claude 3.5 Haiku",         "claude-3"),
-                new("claude-3-opus-20240229",     "Claude 3 Opus",            "claude-3"),
-            ],
-            "azure" =>
-            [
-                new("gpt-4.1",     "GPT-4.1",     "gpt-4"),
-                new("gpt-4o",      "GPT-4o",      "gpt-4"),
-                new("gpt-4o-mini", "GPT-4o mini", "gpt-4"),
-                new("gpt-4-turbo", "GPT-4 Turbo", "gpt-4"),
-            ],
-            _ =>
-            [
-                new("gpt-5.6",        "GPT-5.6",        "gpt-5"),
-                new("gpt-4.1",        "GPT-4.1",       "gpt-4"),
-                new("gpt-4o",         "GPT-4o",        "gpt-4"),
-                new("gpt-4o-mini",    "GPT-4o mini",   "gpt-4"),
-                new("gpt-4-turbo",    "GPT-4 Turbo",   "gpt-4"),
-                new("gpt-3.5-turbo",  "GPT-3.5 Turbo", "gpt-3.5"),
-            ],
-        };
 
     private static string InferModelGroup(string modelId)
     {
@@ -290,10 +245,6 @@ public static class ProviderEndpoints
         if (modelId.StartsWith("openrouter/", StringComparison.OrdinalIgnoreCase)) return "openrouter";
         return "other";
     }
-
-    private static bool IsOpenRouterProfile(ModelProviderProfile profile) =>
-        profile.Id.Contains("openrouter", StringComparison.OrdinalIgnoreCase) ||
-        (profile.BaseUrl?.Contains("openrouter.ai", StringComparison.OrdinalIgnoreCase) ?? false);
 
     private static string? ExtractHost(string? baseUrl)
     {
@@ -397,10 +348,10 @@ public static class ProviderEndpoints
         }
     }
 
-    private sealed record OpenRouterModelsResponse(
-        [property: JsonPropertyName("data")] List<OpenRouterModelInfo>? Data);
+    private sealed record ProviderModelsResponse(
+        [property: JsonPropertyName("data")] List<ProviderModelInfo>? Data);
 
-    private sealed record OpenRouterModelInfo(
+    private sealed record ProviderModelInfo(
         [property: JsonPropertyName("id")] string? Id,
         [property: JsonPropertyName("name")] string? Name);
 }

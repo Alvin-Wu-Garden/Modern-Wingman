@@ -22,9 +22,8 @@ const PREFERRED_MODEL_ID = 'claude-sonnet-4.6'
 const LATEST_OPENAI_MODEL_ID = 'gpt-5.6'
 
 function isVerifiedProvider(status: ProviderKeyStatus | null): boolean {
-  if (!status) return false
-  // 設定頁只會把後端真實驗證成功的 Key 寫入 DB；後續 runtime 錯誤不自動改動設定。
-  return status.hasStoredKey || status.hasEnvVar
+  // 只有經設定頁驗證成功並寫入 DB 的憑證，才屬於本選擇器的可用供應商。
+  return status?.hasStoredKey === true
 }
 
 function selectDefaultModel(groups: ModelGroup[], provider: ProviderInfo | undefined): string | null {
@@ -42,6 +41,7 @@ export function ProviderModelPicker({
   onModelChange,
 }: Props) {
   const [providers, setProviders] = useState<ProviderInfo[]>([])
+  const [providersLoaded, setProvidersLoaded] = useState(false)
   const [modelGroups, setModelGroups] = useState<ModelGroup[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
   const [providerOpen, setProviderOpen] = useState(false)
@@ -49,10 +49,10 @@ export function ProviderModelPicker({
   const providerRef = useRef<HTMLDivElement>(null)
   const modelRef = useRef<HTMLDivElement>(null)
 
-  /* 首次載入時依設定頁排序，預選第一個已驗證可用的供應商。 */
+  /* 首次載入時依設定頁排序，只保留已驗證並儲存成功的供應商。 */
   useEffect(() => {
-    // 已有選擇且清單已載入時不重新查詢；新對話把選擇清為 null 才會重新初始化。
-    if (selectedProviderId && providers.length > 0) return
+    // 清單載入完成後不重複查詢；元件重新掛載時會重新讀取最新設定。
+    if (providersLoaded) return
 
     let cancelled = false
 
@@ -67,19 +67,31 @@ export function ProviderModelPicker({
         )
         if (cancelled) return
 
-        setProviders(loadedProviders)
-        if (!selectedProviderId) {
-          const firstVerified = loadedProviders.find((_provider, index) =>
-            isVerifiedProvider(statuses[index] ?? null))
-          if (firstVerified) onProviderChange(firstVerified.id)
+        const configuredProviders = loadedProviders.filter((_provider, index) =>
+          isVerifiedProvider(statuses[index] ?? null))
+        setProviders(configuredProviders)
+        setProvidersLoaded(true)
+
+        const selectedIsConfigured = configuredProviders.some(
+          (provider) => provider.id === selectedProviderId,
+        )
+        if (!selectedIsConfigured) {
+          const firstConfigured = configuredProviders[0]
+          onProviderChange(firstConfigured?.id ?? null)
+          onModelChange(null)
         }
       } catch {
-        if (!cancelled) setProviders([])
+        if (!cancelled) {
+          setProviders([])
+          setProvidersLoaded(true)
+          onProviderChange(null)
+          onModelChange(null)
+        }
       }
     })()
 
     return () => { cancelled = true }
-  }, [onProviderChange, providers.length, selectedProviderId])
+  }, [onModelChange, onProviderChange, providersLoaded, selectedProviderId])
 
   /* Close dropdowns when clicking outside */
   useEffect(() => {
@@ -93,17 +105,34 @@ export function ProviderModelPicker({
 
   /* Load models when provider changes — backend handles all provider types */
   useEffect(() => {
-    if (!selectedProviderId) { setModelGroups([]); return }
+    if (!selectedProviderId) {
+      setModelGroups([])
+      onModelChange(null)
+      return
+    }
 
+    let cancelled = false
     setLoadingModels(true)
+    setModelGroups([])
+    onModelChange(null)
 
     listProviderModels(selectedProviderId)
       .then((groups) => {
+        if (cancelled) return
         setModelGroups(groups)
         onModelChange(selectDefaultModel(groups, providers.find((provider) => provider.id === selectedProviderId)))
       })
-      .catch(() => setModelGroups([]))
-      .finally(() => setLoadingModels(false))
+      .catch(() => {
+        if (!cancelled) {
+          setModelGroups([])
+          onModelChange(null)
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingModels(false)
+      })
+
+    return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProviderId, providers])
 
