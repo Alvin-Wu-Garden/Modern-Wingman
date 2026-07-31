@@ -20,8 +20,10 @@ export interface SidebarNavigationProps {
   activeItemId?: string
   onItemClick?: (item: NavItem) => void
   header?: ReactNode
+  onHeaderDoubleClick?: () => void
   footer?: ReactNode
   collapsed?: boolean
+  style?: React.CSSProperties
   className?: string
 }
 
@@ -30,17 +32,20 @@ export function SidebarNavigation({
   activeItemId,
   onItemClick,
   header,
+  onHeaderDoubleClick,
   footer,
   collapsed = false,
+  style,
   className,
 }: SidebarNavigationProps) {
   return (
     <aside
+      style={style}
       className={cn(
-        'flex flex-col h-full',
+        'relative flex flex-col h-full overflow-visible',
         'bg-surface border-r border-border',
-        'transition-all duration-200 shrink-0',
-        collapsed ? 'w-16' : 'w-64 max-[640px]:w-16',
+        'transition-[width] duration-200 shrink-0',
+        'max-[640px]:!w-16',
         className
       )}
     >
@@ -48,17 +53,25 @@ export function SidebarNavigation({
       {header && (
         <div
           className={cn(
-            'px-4 py-4 border-b border-border',
-            collapsed && 'flex justify-center px-2',
-            'max-[640px]:flex max-[640px]:justify-center max-[640px]:px-2'
+            'relative flex h-16 shrink-0 select-none items-center border-b border-border px-4',
+            collapsed && 'justify-center px-2',
+            'max-[640px]:justify-center max-[640px]:px-2'
           )}
         >
           {header}
+          {onHeaderDoubleClick && (
+            <div
+              aria-hidden="true"
+              title="雙擊收合或展開側邊欄"
+              onDoubleClick={onHeaderDoubleClick}
+              className="absolute inset-x-0 bottom-0 h-2 cursor-pointer"
+            />
+          )}
         </div>
       )}
 
       {/* Nav sections */}
-      <nav className="flex-1 overflow-y-auto p-3 space-y-5 max-[640px]:px-2">
+      <nav className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-5 max-[640px]:px-2">
         {sections.map((section, idx) => (
           <div key={idx}>
             {section.title && !collapsed && (

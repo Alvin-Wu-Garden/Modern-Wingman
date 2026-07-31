@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
+  ChevronLeft,
+  ChevronRight,
+  FolderGit2,
   FolderOpen,
   Loader2,
   MessageSquare,
@@ -12,6 +15,7 @@ import {
   Database,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { useResizablePanel } from '@/components/layout/use-resizable-panel'
 import { Modal } from '@/components/ui/modal'
 import { cn } from '@/lib/utils'
 import { ConversationPane } from '@/features/chat/components/ConversationPane'
@@ -36,6 +40,12 @@ const hasUsableIndex = (manifestVersion: string | null | undefined) => Boolean(m
  * 不再提供知識問答／影響分析／資料情報分頁，所有問題都走共用 ConversationPane。
  */
 export function ProjectsPage() {
+  const projectSidebar = useResizablePanel({
+    storageKey: 'modern-wingman:layout:project-sidebar',
+    defaultWidth: 288,
+    minWidth: 240,
+    maxWidth: 480,
+  })
   const {
     projects,
     activeProjectId,
@@ -176,15 +186,35 @@ export function ProjectsPage() {
 
   return (
     <div className="flex min-h-0 flex-1 bg-surface-alt">
-      <aside className="flex w-72 shrink-0 flex-col border-r border-border bg-surface">
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+      <aside
+        style={projectSidebar.panelStyle}
+        className="relative flex shrink-0 flex-col border-r border-border bg-surface transition-[width] duration-200 max-[640px]:!w-16"
+      >
+        <div className={cn(
+          'relative flex h-16 shrink-0 items-center border-b border-border',
+          projectSidebar.collapsed ? 'justify-center px-2' : 'justify-between px-4',
+        )}
+        >
+          {projectSidebar.collapsed ? (
+            <FolderGit2 className="h-4 w-4 text-brand" aria-label="專案解析" />
+          ) : (
           <h1 className="text-sm font-semibold text-ink">專案解析</h1>
-          <Button size="icon" variant="ghost" title="新增專案" onClick={() => setShowAddProject(true)}>
-            <Plus className="h-4 w-4" />
-          </Button>
+          )}
+          {!projectSidebar.collapsed && (
+            <Button size="icon" variant="ghost" title="新增專案" onClick={() => setShowAddProject(true)}>
+              <Plus className="h-4 w-4" />
+            </Button>
+          )}
+          <div
+            aria-hidden="true"
+            title="雙擊收合或展開專案側邊欄"
+            onDoubleClick={projectSidebar.toggleCollapsed}
+            className="absolute inset-x-0 bottom-0 h-2 cursor-pointer"
+          />
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-2">
+        {!projectSidebar.collapsed && (
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-2">
           {loading && projects.length === 0 && (
             <p className="p-3 text-xs text-ink-subtle">載入專案中…</p>
           )}
@@ -271,6 +301,26 @@ export function ProjectsPage() {
             </>
           )}
         </div>
+        )}
+
+        <button
+          type="button"
+          aria-label={projectSidebar.collapsed ? '展開專案側邊欄' : '收合專案側邊欄'}
+          aria-expanded={!projectSidebar.collapsed}
+          title={projectSidebar.collapsed ? '展開專案側邊欄' : '收合專案側邊欄'}
+          onClick={projectSidebar.toggleCollapsed}
+          className="absolute right-0 top-12 z-30 flex h-7 w-7 translate-x-1/2 items-center justify-center rounded-full border border-border bg-surface text-ink-secondary shadow-sm transition-colors hover:bg-surface-alt hover:text-ink max-[640px]:hidden"
+        >
+          {projectSidebar.collapsed
+            ? <ChevronRight className="h-3.5 w-3.5" />
+            : <ChevronLeft className="h-3.5 w-3.5" />}
+        </button>
+        {!projectSidebar.collapsed && (
+          <div
+            {...projectSidebar.resizeHandleProps}
+            className="absolute bottom-0 right-0 top-0 z-20 w-1 translate-x-1/2 cursor-col-resize touch-none outline-none hover:bg-brand/40 focus:bg-brand/50 max-[640px]:hidden"
+          />
+        )}
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">
