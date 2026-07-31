@@ -91,7 +91,7 @@ if (-not $AgentOnly) {
     $escapedTauriConfigPath = $tauriConfigPath.Replace("'", "''")
     $desktopCommand = `
         "Set-Location -LiteralPath '$escapedDesktopPath'; " + `
-        "try { pnpm tauri dev --config '$escapedTauriConfigPath' } " + `
+        "try { pnpm.cmd tauri dev --config '$escapedTauriConfigPath' } " + `
         "finally { Remove-Item -LiteralPath '$escapedTauriConfigPath' -Force -ErrorAction SilentlyContinue }"
 
     # 子 PowerShell 會繼承此環境變數，確保 Vite 與 Tauri 使用同一個動態連接埠。

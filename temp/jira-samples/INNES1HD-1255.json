@@ -1,0 +1,76 @@
+{
+  "Preview": {
+    "Key": "INNES1HD-1255",
+    "Summary": "140160-貨幣市場交易功能應防堵原始交易重覆產生提解情形",
+    "Status": "待IT初步評估",
+    "IssueType": "Bug",
+    "Priority": "Major",
+    "Assignee": "吳怡婷",
+    "Updated": "2026-06-11T17:45:13.007+0800",
+    "ProjectKey": "INNES1HD",
+    "ProjectName": "INVES1_HelpDesk"
+  },
+  "Components": [
+    "14-交易"
+  ],
+  "DescriptionMarkdown": "近期貨幣市場商品_債RPRS的提解交易於公版報表上有重複出現情形，分析說明如下：\n\n發生情境：\n\n1.人工輸入提解交易單號= M3DFI240808001，送出但尚未覆核 。此時系統已長出一筆提解交易紀錄。\n\n2.人工撤回提解交易M3DFI240808001，**但系統未將1的交易紀錄作廢**。\n\n3.使用140160-貨幣市場交易作業裡的[檔案上傳]功能上傳同日其他交易，但把M3DFI240808001編號用作另一筆新作交易用，該提解交易給予新編號M3DFI240808030。\n\n以上操作流程因程式設計處理不周，致使提解交易重複產生且無法在介面上刪除被撤回之提解交易，連帶影響投確和投會單位無法進行交易確認及帳務處理\n\n故請增加防堵機制，以避免再次發生提解交易重複情形。\n\n \n\n另提醒前台單位在程式調整前，提解交易請使用同一種方式進行操作，且勿使用提解交易編號作為其他交易用。\n\n \n\n已生成多餘之提解交易因無法於介面刪除，故同步提出CDC申請處理之，並同時會簽權責相關部門(國內固收、投資確認)。",
+  "ClassifiedFields": {
+    "Labels": [
+      "部位專案"
+    ],
+    "議題管理人員": "陳雅姿"
+  },
+  "LinkedIssues": [
+    {
+      "Key": "INNES1HD-1470",
+      "Summary": "提解後會有交易編號重複的問題",
+      "LinkType": "關連問題"
+    },
+    {
+      "Key": "INNES1HD-1326",
+      "Summary": "200304貨幣市場NCD上傳資料編碼問題",
+      "LinkType": "關連問題"
+    },
+    {
+      "Key": "INNES1HD-1378",
+      "Summary": "SD結構式存款利率重設問題",
+      "LinkType": "關連問題"
+    },
+    {
+      "Key": "INNES1HD-1240",
+      "Summary": "140160-貨幣市場交易作業-NCD交易前手息及利息金額欄位計算邏輯錯誤",
+      "LinkType": "關連問題"
+    }
+  ],
+  "Attachments": [
+    {
+      "Filename": "HD-1255_CDC_202409270125.html",
+      "MimeType": "text/html",
+      "Size": 119090
+    },
+    {
+      "Filename": "Re_ _寶碩系統_正式環境_貨幣市場債RPRS公版報表-提解交易筆數異常.msg",
+      "MimeType": "application/octet-stream",
+      "Size": 266240
+    },
+    {
+      "Filename": "RE++20240808債RPRS公版報表-提解交易筆數異常.msg",
+      "MimeType": "application/octet-stream",
+      "Size": 467968
+    },
+    {
+      "Filename": "資料變更申請單_HD-1255刪除重複提解交易.docx",
+      "MimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "Size": 27823
+    }
+  ],
+  "Comments": [
+    {
+      "Id": "382488",
+      "AuthorDisplayName": "林群翔",
+      "Body": "問題原因：\n先做一筆提解單A的資料，在tblTranCFActual會產生一筆Event=117的資料，\n後續透過檔案上傳，將提解單A改成新作單A，系統仍存在原提解單A的117資料，\n此時重新做一筆提解單B，tblTranCFActual也會產生一筆Event=117的資料，\n這時產出公版報表，就會顯示兩筆(提解單A、B)提解的資料。\n\n替代方案：\n避免將提解單改成新作單情境",
+      "Created": "2025-10-08T09:40:56.977+0800",
+      "Updated": "2025-10-08T09:40:56.977+0800"
+    }
+  ]
+}

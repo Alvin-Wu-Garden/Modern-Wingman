@@ -1,0 +1,546 @@
+{
+  "Preview": {
+    "Key": "INNES1HD-1162",
+    "Summary": "台幣定存交易保管行欄位問題",
+    "Status": "待寶碩評估",
+    "IssueType": "Bug",
+    "Priority": "Major",
+    "Assignee": "陳冠成",
+    "Updated": "2026-06-11T17:45:13.370+0800",
+    "ProjectKey": "INNES1HD",
+    "ProjectName": "INVES1_HelpDesk"
+  },
+  "Components": [
+    "14-交易"
+  ],
+  "DescriptionMarkdown": "1) 4/2以人工方式輸入投資單編號M2DFI240402003交易，以公版報表看有註記保管行為JPM-OIU，但於交易修改畫面顯示無資料(詳附件)，請查明原因並協助於系統將此筆交易之保管行資料清空。\n\n \n\n[^複本 iaBondTran_20240514173125.xls]",
+  "ClassifiedFields": {
+    "議題管理人員": "陳冠成"
+  },
+  "LinkedIssues": [],
+  "Attachments": [
+    {
+      "Filename": "140160- M2DFI240402003.jpg",
+      "MimeType": "image/jpeg",
+      "Size": 74195
+    },
+    {
+      "Filename": "20240528CDC語法.sql",
+      "MimeType": "application/x-sql",
+      "Size": 3125
+    },
+    {
+      "Filename": "2024-06-18-USER-S9_M2DFI240402003.csv",
+      "MimeType": "text/csv",
+      "Size": 123
+    },
+    {
+      "Filename": "2024-06-19-USER-K61_投會測試M2FFI240516005.csv",
+      "MimeType": "text/csv",
+      "Size": 97
+    },
+    {
+      "Filename": "2024-06-19-USER-S9_投會測試M2FFI240516005.csv",
+      "MimeType": "text/csv",
+      "Size": 75
+    },
+    {
+      "Filename": "2024-06-19-USER-TH_投會測試M2FFI240516005.csv",
+      "MimeType": "text/csv",
+      "Size": 234
+    },
+    {
+      "Filename": "20260203_RE FW 【寶碩系統正式環境】台幣定存提解交易異常，建議重存交易以修正資料.msg",
+      "MimeType": "application/octet-stream",
+      "Size": 1186816
+    },
+    {
+      "Filename": "20260203處理紀錄.docx",
+      "MimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "Size": 304059
+    },
+    {
+      "Filename": "HD-1162_富邦IT評估(20240524).docx",
+      "MimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "Size": 870824
+    },
+    {
+      "Filename": "image-2024-05-15-10-59-16-580.png",
+      "MimeType": "image/png",
+      "Size": 400228
+    },
+    {
+      "Filename": "image-2024-05-15-10-59-32-499.png",
+      "MimeType": "image/png",
+      "Size": 398058
+    },
+    {
+      "Filename": "image-2024-05-15-11-00-34-663.png",
+      "MimeType": "image/png",
+      "Size": 10222
+    },
+    {
+      "Filename": "image-2024-05-22-16-18-26-019.png",
+      "MimeType": "image/png",
+      "Size": 59964
+    },
+    {
+      "Filename": "image-2024-05-23-11-07-42-885.png",
+      "MimeType": "image/jpeg",
+      "Size": 74195
+    },
+    {
+      "Filename": "image-2024-06-12-13-33-26-949.png",
+      "MimeType": "image/png",
+      "Size": 57481
+    },
+    {
+      "Filename": "image-2024-06-13-13-30-20-291.png",
+      "MimeType": "image/png",
+      "Size": 35679
+    },
+    {
+      "Filename": "image-2024-06-14-10-00-35-708.png",
+      "MimeType": "image/png",
+      "Size": 19394
+    },
+    {
+      "Filename": "image-2024-06-19-09-42-54-324.png",
+      "MimeType": "image/png",
+      "Size": 8238
+    },
+    {
+      "Filename": "image-2024-06-19-09-43-30-422.png",
+      "MimeType": "image/png",
+      "Size": 12510
+    },
+    {
+      "Filename": "image-2024-06-19-09-44-09-855.png",
+      "MimeType": "image/png",
+      "Size": 66064
+    },
+    {
+      "Filename": "image-2024-06-19-09-44-35-525.png",
+      "MimeType": "image/png",
+      "Size": 35104
+    },
+    {
+      "Filename": "image-2024-06-19-09-45-01-397.png",
+      "MimeType": "image/png",
+      "Size": 11673
+    },
+    {
+      "Filename": "image-2024-06-19-09-45-18-469.png",
+      "MimeType": "image/png",
+      "Size": 35104
+    },
+    {
+      "Filename": "image-2024-06-19-16-33-17-465.png",
+      "MimeType": "image/png",
+      "Size": 34887
+    },
+    {
+      "Filename": "image-2024-06-19-16-33-31-116.png",
+      "MimeType": "image/png",
+      "Size": 62569
+    },
+    {
+      "Filename": "image-2024-06-19-16-33-51-922.png",
+      "MimeType": "image/png",
+      "Size": 36470
+    },
+    {
+      "Filename": "image-2024-06-25-13-34-19-613.png",
+      "MimeType": "image/png",
+      "Size": 25279
+    },
+    {
+      "Filename": "image-2024-06-25-13-34-47-661.png",
+      "MimeType": "image/png",
+      "Size": 6668
+    },
+    {
+      "Filename": "image-2024-06-28-16-57-26-836.png",
+      "MimeType": "image/png",
+      "Size": 180383
+    },
+    {
+      "Filename": "image-2024-07-05-16-45-33-087.png",
+      "MimeType": "image/png",
+      "Size": 17135
+    },
+    {
+      "Filename": "image-2024-07-05-16-45-46-260.png",
+      "MimeType": "image/png",
+      "Size": 32680
+    },
+    {
+      "Filename": "image-2024-07-08-09-41-20-276.png",
+      "MimeType": "image/png",
+      "Size": 76234
+    },
+    {
+      "Filename": "image-2024-07-08-09-42-03-217.png",
+      "MimeType": "image/png",
+      "Size": 28641
+    },
+    {
+      "Filename": "image-2025-06-24-11-25-38-832.png",
+      "MimeType": "image/png",
+      "Size": 99814
+    },
+    {
+      "Filename": "image-2025-06-24-11-27-31-980.png",
+      "MimeType": "image/png",
+      "Size": 99814
+    },
+    {
+      "Filename": "PRO_20250422&0526&0527_TRACE LOG.zip",
+      "MimeType": "application/zip",
+      "Size": 8077235
+    },
+    {
+      "Filename": "PRO_iabondholding_20250623.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 486912
+    },
+    {
+      "Filename": "PRO_tblRawdata_TY01_TradeDATE 20250526&27.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 11776
+    },
+    {
+      "Filename": "PRO_tblRawdata_TY02_TradeDATE 20250422.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 13824
+    },
+    {
+      "Filename": "RE   JIRA HELP DESK議題  INNES1HD-1162 台幣定存交易保管行欄位問題.msg",
+      "MimeType": "application/octet-stream",
+      "Size": 382976
+    },
+    {
+      "Filename": "RE   寶碩系統_HelpDesk議題  INNES1HD-1162 台幣定存交易保管行欄位問題.msg",
+      "MimeType": "application/octet-stream",
+      "Size": 334336
+    },
+    {
+      "Filename": "RE   寶碩系統_HelpDesk議題  INNES1HD-1162 台幣定存交易保管行欄位問題-1.msg",
+      "MimeType": "application/octet-stream",
+      "Size": 508928
+    },
+    {
+      "Filename": "RE 寶碩系統_HelpDesk議題 INNES1HD-1162 台幣定存交易保管行欄位問題--140052 到期無法修改問題.msg",
+      "MimeType": "application/octet-stream",
+      "Size": 567808
+    },
+    {
+      "Filename": "RE  請協助至正式環境執行查詢語法.msg",
+      "MimeType": "application/octet-stream",
+      "Size": 133632
+    },
+    {
+      "Filename": "RPO_tblUSER_ID 649.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 6144
+    },
+    {
+      "Filename": "UAT_iaBondTran_投會測試M2FFI240516005.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 293376
+    },
+    {
+      "Filename": "【寶碩系統正式環境】台幣定存提解交易異常，建議重存交易以修正資料.msg",
+      "MimeType": "application/octet-stream",
+      "Size": 732672
+    },
+    {
+      "Filename": "元大NCD bug.docx",
+      "MimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "Size": 401768
+    },
+    {
+      "Filename": "正式_iaBondTran_20240402.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 364032
+    },
+    {
+      "Filename": "正式_iaBondTran_20240612.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 67072
+    },
+    {
+      "Filename": "正式_tblRawdata_0612NCD_元大商業銀行營業部.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 38912
+    },
+    {
+      "Filename": "正式_tblRawdata_M2DFI240402003_S8S9.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 35840
+    },
+    {
+      "Filename": "正式_tblRawdata_TY02_調整後.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 31232
+    },
+    {
+      "Filename": "正式_tblTran_0612NCD_元大商業銀行營業部.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 18432
+    },
+    {
+      "Filename": "正式_tblTranCustodian_M1DFI240612004.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 4608
+    },
+    {
+      "Filename": "正式_tblTranlog_0612NCD_元大商業銀行營業部.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 37376
+    },
+    {
+      "Filename": "正式_tblTranlog_TY02_調整後.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 10752
+    },
+    {
+      "Filename": "複本 iaBondTran_20240514173125.xls",
+      "MimeType": "application/vnd.ms-excel",
+      "Size": 239616
+    }
+  ],
+  "Comments": [
+    {
+      "Id": "328045",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "保管行有問題交易:M2DFI240402003 ，交易員輸入時「保管行」欄位並未輸入任何值\n\n但點開交易畫面一開始保管行欄位會代出「JPM-OIU」，過約5~10秒後該欄位閃消失變成空白\n且查看該筆交易tblTranCustdion ，「Custdion」卻有代入「JPM-OIU」\n\n投會於測試環境試新增台幣定存交易+用複製的方式新增，皆無USER提報之情況出現\n還請廠商查看正式環境M2DFI240402003 ，交易輸入時未維護保管行，但系統卻自行預代之原因及該筆交易如何修正?\n\n相關資料請參考附件檔（其中包含正式環境：iabondtran、交易畫面、tblTranCustdion \n及投會於測試環境模擬情境)\n[^正式_iaBondTran_20240402.xls]",
+      "Created": "2024-05-15T11:04:54.413+0800",
+      "Updated": "2024-05-15T11:04:54.413+0800"
+    },
+    {
+      "Id": "328824",
+      "AuthorDisplayName": "林群翔",
+      "Body": "此問題尚不知道如何發生，反覆進行交易輸入都不會發生User狀況，先提供解決此筆資料的方式，需另外再請User提供操作的情境。\n\n請將此筆交易重存並完成放行，再重新產出報表確認保管行欄位是否顯示正確，\n因不影響庫存，故不需跑臨時日結，可到今日晚上一起跑全日結即可。\n\n謝謝！",
+      "Created": "2024-05-20T11:53:50.560+0800",
+      "Updated": "2024-05-20T11:53:50.560+0800"
+    },
+    {
+      "Id": "328756",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "因重存交易恐有動到交易異動紀錄之疑慮\n還請廠商確認，有問題交易:M2DFI240402003 是否可以CDC方式進行調整?\n若可以CDC方式進行，還請廠商提供2種調整方式的優劣及影響，以利USER評估及選擇\n\n謝謝",
+      "Created": "2024-05-20T13:24:56.850+0800",
+      "Updated": "2024-05-20T16:45:33.470+0800"
+    },
+    {
+      "Id": "328876",
+      "AuthorDisplayName": "林群翔",
+      "Body": "此議題目前有兩方案，再請協助評估擬採取何者方案。\n\n方案一：\n採CDC方式，異動交易、歷程及到期資料，將其保管行欄位清空\n優：更新速度快\n缺：採此方式無異動紀錄，此議題需異動table較多，若後續仍有問題較不易查看\n\n方案二：\n採交易重存方式並完成覆核；\n而原有保管行的到期資料金額也同步修改為0，跑完日結後會再重產一筆沒有保管行的到期資料\n優：以系統正規方式儲存，且留有修改記錄，後續發生問題較易查看\n缺：採此方式操作流程時間較長\n\n謝謝！",
+      "Created": "2024-05-20T20:38:29.743+0800",
+      "Updated": "2024-05-20T20:38:29.743+0800"
+    },
+    {
+      "Id": "328886",
+      "AuthorDisplayName": "戴雅玲",
+      "Body": "IT於SIT環境無法復現User所反應的問題，若採用CDC方式異動資料，影響範圍較大，若資料未刪除或異動完全，後續仍有問題時不易確認原因，故經IT評估，建議採用廠商所提的方案二，再請User協助評估與選擇，謝謝。",
+      "Created": "2024-05-21T09:24:44.010+0800",
+      "Updated": "2024-05-21T13:32:22.700+0800"
+    },
+    {
+      "Id": "329168",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "針對方案二 ：\n因 正式環境該筆交易在畫面上「保管行」欄位為空白\nUSER 重存該筆交易時「保管行」欄位下拉選單為「No Option」\n重存動作，在畫面上來並「保管行」欄位與重存前相同(無異動)，\n無法得知是否有成功清空，故USER有附件檔之疑慮 ，還請IT協助確認及評估，謝謝\n\n[^RE   寶碩系統_HelpDesk議題  INNES1HD-1162 台幣定存交易保管行欄位問題.msg]",
+      "Created": "2024-05-22T16:20:32.987+0800",
+      "Updated": "2024-05-23T11:07:49.847+0800"
+    },
+    {
+      "Id": "329176",
+      "AuthorDisplayName": "戴雅玲",
+      "Body": "針對方案一\n富邦IT想先確認CDC語法調整方式，請廠商協助提供CDC語法以便評估後續影響範圍。\n\n針對方案二\n因正式環境該筆交易在畫面上「保管行」欄位為空白，且保管行下拉選單為「No Option」，若執行重存與覆核作業，無法確認保管行資料是否可成功清空，故User有附件檔之疑慮，再請廠商協助評估方案二否可以解決問題。\n\n以上再請廠商協助確認並回覆，謝謝。",
+      "Created": "2024-05-22T17:13:41.480+0800",
+      "Updated": "2024-05-24T09:15:45.240+0800"
+    },
+    {
+      "Id": "329462",
+      "AuthorDisplayName": "戴雅玲",
+      "Body": "經富邦IT初步分析，台幣定存交易保管行欄位問題，推測可能是該筆交易於tblRawData.DataContent中保管行欄位有值「JPM-OIU」，所以當點開交易修改畫面時，該筆交易的保管行欄位一開始會帶出「JPM-OIU」的資料，後與廠商討論，廠商建議於交易畫面切換「Portfolio」或「幣別」下拉選單，再切換回原設定，重存交易並執行放行作業後，檢查該筆交易於tblRawData.DataContent資料，保管行欄位有成功被清空。\n測試報告如下，提供測報給廠商參考與分析，謝謝。\n\n[^HD-1162_富邦IT評估(20240524).docx]",
+      "Created": "2024-05-24T17:35:48.467+0800",
+      "Updated": "2024-05-24T17:35:48.467+0800"
+    },
+    {
+      "Id": "330394",
+      "AuthorDisplayName": "戴雅玲",
+      "Body": "CDC語法會針對tblRawData.DataContent   Formattype為'S8'、'S9'、'TH'、'K61'、'TY02'進行資料剖析與重組資料後，\n再依序更新或刪除tblRawData、tblDataHistoryDetail、tblTranCustodian、tblTranCFActual、tblTranCFActualMapping裡的資料，\n富邦IT於SIT環境模擬情境，測試過程中無法完整模擬user發生情境，CDC語法若執行有誤後續衍伸問題將提高問題的查找難度，故建議採用廠商建議之方案二，謝謝。\n\nCDC需異動的資料表清單如下：\n1.更新tblRawData(原始資料匯入表) \n2.更新tblDataHistoryDetail資料(資料異動歷程明細資料)：BeforeValue、AfterValue欄位資料異動\n3.刪除tblTranCustodian資料(交易保管行)(key值TranLogID)\n4.修改tblTranCFActual資料(交易金流資料檔) \n5.修改tblTranCFActualMapping資料(現金流量轉交易對應)",
+      "Created": "2024-06-04T14:19:37.857+0800",
+      "Updated": "2024-06-04T14:19:37.857+0800"
+    },
+    {
+      "Id": "330496",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "經IT再次與廠商確認後，**建議調整方式仍為「方案二 ：採交易重存方式並完成覆核」**\n\nUSER所提出的\n\n「因該筆交易在畫面上「保管行」欄位為空白，重存該筆交易時「保管行」欄位下拉選單為「No Option」重存動作，在畫面上來並「保管行」欄位與重存前相同(無異動)，無法得知是否有成功清空」之疑慮\n\n**廠商提供之異動為方式：「於交易畫面切換「Portfolio」或「幣別」下拉選單，再切換回原設定，重存交易並執行放行作業後」此方式已通過IT測試，確實可清空不正確之保管行資料（詳見IT 附加檔案）如同意IT建議，可即刻進行人工調整交易並放行，日結後投確一科同仁進行後續到期資料調整因交易調整需回溯日結，為避免日結時間太久，還請國內固收人員盡快確認欲選擇方案謝謝**",
+      "Created": "2024-06-06T11:13:26.013+0800",
+      "Updated": "2024-06-06T11:13:26.013+0800"
+    },
+    {
+      "Id": "331005",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "6/6 國內固收已依IT/寶碩建議人工調整M2DFI240402003\n調整後投會三科初看tblRawdata及iaBondTran ，\n+交易編號M2DFI240402003 異常產生的保管行已被清空,  \n+{+}投確一科同仁[~B2506] 已可於140052-到期作業：將保管行有誤之資料金額修改為零並重新維護日結後新產生的到期資料，{+}{+}因今日6/7逢連假前一日，異動後將觸發回溯日結(5/14~6/9)，如無緊急需求，建議可於下週二6/11再行調整，以免日結時間過長{+}\n\n+[^正式_tblRawdata_TY02_調整後.xls][^正式_tblTranlog_TY02_調整後.xls]\n\n[^RE   寶碩系統_HelpDesk議題  INNES1HD-1162 台幣定存交易保管行欄位問題.msg]+",
+      "Created": "2024-06-07T09:25:46.647+0800",
+      "Updated": "2024-06-07T09:25:46.647+0800"
+    },
+    {
+      "Id": "331173",
+      "AuthorDisplayName": "許芳瑜 [X]",
+      "Body": "今日將此筆到期進行送審，跳出以下畫面，再請協助釐清，感謝!!",
+      "Created": "2024-06-12T13:32:18.300+0800",
+      "Updated": "2024-06-12T13:33:29.757+0800"
+    },
+    {
+      "Id": "331178",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "前台反映今日另有一筆NCD亦發生帶入異常保管行資料之問題:\n今日交易操作方式為：\nTWD NCD  Trade Date =2024/06/12 交易對手=元大商業銀行營業部 共有4筆\n以新增方式輸入第一筆交易編號M1DFI240612001後，\n以複製方式新增另外3筆交易編號M1DFI240612002~M1DFI240612004\n執行上述動作期間無出現任何異常狀況，也無欄位進行過異動，\n但最後一筆交易M1DFI240612004 有帶入異常保管行 JPM-OIU 之情況\n相關tbltran、tblTranlog、tblRawdata、tblTranCustodian、iabondTran 如下附件，還請廠商查明原因\n[^正式_iaBondTran_20240612.xls]\n[^正式_tblTran_0612NCD_元大商業銀行營業部.xls]\n\n[^正式_tblRawdata_0612NCD_元大商業銀行營業部.xls]\n\n[^正式_tblTranCustodian_M1DFI240612004.xls]\n\n[^正式_tblTranlog_0612NCD_元大商業銀行營業部.xls]",
+      "Created": "2024-06-12T14:25:19.307+0800",
+      "Updated": "2024-06-12T14:25:19.307+0800"
+    },
+    {
+      "Id": "331184",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "第一次發生帶入異常保管行資料之定存交易M2DFI240402003，\n前台選擇方案二: 人工重存交易，重存後查看tblRawdata 、iabondTran等，原始交易之保管行已被清空--〉日結後系統重新產生無保管行的利息及到期資料，\n今日6/12 投確欲於140052 -到期／還本作業修改 舊到期資料(有保管行) ，\n跳出「查無保管行（JPM-OIU），商品代碼 M2DFI240402003_1」Error 無法修改\n但140041-利息收付作業：則可成功將舊交易（有保管行)金額改為0(但尚未放行)\n相關tblRawdata_S8S9 如下附件，還請廠商協助查看並提供解決方式，謝謝\n[^正式_tblRawdata_M2DFI240402003_S8S9.xls]",
+      "Created": "2024-06-12T15:07:59.773+0800",
+      "Updated": "2024-06-12T15:07:59.773+0800"
+    },
+    {
+      "Id": "331197",
+      "AuthorDisplayName": "陳威中 [X]",
+      "Body": "今日交易操作方式記載於附上之word檔，與怡芬敘述狀況相同，惟元大最後一筆交易有帶入異常保管行 JPM-OIU 之情況，\n\n還請廠商查明原因，謝謝。\n\n \n\n[^元大NCD bug.docx]",
+      "Created": "2024-06-12T17:16:44.837+0800",
+      "Updated": "2024-06-12T17:16:44.837+0800"
+    },
+    {
+      "Id": "331298",
+      "AuthorDisplayName": "林群翔",
+      "Body": "到期資料無法儲存，可使用CSV匯入方式調整，\n再請協助調整S9資料後再重新匯入。\n\n操作步驟：\nStep 1.使用以下語法撈取資料\n查詢語法：\nselect * from tblrawdata where datacontent like '%M2DFI240402003%' and categorytype = 'S9' order by moditime desc\n\nS9欄位對應，可參考以下語法：\nselect * from tblcsvformat where formattype = 'S9'\n(點開 enable =1 的 Content資料)\n\nStep 2.將S9資料重新調整\n\nStep 3.重新匯入\n\n謝謝！",
+      "Created": "2024-06-13T11:19:04.100+0800",
+      "Updated": "2024-06-13T11:21:54.077+0800"
+    },
+    {
+      "Id": "331438",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "6/12 NCD 帶入異常保管行交易，為保留交易狀態供廠商查看故USER未進行調整\n基於帳務及交易狀態正確之考量，還請廠商盡快查看異常原因。\n\n另，查看貨幣市場需求「保管行」欄位，不同商品類型有不同的保管行預設值帶入規則，\n是否因「保管行預設值」帶入有誤判之情況",
+      "Created": "2024-06-14T10:03:12.343+0800",
+      "Updated": "2024-06-14T10:03:12.343+0800"
+    },
+    {
+      "Id": "331840",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "將S9匯入正式環境後，上傳檔已將到期價格改為零，但140052-到期畫面，到期價格仍為100，還請廠商確認是否還有其它作業需進行，謝謝\n匯入檔[^2024-06-18-USER-S9_M2DFI240402003.csv]",
+      "Created": "2024-06-19T09:45:19.810+0800",
+      "Updated": "2024-06-19T09:45:50.633+0800"
+    },
+    {
+      "Id": "331867",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "投會三於UAT以另一檔定存交易測試匯入到期S9、TH、K61 將下述欄位皆修改為0, \n匯入後140052  總項及明細本金畫面查看皆已為零，**但點進交易明細「到期價格」仍為100，還請廠商確認如何可將「到期價格」調整為0\n**\n\n「TH ：名目本金(元)、\n\n    K61 ：名目本金、成交價格、除息金額、交割金額\n\n    S9：面額、到期價格、是否收到、交割金額」\n\n相關資料如下附件[^UAT_iaBondTran_投會測試M2FFI240516005.xls]\n\n上傳檔 ：[^2024-06-19-USER-TH_投會測試M2FFI240516005.csv]\n[^2024-06-19-USER-K61_投會測試M2FFI240516005.csv]\n\n[^2024-06-19-USER-S9_投會測試M2FFI240516005.csv]",
+      "Created": "2024-06-19T16:36:20.817+0800",
+      "Updated": "2024-06-19T16:36:20.817+0800"
+    },
+    {
+      "Id": "332008",
+      "AuthorDisplayName": "吳淑芬",
+      "Body": "(代Shawn回覆如下)\n\n第1題. 第一筆發生帶入異常保管行 JPM-OIU之定存交易M2DFI240402003\n(回覆)\n140052-到期/還本作業 的 到期價格 欄位邏輯如下：\n有基本資料，填入基本資料設定的Mature Price\n\n無基本資料，會產生虛擬基本資料，並填入該資料的Mature Price，固定填入100\n(ex.定存交易)\n\n故140052無法直接修改到期價格。\n謝謝！\n\n第2題. 第二筆發帶入異常保管行JPM-OIU 之NCD：M1DFI240612004\n(回覆)\n經檢視保管行判斷流程，目前仍無法確認問題發生原因，寶碩內部需再思量其他方式來確認；\n另NCD交易資料是否可先請協助重存(同定存交易方式處理)，\n\n若無到期資料：請協助重存NCD交易\n\n若有到期資料：先請將到期資料金額設為0，再重新儲存交易\n\n謝謝！",
+      "Created": "2024-06-20T14:46:24.233+0800",
+      "Updated": "2024-06-20T14:46:24.233+0800"
+    },
+    {
+      "Id": "331993",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "定存到期，尚有一問題還請廠商回覆:\n細項:「本金、名目本金、到期價格、到期本金、交割金額 」欄位仍有數字/iabondTran 相關欄位亦仍有數字，除S9外 是否需另外再匯入 TH/K61 沖銷部位?",
+      "Created": "2024-06-20T15:02:48.717+0800",
+      "Updated": "2024-06-20T15:02:48.717+0800"
+    },
+    {
+      "Id": "332127",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "[~B2849] [~B2521] 有關NCD、定存交易帶入異常保管行資料之問題，廠商尚在查找原因及排除方式，在此之前，為確保帳務正確性，\n還請評估依廠商之建議比照先前定存交易，重存 NCD ：M1DFI240612004 （修改portfolio 或幣別再調整回原先設定）\n\n謝謝",
+      "Created": "2024-06-21T09:21:15.003+0800",
+      "Updated": "2024-06-21T09:21:15.003+0800"
+    },
+    {
+      "Id": "332047",
+      "AuthorDisplayName": "吳淑芬",
+      "Body": "(代Shawn回覆如下)   \n\n針對交易畫面誤入保管行問題，因無法確認發生原因，故此議題會先以Log方式處理。\n謝謝！",
+      "Created": "2024-06-21T10:39:41.257+0800",
+      "Updated": "2024-06-21T10:39:41.257+0800"
+    },
+    {
+      "Id": "332342",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "有關第一筆異常定存交易M2DFI240402003\n140052 到期_細項資料:「本金、名目本金、到期價格、到期本金、交割金額 」欄位/iabondTran 相關欄位亦仍有數字 之問題：\n廠商已回覆需CDC 調整細項資料之tblTranlog  import date 再執行 importade 日結，\n觸發從到期日 2024/5/14 重新日結，才能將總項的金額分配至細項\n  \n\n[^RE   JIRA HELP DESK議題  INNES1HD-1162 台幣定存交易保管行欄位問題.msg]\n[~B2506] 如USER欲調整 140052 : M2DFI240402003 到期資料之細項金額，還請填寫 EIP予ＩＴ申請",
+      "Created": "2024-06-25T13:41:56.203+0800",
+      "Updated": "2024-06-25T13:44:12.387+0800"
+    },
+    {
+      "Id": "332726",
+      "AuthorDisplayName": "陳威中 [X]",
+      "Body": "本週三（6/26）又發生如6/12保管行出現JPM-IOU之情事，經投資確認部反應如下方附圖，\n\n我的操作方式如下\n\n因該日有三筆星展銀行定存，第一筆key進寶碩後其餘僅以複製方式修改到期日，如同6/12元大NCD出現異常反應時做法，惟過去有多筆同銀行不同到期日條件時亦以此方式輸入並無出現異常，還請查明原因，感謝",
+      "Created": "2024-06-28T17:07:42.547+0800",
+      "Updated": "2024-06-28T17:07:42.547+0800"
+    },
+    {
+      "Id": "332740",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "[~B2521] [~B2849] 　同 6/27 所回覆：\n\n{+}加log 程式上線前{+}如正式環境發生類似情況，考量交易及帳務之正確性，建議依廠商提供之方式重存交易（修改portfolio 或幣別再調整回原先設定）\n\n謝謝",
+      "Created": "2024-07-01T09:27:40.530+0800",
+      "Updated": "2024-07-01T09:27:40.530+0800"
+    },
+    {
+      "Id": "333120",
+      "AuthorDisplayName": "陳雅姿",
+      "Body": "經投會三科同仁測試，即便20128-保管行預設值將案例出現的保管行JPM-OIU限制其Portfolio(為OIU_IH)，測試複製台幣交易(Portfolio非OIU_IH)仍然隨機會帶出該異常保管行，可見140160-貨幣市場交易的複製功能與20128-保管行預設值之間卡控未落實。\n\n問題初估應為140160-貨幣市場交易，台幣商品的保管行為非必填時判斷邏輯存有瑕疵，建議廠商及IT再進一步分析，謝謝。",
+      "Created": "2024-07-05T16:45:57.483+0800",
+      "Updated": "2024-07-05T16:45:57.483+0800"
+    },
+    {
+      "Id": "333130",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "補上曾經發生過帶入異常保管行JPM-OIU 的交易類型 : NCD及TD\n貨幣市場「保管行」預設邏輯如下",
+      "Created": "2024-07-08T09:43:58.883+0800",
+      "Updated": "2024-07-08T09:43:58.883+0800"
+    },
+    {
+      "Id": "359973",
+      "AuthorDisplayName": "陳怡芬",
+      "Body": "今日前台反應正式環境2025/4/22 、5/26、5/27 再次發生，台幣定存及NCD 交易輸入當下無發生仍何異常但儲存後系統誤帶入錯誤保管行JPM-OIU之問題\n提供交易輸入當下Trace log 及交易tblrawdata 如下，還請廠商儘快查明原因\n(註:交易輸入人員皆為USER ID649= 藍郁勛)\n\n[^PRO_20250422&0526&0527_TRACE LOG.zip]\n\n[^PRO_iabondholding_20250623.xls]\n\n[^PRO_tblRawdata_TY01_TradeDATE 20250526&27.xls]\n\n[^PRO_tblRawdata_TY02_TradeDATE 20250422.xls]\n\n[^RPO_tblUSER_ID 649.xls]",
+      "Created": "2025-06-24T11:14:52.810+0800",
+      "Updated": "2025-06-24T14:11:34.307+0800"
+    },
+    {
+      "Id": "359974",
+      "AuthorDisplayName": "藍郁勛 [X]",
+      "Body": "今日經投確告知，4/22定存交易出現保管行欄位為JPM-OIU之問題，經查共有四筆交易出現此異常現象，如下圖紅框所示，還請廠商儘快查明原因。",
+      "Created": "2025-06-24T11:28:57.220+0800",
+      "Updated": "2025-06-24T11:28:57.220+0800"
+    },
+    {
+      "Id": "408601",
+      "AuthorDisplayName": "陳雅姿",
+      "Body": "歷史處理紀錄供參：\n\n[^RE 寶碩系統_HelpDesk議題 INNES1HD-1162 台幣定存交易保管行欄位問題--140052 到期無法修改問題.msg]",
+      "Created": "2026-02-02T11:59:33.673+0800",
+      "Updated": "2026-02-02T11:59:33.673+0800"
+    },
+    {
+      "Id": "408607",
+      "AuthorDisplayName": "陳雅姿",
+      "Body": "2026/02/02user 反映提解交易亦莫名帶出保管行JPM-OIU並存入，惟日結過後該筆提解交易未產生庫存除列情形；亦請開發者檢視，貨幣市場交易功能，是否有針對沖抵交易的參數(例如保管行)做出檢核卡控提醒。\n\n[^【寶碩系統正式環境】台幣定存提解交易異常，建議重存交易以修正資料.msg]\n\n[^20260203_RE FW 【寶碩系統正式環境】台幣定存提解交易異常，建議重存交易以修正資料.msg]",
+      "Created": "2026-02-02T13:16:54.307+0800",
+      "Updated": "2026-02-04T12:12:45.573+0800"
+    },
+    {
+      "Id": "409596",
+      "AuthorDisplayName": "許瑞育",
+      "Body": "2026/02/03 IT有發現代入投資分類的時候，保管行選項連動後應清空在代入選項值，在未清空儲存預設值情境下，如載入時誤選，{+}未異動連動欄位{+}情況下是會儲存載入時的錯誤值，情境還原可以參考以下附件(供修改方向參考)。\nCDC處理語法也請參考附件或單號:202602021104-00\n\n[^20260203處理紀錄.docx]",
+      "Created": "2026-02-05T11:21:45.300+0800",
+      "Updated": "2026-02-05T11:22:40.607+0800"
+    }
+  ]
+}

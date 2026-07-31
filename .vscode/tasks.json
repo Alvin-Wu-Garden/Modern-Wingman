@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "build-agent-service",
+      "label": "build: agent-service",
       "command": "dotnet",
       "type": "process",
       "args": [
@@ -11,7 +11,61 @@
         "/property:GenerateFullPaths=true",
         "/consoleloggerparameters:NoSummary"
       ],
-      "problemMatcher": "$msCompile"
+      "problemMatcher": "$msCompile",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "start: agent-service",
+      "type": "process",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev/start-all.ps1",
+        "-AgentOnly"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "start: wingman",
+      "type": "process",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev/start-all.ps1",
+        "-DesktopOnly"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "start: all",
+      "type": "process",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev/start-all.ps1"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "prepare: debug agent-service + wingman",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "build: agent-service",
+        "start: wingman"
+      ],
+      "problemMatcher": []
     }
   ]
 }

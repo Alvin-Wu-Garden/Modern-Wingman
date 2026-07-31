@@ -1,0 +1,31 @@
+{
+  "Preview": {
+    "Key": "INNES1HD-1482",
+    "Summary": "修改「140167票債RP/RS到期作業」篩選條件",
+    "Status": "待IT初步評估",
+    "IssueType": "Bug",
+    "Priority": "Major",
+    "Assignee": "吳怡婷",
+    "Updated": "2026-07-22T10:20:15.387+0800",
+    "ProjectKey": "INNES1HD",
+    "ProjectName": "INVES1_HelpDesk"
+  },
+  "Components": [
+    "14-交易",
+    "跨部門"
+  ],
+  "DescriptionMarkdown": "因「140167票債RP/RS到期作業」畫面未過濾是否作廢資料顯示，\n\n依IT建議，擬修正這支View: apex_vw_MoneyMarketRPRSDueAccountCheck ，調整邏輯：回串原始提解交易資料，需再加上判斷:是否作廢=0(Repeal=0)\n\n(此為跨部門議題且非屬USER操作錯誤，由投會三科代提)\n\n[^RE 請協助查看410提解債券RP交易出現重複狀況.msg]",
+  "ClassifiedFields": {
+    "IT初步評估人員": "吳怡婷",
+    "議題管理人員": "陳雅姿"
+  },
+  "LinkedIssues": [],
+  "Attachments": [
+    {
+      "Filename": "RE 請協助查看410提解債券RP交易出現重複狀況.msg",
+      "MimeType": "application/octet-stream",
+      "Size": 1450496
+    }
+  ],
+  "Comments": []
+}

@@ -19,6 +19,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<VcsConnectionProfileRecord> VcsConnectionProfiles => Set<VcsConnectionProfileRecord>();
     public DbSet<VcsCredentialRecord> VcsCredentials => Set<VcsCredentialRecord>();
     public DbSet<ProjectVcsBindingRecord> ProjectVcsBindings => Set<ProjectVcsBindingRecord>();
+    public DbSet<AtlassianConnectionRecord> AtlassianConnections => Set<AtlassianConnectionRecord>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -111,6 +112,24 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         {
             entity.ToTable("project_vcs_bindings");
             entity.HasKey(x => x.ProjectId);
+            entity.Property(x => x.UpdatedAt).HasConversion<string>();
+        });
+
+        builder.Entity<AtlassianConnectionRecord>(entity =>
+        {
+            entity.ToTable("atlassian_connections");
+            entity.HasKey(x => x.Id);
+            entity.HasIndex(x => x.ServiceType).IsUnique();
+            entity.Property(x => x.ServiceType).HasMaxLength(10);
+            entity.Property(x => x.BaseUrl).HasMaxLength(500);
+            entity.Property(x => x.AuthType).HasMaxLength(10);
+            entity.Property(x => x.Username).HasMaxLength(200);
+            entity.Property(x => x.ProtectedSecret).HasMaxLength(2000);
+            entity.Property(x => x.EncryptionScheme).HasMaxLength(50);
+            entity.Property(x => x.ApiVersion).HasMaxLength(10);
+            entity.Property(x => x.VerifiedDisplayName).HasMaxLength(200);
+            entity.Property(x => x.VerifiedAt).HasConversion<string>();
+            entity.Property(x => x.CreatedAt).HasConversion<string>();
             entity.Property(x => x.UpdatedAt).HasConversion<string>();
         });
     }

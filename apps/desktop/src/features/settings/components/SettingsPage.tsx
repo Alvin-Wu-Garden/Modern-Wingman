@@ -31,6 +31,7 @@ import { ProviderBrandIcon } from '@/components/ui/provider-brand-icon'
 import { cn } from '@/lib/utils'
 import { SpeechSettingsPanel } from './SpeechSettingsPanel'
 import { VersionControlSettingsPanel } from './VersionControlSettingsPanel'
+import { AtlassianSettingsPanel } from './AtlassianSettingsPanel'
 import {
   listProviders,
   getProviderKeyStatus,
@@ -605,6 +606,13 @@ export function SettingsPage() {
 
         <SettingsSection title="版本控制" description="管理 Git／Bitbucket、SVN 連線與 Portable CLI Runtime。">
           <VersionControlSettingsPanel />
+        </SettingsSection>
+
+        <SettingsSection
+          title="Atlassian 連線設定"
+          description="設定 JIRA 與 Wiki 連線，啟用「分析 JIRA 議題」功能。"
+        >
+          <AtlassianSettingsPanel />
         </SettingsSection>
 
         <SettingsSection

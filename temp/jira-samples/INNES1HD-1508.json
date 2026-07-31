@@ -1,0 +1,34 @@
+{
+  "Preview": {
+    "Key": "INNES1HD-1508",
+    "Summary": "請於介面增設「取消登入預設畫面」選項",
+    "Status": "待IT處理",
+    "IssueType": "Improvement",
+    "Priority": "Minor",
+    "Assignee": "吳怡婷",
+    "Updated": "2026-06-22T09:19:45.793+0800",
+    "ProjectKey": "INNES1HD",
+    "ProjectName": "INVES1_HelpDesk"
+  },
+  "Components": [
+    "20-系統管理用"
+  ],
+  "DescriptionMarkdown": "於選單處按右鍵，可自訂該功能為登入後預設畫面，惟一旦設定過就無法於介面上恢復原樣(登入後見桌面)，目前僅能CDC刪除tblUserAutoLoginPicture的資料方可恢復。\n\n是否可在介面增設「取消登入預設畫面」選項?\n\n目前僅能 做CDC 刪除tblUserAutoLoginPicture資料，方可恢復無預設畫面狀態。",
+  "ClassifiedFields": {
+    "議題難易度": "2"
+  },
+  "LinkedIssues": [],
+  "Attachments": [
+    {
+      "Filename": "image-2026-06-18-13-39-31-693.png",
+      "MimeType": "image/png",
+      "Size": 19754
+    },
+    {
+      "Filename": "image-2026-06-18-13-40-48-400.png",
+      "MimeType": "image/png",
+      "Size": 62542
+    }
+  ],
+  "Comments": []
+}

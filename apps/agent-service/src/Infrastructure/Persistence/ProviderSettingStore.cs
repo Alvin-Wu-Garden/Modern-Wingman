@@ -66,12 +66,22 @@ public sealed class ProviderSettingStore : IProviderSettingStore
         // 2. DB 儲存值（同步讀取，避免 GetAsync 引入 async 複雜度在 non-async call path）
         using var db = _dbFactory.CreateDbContext();
         var entity = db.ProviderSettings.Find(profileId);
-        return entity?.ProtectedApiKey is not null &&
-               entity.EncryptionScheme is not null
-            ? _secretProtector.Unprotect(
-                entity.ProtectedApiKey,
-                entity.EncryptionScheme)
-            : null;
+        if (entity?.ProtectedApiKey is null || entity.EncryptionScheme is null)
+            return null;
+
+        try
+        {
+            return _secretProtector.Unprotect(entity.ProtectedApiKey, entity.EncryptionScheme);
+        }
+        catch (System.Security.Cryptography.CryptographicException)
+        {
+            // DPAPI 密文無法在目前的使用者/機器環境下解密（例如帳號或設定檔狀態異常）。
+            // 清除無效的加密資料，讓服務以「未設定」狀態啟動，避免整個 host 崩潰。
+            entity.ProtectedApiKey = null;
+            entity.EncryptionScheme = null;
+            db.SaveChanges();
+            return null;
+        }
     }
 
     public async Task SetValidatedCredentialAsync(

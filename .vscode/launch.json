@@ -2,26 +2,45 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug AgentService",
-      "type": "coreclr",
+      "name": "偵錯 Agent Service + Wingman",
+      "type": "dotnet",
       "request": "launch",
-      "preLaunchTask": "build-agent-service",
-      "program": "${workspaceFolder}/apps/agent-service/bin/Debug/net10.0/AgentService.dll",
-      "args": [],
-      "cwd": "${workspaceFolder}/apps/agent-service",
-      "stopAtEntry": false,
-      "justMyCode": true,
-      "env": {
-        "ASPNETCORE_ENVIRONMENT": "Development",
-        "ASPNETCORE_URLS": "http://localhost:5200"
-      },
-      "console": "integratedTerminal"
+      "preLaunchTask": "prepare: debug agent-service + wingman",
+      "projectPath": "${workspaceFolder}/apps/agent-service/AgentService.csproj"
     },
     {
-      "name": "Attach to AgentService (已在執行)",
+      "name": "偵錯 Agent Service",
+      "type": "dotnet",
+      "request": "launch",
+      "preLaunchTask": "build: agent-service",
+      "projectPath": "${workspaceFolder}/apps/agent-service/AgentService.csproj"
+    },
+    {
+      "name": "附加至 Agent Service（已在執行）",
       "type": "coreclr",
       "request": "attach",
-      "processName": "AgentService"
+      "processId": "${command:pickProcess}"
+    },
+    {
+      "name": "啟動 Wingman（start-all.ps1）",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\dev\\start-all.ps1\" -DesktopOnly",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "啟動 Agent Service（start-all.ps1）",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\dev\\start-all.ps1\" -AgentOnly",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "啟動全部（start-all.ps1）",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\dev\\start-all.ps1\"",
+      "cwd": "${workspaceFolder}"
     }
   ]
 }

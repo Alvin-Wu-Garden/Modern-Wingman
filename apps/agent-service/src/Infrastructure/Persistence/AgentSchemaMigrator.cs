@@ -1,15 +1,18 @@
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace AgentService.Infrastructure.Persistence;
 
 /// <summary>
-/// 建立不適合映射成 EF entity 的少數資料表。
-/// 本次尚未發布前採乾淨 schema，不再保留逐欄 ALTER 與舊 Run／Plugin 相容邏輯。
+/// 建立不適合映射成 EF entity 的少數資料表，並對已存在的舊 DB 補齊欄位。
+/// EnsureCreatedAsync() 只在 DB 檔案不存在時建立 schema；本 Migrator 負責
+/// 讓已存在的舊 DB 也能跟上新欄位定義。
 /// </summary>
 public static class AgentSchemaMigrator
 {
-    public static Task ApplyAsync(AppDbContext db, CancellationToken ct = default) =>
-        db.Database.ExecuteSqlRawAsync("""
+    public static async Task ApplyAsync(AppDbContext db, CancellationToken ct = default)
+    {
+        await db.Database.ExecuteSqlRawAsync("""
             CREATE TABLE IF NOT EXISTS "project_index_manifests" (
                 "Version" TEXT NOT NULL PRIMARY KEY,
                 "ProjectId" TEXT NOT NULL,
@@ -148,5 +151,118 @@ public static class AgentSchemaMigrator
                 FOREIGN KEY("ArtifactId") REFERENCES "artifacts"("Id") ON DELETE RESTRICT
             );
 
+            CREATE TABLE IF NOT EXISTS "jira_analysis_runs" (
+                "Id" TEXT NOT NULL PRIMARY KEY,
+                "WingmanProjectId" TEXT NOT NULL,
+                "ConversationId" TEXT NULL,
+                "JiraKey" TEXT NOT NULL,
+                "JiraSummary" TEXT NOT NULL,
+                "JiraUpdatedAt" TEXT NULL,
+                "Status" TEXT NOT NULL,
+                "ErrorCode" TEXT NULL,
+                "CreatedAt" TEXT NOT NULL,
+                "CompletedAt" TEXT NULL
+            );
+            CREATE INDEX IF NOT EXISTS "IX_jira_analysis_runs_Project_Created"
+                ON "jira_analysis_runs" ("WingmanProjectId", "CreatedAt" DESC);
+
             """, ct);
+
+        // atlassian_connections 由 EF EnsureCreatedAsync() 負責初始建立。
+        // 對已存在但欄位不完整的舊 DB（例如手動建立或版本升級前的殘缺表）進行補丁。
+        await PatchAtlassianConnectionColumnsAsync(db.Database.GetDbConnection(), ct);
+    }
+
+    // 欄位最低要求：這些欄位缺任何一個代表是殘缺表，直接 DROP 讓 EF 重建。
+    private static readonly string[] AtlassianRequiredColumns =
+        ["Id", "ServiceType", "BaseUrl", "AuthType", "CreatedAt", "UpdatedAt"];
+
+    // 可透過 ALTER TABLE ADD COLUMN 補齊的可選欄位（nullable 或有 DEFAULT）。
+    private static readonly Dictionary<string, string> AtlassianPatchColumns =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Username"]            = "ALTER TABLE atlassian_connections ADD COLUMN Username TEXT",
+            ["ProtectedSecret"]     = "ALTER TABLE atlassian_connections ADD COLUMN ProtectedSecret TEXT",
+            ["EncryptionScheme"]    = "ALTER TABLE atlassian_connections ADD COLUMN EncryptionScheme TEXT",
+            ["ApiVersion"]          = "ALTER TABLE atlassian_connections ADD COLUMN ApiVersion TEXT",
+            ["IsVerified"]          = "ALTER TABLE atlassian_connections ADD COLUMN IsVerified INTEGER NOT NULL DEFAULT 0",
+            ["VerifiedAt"]          = "ALTER TABLE atlassian_connections ADD COLUMN VerifiedAt TEXT",
+            ["VerifiedDisplayName"] = "ALTER TABLE atlassian_connections ADD COLUMN VerifiedDisplayName TEXT",
+        };
+
+    /// <summary>
+    /// 對已存在但欄位不完整的 atlassian_connections 進行補丁：
+    /// - 若缺少必要欄位（殘缺表）：DROP 後由 EF EnsureCreatedAsync 在下次啟動重建。
+    ///   本次啟動會再呼叫一次 EnsureCreatedAsync 讓它立即補建。
+    /// - 若只缺可選欄位：ALTER TABLE ADD COLUMN。
+    /// - 若欄位完整：no-op。
+    /// </summary>
+    private static async Task PatchAtlassianConnectionColumnsAsync(
+        DbConnection connection, CancellationToken ct)
+    {
+        if (connection.State == System.Data.ConnectionState.Closed)
+            await connection.OpenAsync(ct);
+
+        // 讀取現有欄位清單
+        var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var pragmaCmd = connection.CreateCommand())
+        {
+            pragmaCmd.CommandText = "PRAGMA table_info(atlassian_connections)";
+            await using var reader = await pragmaCmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                existingColumns.Add(reader.GetString(1)); // index 1 = column name
+        }
+
+        // 表不存在 → EF EnsureCreatedAsync 會負責，這裡不插手
+        if (existingColumns.Count == 0) return;
+
+        // 殘缺表（缺少必要欄位）→ DROP，讓後面的 EnsureCreatedAsync 重建
+        var missingRequired = AtlassianRequiredColumns
+            .FirstOrDefault(c => !existingColumns.Contains(c));
+        if (missingRequired is not null)
+        {
+            await using var dropCmd = connection.CreateCommand();
+            dropCmd.CommandText = "DROP TABLE IF EXISTS atlassian_connections";
+            await dropCmd.ExecuteNonQueryAsync(ct);
+
+            // 立即重建：用 CREATE TABLE 補建完整結構
+            await using var createCmd = connection.CreateCommand();
+            createCmd.CommandText = """
+                CREATE TABLE IF NOT EXISTS atlassian_connections (
+                    Id TEXT NOT NULL PRIMARY KEY,
+                    ServiceType TEXT NOT NULL,
+                    BaseUrl TEXT NOT NULL,
+                    AuthType TEXT NOT NULL,
+                    Username TEXT,
+                    ProtectedSecret TEXT,
+                    EncryptionScheme TEXT,
+                    ApiVersion TEXT,
+                    IsVerified INTEGER NOT NULL DEFAULT 0,
+                    VerifiedAt TEXT,
+                    VerifiedDisplayName TEXT,
+                    CreatedAt TEXT NOT NULL,
+                    UpdatedAt TEXT NOT NULL
+                );
+                """;
+            await createCmd.ExecuteNonQueryAsync(ct);
+
+            await using var idxCmd = connection.CreateCommand();
+            idxCmd.CommandText =
+                "CREATE UNIQUE INDEX IF NOT EXISTS IX_atlassian_connections_ServiceType " +
+                "ON atlassian_connections (ServiceType)";
+            await idxCmd.ExecuteNonQueryAsync(ct);
+            return;
+        }
+
+        // 補齊可選欄位
+        foreach (var (columnName, alterSql) in AtlassianPatchColumns)
+        {
+            if (!existingColumns.Contains(columnName))
+            {
+                await using var alterCmd = connection.CreateCommand();
+                alterCmd.CommandText = alterSql;
+                await alterCmd.ExecuteNonQueryAsync(ct);
+            }
+        }
+    }
 }

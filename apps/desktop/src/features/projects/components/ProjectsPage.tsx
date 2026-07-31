@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
-  Database,
   FolderOpen,
   Loader2,
   MessageSquare,
@@ -9,6 +8,8 @@ import {
   Play,
   Plus,
   Trash2,
+  BarChart2,
+  Database,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Modal } from '@/components/ui/modal'
@@ -17,6 +18,8 @@ import { ConversationPane } from '@/features/chat/components/ConversationPane'
 import { useChatStore } from '@/features/chat/store/useChatStore'
 import { KnowledgeGraphPage } from './KnowledgeGraphPage'
 import { ProjectDatabaseModal } from './ProjectDatabaseModal'
+import { ProjectHamburgerMenu } from './ProjectHamburgerMenu'
+import { JiraAnalysisModal } from './JiraAnalysisModal'
 import { useProjectsStore } from '../store/useProjectsStore'
 import { listVcsProfiles, type VcsProfile } from '@/services/agent-api/vcs'
 
@@ -50,6 +53,7 @@ export function ProjectsPage() {
   const {
     conversations,
     activeConversationId,
+    loadConversations,
     openConversation,
     startNewConversation,
     deleteConv,
@@ -66,6 +70,7 @@ export function ProjectsPage() {
   const [saving, setSaving] = useState(false)
   const [graphProjectId, setGraphProjectId] = useState<string | null>(null)
   const [databaseProjectId, setDatabaseProjectId] = useState<string | null>(null)
+  const [jiraProjectId, setJiraProjectId] = useState<string | null>(null)
   const [menu, setMenu] = useState<ProjectMenu | null>(null)
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null)
 
@@ -146,6 +151,12 @@ export function ProjectsPage() {
     await startNewConversation('project', activeProject.id)
   }
 
+  const handleJiraConversationCreated = async (
+    conversationId: string,
+  ) => {
+    await loadConversations()
+    await openConversation(conversationId)
+  } 
   /**
    * Neo4j 圖譜清除可能需要數秒；保留專案列並顯示刪除狀態，
    * 讓使用者知道請求仍在執行，同時避免重複送出刪除。
@@ -178,37 +189,52 @@ export function ProjectsPage() {
             <p className="p-3 text-xs text-ink-subtle">載入專案中…</p>
           )}
           {projects.map((project) => (
-            <button
+            <div
               key={project.id}
-              type="button"
-              disabled={deletingProjectId === project.id}
-              onClick={() => setActiveProject(project.id)}
-              onContextMenu={(event) => {
-                event.preventDefault()
-                setMenu({ projectId: project.id, x: event.clientX, y: event.clientY })
-              }}
-              className={cn(
-                'mb-1 w-full rounded-xl px-3 py-2.5 text-left transition-colors',
-                project.id === activeProjectId
-                  ? 'bg-brand/10 text-brand'
-                  : 'text-ink-secondary hover:bg-surface-alt hover:text-ink',
-                deletingProjectId === project.id && 'cursor-wait opacity-70',
-              )}
+              className="relative mb-1"
             >
-              <p className="truncate text-sm font-medium">{project.name}</p>
-              <p className="mt-0.5 truncate text-xs opacity-70">
-                {deletingProjectId === project.id ? (
-                  <span className="flex items-center gap-1.5">
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    刪除中…
-                  </span>
-                ) : project.indexManifestVersion
-                  ? `${project.nodeCount} 節點 · 索引可用`
-                  : project.indexStatus === 'Indexing'
-                    ? '索引中…'
-                    : '尚未索引'}
-              </p>
-            </button>
+              <button
+                type="button"
+                disabled={deletingProjectId === project.id}
+                onClick={() => setActiveProject(project.id)}
+                onContextMenu={(event) => {
+                  event.preventDefault()
+                  setMenu({ projectId: project.id, x: event.clientX, y: event.clientY })
+                }}
+                className={cn(
+                  'w-full rounded-xl px-3 py-2.5 pr-8 text-left transition-colors',
+                  project.id === activeProjectId
+                    ? 'bg-brand/10 text-brand'
+                    : 'text-ink-secondary hover:bg-surface-alt hover:text-ink',
+                  deletingProjectId === project.id && 'cursor-wait opacity-70',
+                )}
+              >
+                <p className="truncate text-sm font-medium">{project.name}</p>
+                <p className="mt-0.5 truncate text-xs opacity-70">
+                  {deletingProjectId === project.id ? (
+                    <span className="flex items-center gap-1.5">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      刪除中…
+                    </span>
+                  ) : project.indexManifestVersion
+                    ? `${project.nodeCount} 節點 · 索引可用`
+                    : project.indexStatus === 'Indexing'
+                      ? '索引中…'
+                      : '尚未索引'}
+                </p>
+              </button>
+              {/* 漢堡選單按鈕（絕對定位於右側） */}
+              <div className="absolute right-1 top-1/2 -translate-y-1/2">
+                <ProjectHamburgerMenu
+                  disabled={deletingProjectId === project.id}
+                  actions={{
+                    onDatabaseSettings: () => setDatabaseProjectId(project.id),
+                    onAnalyzeJira: () => setJiraProjectId(project.id),
+                    onDeleteProject: () => void removeSelectedProject(project.id),
+                  }}
+                />
+              </div>
+            </div>
           ))}
 
           {activeProject && (
@@ -349,6 +375,18 @@ export function ProjectsPage() {
             <Database className="h-4 w-4" />
             資料庫連線設定
           </button>
+          <div className="my-1 border-t border-border" />
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-ink hover:bg-surface-alt"
+            onClick={() => {
+              setJiraProjectId(menu.projectId)
+              setMenu(null)
+            }}
+          >
+            <BarChart2 className="h-4 w-4" />
+            分析 JIRA 議題
+          </button>
           <button
             type="button"
             disabled={deletingProjectId !== null}
@@ -482,6 +520,17 @@ export function ProjectsPage() {
           projectId={databaseProjectId}
           projectName={projects.find((project) => project.id === databaseProjectId)?.name ?? '專案'}
           onClose={() => setDatabaseProjectId(null)}
+        />
+      )}
+
+      {jiraProjectId && (
+        <JiraAnalysisModal
+          projectId={jiraProjectId}
+          projectName={projects.find((project) => project.id === jiraProjectId)?.name ?? '' }
+          onClose={() => setJiraProjectId(null)}
+          onConversationCreated={(conversationId) => {
+            void handleJiraConversationCreated(conversationId)
+          }}
         />
       )}
     </div>
