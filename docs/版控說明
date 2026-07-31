@@ -1,0 +1,487 @@
+## 一、你剛才三個指令的意思
+
+### 1. 切換到本機 main
+
+```powershell
+git switch main
+```
+
+只是把目前工作目錄切換到本機 `main` 分支，不會自動連線 GitHub，也不會 push。
+
+### 2. 設定預設追蹤分支
+
+```powershell
+git branch --set-upstream-to=github/main main
+```
+
+意思是告訴 Git：
+
+> 本機 `main` 預設對應 GitHub 的 `main`。
+
+它只修改本機 Git 設定，不會：
+
+- 修改程式碼
+- 建立 commit
+- push
+- 改變 GitHub
+- 刪除 Bitbucket remote
+
+設定後，下列指令就會預設使用 `github/main`：
+
+```powershell
+git pull
+git status
+git branch -vv
+```
+
+### 3. 只允許快進更新
+
+```powershell
+git pull --ff-only
+```
+
+相當於：
+
+```powershell
+git fetch github
+git merge --ff-only github/main
+```
+
+如果遠端只是在本機前方，Git 會直接把本機 `main` 移到遠端最新 commit。
+
+如果本機與遠端已經各自產生不同 commit，`--ff-only` 會拒絕操作，而不會偷偷建立 merge commit。對你這種雙遠端同步情境很適合。
+
+## 二、建議的固定遠端命名
+
+兩台電腦都統一保留：
+
+```text
+origin  → Bitbucket
+github  → GitHub
+```
+
+確認方式：
+
+```powershell
+git remote -v
+```
+
+應類似：
+
+```text
+origin  https://公司Bitbucket/... (fetch)
+origin  https://公司Bitbucket/... (push)
+github  https://github.com/Alvin-Wu-Garden/Modern-Wingman.git (fetch)
+github  https://github.com/Alvin-Wu-Garden/Modern-Wingman.git (push)
+```
+
+即使某台電腦無法連其中一個遠端，也可以保留它的設定。
+
+## 三、個人電腦的標準操作
+
+個人電腦主要使用 GitHub。
+
+### 每次開始工作前
+
+```powershell
+git switch main
+git branch --set-upstream-to=github/main main
+git fetch github --prune
+git pull --ff-only
+git status
+```
+
+確認：
+
+```powershell
+git branch -vv
+```
+
+應看到：
+
+```text
+main ... [github/main]
+```
+
+### 開始新功能
+
+不要直接在 `main` 開發，建立功能分支：
+
+```powershell
+git switch -c feature/功能名稱
+```
+
+例如：
+
+```powershell
+git switch -c feature/ui-improvement-2
+```
+
+完成後：
+
+```powershell
+git add <要提交的檔案>
+git commit -m "描述本次修改"
+git push --set-upstream github feature/ui-improvement-2
+```
+
+然後在 GitHub 建立 PR：
+
+```text
+base: main
+compare: feature/ui-improvement-2
+```
+
+PR 合併完成後：
+
+```powershell
+git switch main
+git fetch github
+git pull --ff-only
+```
+
+## 四、公司電腦的標準操作
+
+公司電腦主要使用 Bitbucket。
+
+### 專案搬到公司電腦後
+
+先確認工作目錄：
+
+```powershell
+git status
+git remote -v
+```
+
+將本機 `main` 改成追蹤 Bitbucket：
+
+```powershell
+git switch main
+git branch --set-upstream-to=origin/main main
+git fetch origin --prune
+```
+
+先不要直接 pull 或 push，先比較兩邊：
+
+```powershell
+git rev-list --left-right --count 'origin/main...main'
+```
+
+結果判讀：
+
+| 結果 | 意義 | 操作 |
+|---|---|---|
+| `0 0` | 完全相同 | 不需處理 |
+| `0 N` | 本機比 Bitbucket 新 | 可以 push |
+| `N 0` | Bitbucket 比本機新 | 可以 `merge --ff-only` |
+| `N M` | 兩邊都有不同 commit | 已分岔，停止直接 push |
+
+### 本機比 Bitbucket 新
+
+例如結果：
+
+```text
+0 6
+```
+
+代表本機多 6 個 commit，可以執行：
+
+```powershell
+git push origin main:main
+```
+
+這樣就能把從 GitHub 搬來的 commit 同步到 Bitbucket。
+
+### Bitbucket 比本機新
+
+例如結果：
+
+```text
+3 0
+```
+
+執行：
+
+```powershell
+git merge --ff-only origin/main
+```
+
+或者已設定追蹤 `origin/main` 時：
+
+```powershell
+git pull --ff-only
+```
+
+### 兩邊已分岔
+
+例如：
+
+```text
+3 2
+```
+
+代表：
+
+- Bitbucket 有 3 個本機沒有的 commit。
+- 本機有 2 個 Bitbucket 沒有的 commit。
+
+此時不要執行：
+
+```powershell
+git push --force
+git reset --hard
+```
+
+應建立同步分支：
+
+```powershell
+git switch -c sync/bitbucket-github
+git merge origin/main
+```
+
+解決衝突、測試、commit 後，再透過 PR 或一般 push 合併。
+
+## 五、從公司電腦搬回個人電腦
+
+搬回個人電腦後，將 `main` 改回追蹤 GitHub：
+
+```powershell
+git switch main
+git branch --set-upstream-to=github/main main
+git fetch github --prune
+```
+
+比較：
+
+```powershell
+git rev-list --left-right --count 'github/main...main'
+```
+
+判讀方式相同。
+
+### 本機包含公司端的新 commits
+
+如果結果是：
+
+```text
+0 4
+```
+
+代表本機比 GitHub 多 4 個 commit，可以建立功能分支後 push，較建議走 PR：
+
+```powershell
+git switch -c sync/bitbucket-changes-to-github
+git push --set-upstream github sync/bitbucket-changes-to-github
+```
+
+然後在 GitHub 建立：
+
+```text
+base: main
+compare: sync/bitbucket-changes-to-github
+```
+
+如果公司政策及 GitHub 規則允許直接同步，而且確定是 fast-forward，也可以：
+
+```powershell
+git push github main:main
+```
+
+## 六、如何安全搬移整個專案
+
+### 搬移前
+
+1. 關閉 Visual Studio、VS Code、TortoiseGit、Codex 與相關終端機。
+2. 確認沒有進行中的 Git 操作。
+3. 檢查工作目錄：
+
+```powershell
+git status
+```
+
+最好顯示：
+
+```text
+nothing to commit, working tree clean
+```
+
+4. 檢查 LFS：
+
+```powershell
+git lfs status
+git lfs fsck
+```
+
+5. 確認 Git repository：
+
+```powershell
+git fsck --full
+```
+
+### 尚未完成但必須搬走的工作
+
+最安全方式是建立暫存分支並 commit：
+
+```powershell
+git switch -c wip/transfer-20260731
+git add <需要搬移的檔案>
+git commit -m "WIP: transfer between computers"
+```
+
+日後可以再整理、squash 或 amend。
+
+不建議只依賴 stash，因為使用者容易忘記：
+
+```powershell
+git stash list
+```
+
+雖然完整複製 `.git` 時 stash 也會被搬走，但 WIP commit 更容易追蹤。
+
+### 搬移內容
+
+如果要搬整個資料夾，必須包含隱藏的：
+
+```text
+.git
+```
+
+也必須包含 LFS 物件：
+
+```text
+.git/lfs/objects
+```
+
+可以排除可重新產生的資料夾：
+
+```text
+node_modules
+dist
+bin
+obj
+.vite
+```
+
+不要把新資料夾直接覆蓋到另一份舊 repository 上。建議：
+
+1. 舊資料夾先改名保留。
+2. 搬來的版本解壓縮到新的空目錄。
+3. 驗證成功後再清理舊資料夾。
+
+### 搬移後驗證
+
+```powershell
+git status
+git branch -vv
+git remote -v
+git fsck --full
+git lfs fsck
+```
+
+若出現 `.git/index.lock`，先確認沒有 Git 程序，再只刪除：
+
+```powershell
+Remove-Item -LiteralPath '.git\index.lock'
+```
+
+不要刪除：
+
+```text
+.git/index
+```
+
+## 七、避免搬整個專案的進階方法
+
+一般 Git 歷史可以用 bundle 搬移：
+
+```powershell
+git bundle create Modern-Wingman.bundle --all
+```
+
+另一台電腦可以從 bundle 讀取 commits：
+
+```powershell
+git bundle verify Modern-Wingman.bundle
+git fetch .\Modern-Wingman.bundle 'refs/heads/*:refs/remotes/transfer/*'
+```
+
+但要注意：Git bundle 不會自動包含 Git LFS 實體內容。因此目前這個專案若使用 bundle，還需要另外搬移：
+
+```text
+.git/lfs/objects
+```
+
+對你目前的使用方式，安全打包完整 repository 會比較直覺。
+
+## 八、是否需要建立 github-main 本機分支
+
+先前建議的：
+
+```powershell
+git switch --create github-main --track github/main
+```
+
+適合「同一台電腦同時長期操作兩個遠端，而且兩個 main 有不同用途」的情境。
+
+你的需求是兩台電腦輪流維護，而且希望 GitHub 與 Bitbucket 最終同步，因此不建議長期建立兩條 main。
+
+建議保持：
+
+```text
+本機 main
+```
+
+然後依電腦切換 upstream：
+
+個人電腦：
+
+```powershell
+git branch --set-upstream-to=github/main main
+```
+
+公司電腦：
+
+```powershell
+git branch --set-upstream-to=origin/main main
+```
+
+## 九、每次搬移後的最短檢查清單
+
+### 個人電腦
+
+```powershell
+git status
+git remote -v
+git switch main
+git branch --set-upstream-to=github/main main
+git fetch github --prune
+git rev-list --left-right --count 'github/main...main'
+```
+
+### 公司電腦
+
+```powershell
+git status
+git remote -v
+git switch main
+git branch --set-upstream-to=origin/main main
+git fetch origin --prune
+git rev-list --left-right --count 'origin/main...main'
+```
+
+看到 `0 N` 才把本機推向遠端；看到 `N 0` 才 fast-forward 本機；看到两邊都不是零就停止並先整合。
+
+你目前這台電腦的狀態已正確：
+
+```text
+main → github/main
+github/main → 6ed4e01
+```
+
+接下來可以建立 `UI-improvement → main` 的 GitHub PR。PR 合併後再執行：
+
+```powershell
+git switch main
+git fetch github
+git pull --ff-only
+```

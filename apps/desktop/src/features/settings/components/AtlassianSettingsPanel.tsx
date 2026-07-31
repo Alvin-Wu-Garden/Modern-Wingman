@@ -38,7 +38,8 @@ function ConnectionForm({
 
   // 編輯已有設定時，欄位同步
   useEffect(() => {
-    setBaseUrl(existing?.baseUrl ?? '')
+    const defaultBaseUrl = (serviceType === 'jira' ? 'https://km.fubonlife.com.tw/jira' : serviceType === 'wiki' ? 'https://km.fubonlife.com.tw/confluence' : null) ?? '';
+    setBaseUrl(existing?.baseUrl ?? defaultBaseUrl)
     setAuthType(existing?.authType ?? 'bearer')
     setUsername(existing?.username ?? '')
     setToken('')  // Token 永不回填

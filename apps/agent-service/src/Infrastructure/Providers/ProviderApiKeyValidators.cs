@@ -34,7 +34,7 @@ public sealed class HttpProviderApiKeyValidator(
     {
         try
         {
-            using var request = BuildRequest(profile, apiKey, baseUrl);
+            using var request = ProviderModelsRequestFactory.Create(profile, apiKey, baseUrl);
             var client = httpClientFactory.CreateClient("key-validator");
             using var response = await client.SendAsync(
                 request,
@@ -60,7 +60,14 @@ public sealed class HttpProviderApiKeyValidator(
         }
     }
 
-    private static HttpRequestMessage BuildRequest(
+}
+
+/// <summary>
+/// Builds the authenticated models request shared by credential validation and model discovery.
+/// </summary>
+public static class ProviderModelsRequestFactory
+{
+    public static HttpRequestMessage Create(
         ModelProviderProfile profile,
         string apiKey,
         string? candidateBaseUrl)
