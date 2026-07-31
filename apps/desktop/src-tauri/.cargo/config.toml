@@ -1,5 +1,5 @@
 [build]
-target-dir = "D:\\CargoTarget\\modern-wingman"
+target-dir = "C:\\CargoTarget\\modern-wingman"
 
 [http]
 # Windows Schannel 在某些網路環境下無法到達 CRL 端點，停用 revoke 檢查以允許 Cargo 正常下載。

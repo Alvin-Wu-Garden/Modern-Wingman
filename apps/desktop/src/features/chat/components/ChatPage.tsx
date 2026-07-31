@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react'
 import {
   Blocks,
   Bot,
+  ChevronLeft,
+  ChevronRight,
   FolderGit2,
   MessageSquare,
   Plus,
@@ -10,6 +12,7 @@ import {
 } from 'lucide-react'
 import { AppShell } from '@/app/layout/AppShell'
 import { SidebarNavigation } from '@/components/layout/sidebar-navigation'
+import { useResizablePanel } from '@/components/layout/use-resizable-panel'
 import { Button } from '@/components/ui/button'
 import { SettingsPage } from '@/features/settings/components/SettingsPage'
 import { ProjectsPage } from '@/features/projects/components/ProjectsPage'
@@ -31,6 +34,12 @@ type ActiveView = 'home' | 'chat' | 'projects' | 'marketplace' | 'settings'
  */
 export function ChatPage() {
   const [activeView, setActiveView] = useState<ActiveView>('home')
+  const appSidebar = useResizablePanel({
+    storageKey: 'modern-wingman:layout:app-sidebar',
+    defaultWidth: 256,
+    minWidth: 208,
+    maxWidth: 400,
+  })
   const projectProgress = useProjectsStore((state) => state.progress)
   const {
     conversations,
@@ -69,7 +78,7 @@ export function ChatPage() {
       items: [
         {
           id: 'home',
-          label: '總覽',
+          label: '首頁',
           icon: <Sparkles className="h-4 w-4" />,
           onClick: () => setActiveView('home'),
         },
@@ -112,11 +121,11 @@ export function ChatPage() {
   ]
 
   const sidebarHeader = (
-    <div className="flex items-center gap-2.5">
+    <div className={cn('flex items-center gap-2.5', appSidebar.collapsed && 'justify-center')}>
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-brand">
         <Bot className="h-4 w-4 text-white" />
       </div>
-      <div className="min-w-0 max-[640px]:hidden">
+      <div className={cn('min-w-0 max-[640px]:hidden', appSidebar.collapsed && 'hidden')}>
         <p className="truncate text-sm font-semibold text-ink">Modern Wingman</p>
         <p className="text-xs font-medium text-brand-green">● Online</p>
       </div>
@@ -135,7 +144,7 @@ export function ChatPage() {
       )}
     >
       <Settings className="h-4 w-4" />
-      <span className="max-[640px]:hidden">設定</span>
+      {!appSidebar.collapsed && <span className="max-[640px]:hidden">設定</span>}
     </button>
   )
 
@@ -143,6 +152,7 @@ export function ChatPage() {
     <>
       <AppShell
       sidebar={(
+        <>
         <SidebarNavigation
           sections={sidebarSections}
           activeItemId={
@@ -151,8 +161,35 @@ export function ChatPage() {
               : activeView
           }
           header={sidebarHeader}
+          onHeaderDoubleClick={appSidebar.toggleCollapsed}
           footer={sidebarFooter}
+          collapsed={appSidebar.collapsed}
+          style={appSidebar.panelStyle}
+          className="group/app-sidebar"
         />
+        <button
+          type="button"
+          aria-label={appSidebar.collapsed ? '展開主側邊欄' : '收合主側邊欄'}
+          aria-expanded={!appSidebar.collapsed}
+          title={appSidebar.collapsed ? '展開側邊欄' : '收合側邊欄'}
+          onClick={appSidebar.toggleCollapsed}
+          className="fixed left-[var(--app-sidebar-toggle-left)] top-12 z-30 flex h-7 w-7 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-surface text-ink-secondary shadow-sm transition-colors hover:bg-surface-alt hover:text-ink max-[640px]:hidden"
+          style={{
+            '--app-sidebar-toggle-left': `${appSidebar.collapsed ? 64 : appSidebar.width}px`,
+          } as React.CSSProperties}
+        >
+          {appSidebar.collapsed
+            ? <ChevronRight className="h-3.5 w-3.5" />
+            : <ChevronLeft className="h-3.5 w-3.5" />}
+        </button>
+        {!appSidebar.collapsed && (
+          <div
+            {...appSidebar.resizeHandleProps}
+            className="fixed bottom-0 top-0 z-20 w-1 -translate-x-1/2 cursor-col-resize touch-none outline-none hover:bg-brand/40 focus:bg-brand/50 max-[640px]:hidden"
+            style={{ left: appSidebar.width }}
+          />
+        )}
+        </>
       )}
     >
       {activeView === 'home' && (
