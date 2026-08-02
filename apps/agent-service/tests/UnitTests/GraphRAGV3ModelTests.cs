@@ -155,11 +155,8 @@ public sealed class GraphRAGV3ModelTests
     [Theory]
     [InlineData("all", "all")]
     [InlineData("in", "in")]
-    [InlineData("callers", "in")]
     [InlineData("out", "out")]
-    [InlineData("callees", "out")]
-    [InlineData("same-file", "same-file")]
-    [InlineData(" CALLERS ", "in")]
+    [InlineData(" IN ", "in")]
     public void VisualNeighborMode_NormalizesUiAndLegacyValues(
         string input,
         string expected)
@@ -173,7 +170,7 @@ public sealed class GraphRAGV3ModelTests
         var exception = Assert.Throws<ArgumentException>(
             () => Neo4jGraphStore.NormalizeVisualNeighborMode("dependencies"));
 
-        Assert.Contains("same-file", exception.Message);
+        Assert.Contains("all、in、out", exception.Message);
     }
 
     [Fact]

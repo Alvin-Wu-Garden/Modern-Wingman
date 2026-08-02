@@ -154,6 +154,15 @@ public sealed class GraphRetrievalServiceV3Tests
     }
 
     [Fact]
+    public void BuildViewerLuceneQuery_AddsSafeIdentifierPrefixMatch()
+    {
+        var query = GraphRetrievalService.BuildViewerLuceneQuery("money");
+
+        Assert.Contains("\"money\"", query);
+        Assert.Contains("money*", query);
+    }
+
+    [Fact]
     public void BuildLuceneQuery_ExpandsWriteAndApprovalIntentWithoutGenericDataNoise()
     {
         var query = GraphRetrievalService.BuildLuceneQuery("覆核後資料沒有更新");
@@ -583,11 +592,10 @@ public sealed class GraphRetrievalServiceV3Tests
             _reports = reports.ToList();
             return Task.CompletedTask;
         }
-        public Task<GraphVisualDataV3> GetVisualGraphAsync(
+        public Task<GraphVisualDataV3> GetViewerGraphAsync(
             string projectId,
             int limit,
-            IReadOnlyList<string>? kinds,
-            IReadOnlyList<string>? relationshipTypes,
+            IReadOnlyList<GraphViewerSearchFilter>? filters,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(new GraphVisualDataV3([], [], 0, 0, 0, false));
         public Task<GraphVisualSchemaV3> GetVisualSchemaAsync(

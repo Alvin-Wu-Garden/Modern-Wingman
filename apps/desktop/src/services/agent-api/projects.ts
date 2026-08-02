@@ -81,15 +81,11 @@ export interface SaveProjectDatabaseConfiguration {
 
 export interface CodeGraphVisualNode {
   id: string
-  kind: string
-  role: string
-  name: string
-  filePath: string | null
-  startLine: number | null
-  endLine: number | null
-  language: string | null
-  degree: number
+  labels: string[]
+  caption: string
+  category?: string | null
   properties: Record<string, unknown>
+  metrics?: Record<string, number>
 }
 
 export interface CodeGraphVisualEdge {
@@ -101,25 +97,51 @@ export interface CodeGraphVisualEdge {
 }
 
 export interface CodeGraphVisualData {
+  contractVersion: string
   nodes: CodeGraphVisualNode[]
   edges: CodeGraphVisualEdge[]
   totalNodes: number
   loadedNodes: number
   loadedEdges: number
-  hasMore: boolean
+  truncated: boolean
 }
 
-export interface CodeGraphFacet {
-  name: string
-  count: number
+export interface CodeGraphViewerFacet {
+  id: string
+  label: string
+  description: string
+  target: 'node' | 'edge'
+  selection: 'single' | 'multiple'
+  match: 'any' | 'all'
+  values: Array<{ token: string; label: string; count: number }>
 }
 
 export interface CodeGraphSchema {
+  contractVersion: string
+  graphRevision?: string | null
   totalNodes: number
   totalEdges: number
-  nodeKinds: CodeGraphFacet[]
-  relationshipTypes: CodeGraphFacet[]
-  propertyKeys: string[]
+  facets: CodeGraphViewerFacet[]
+  captionOptions: Array<{ id: string; label: string }>
+  capabilities: {
+    search: boolean
+    neighbors: boolean
+    table: boolean
+    rawQuery: boolean
+  }
+  queryTemplates: Array<{
+    id: string
+    label: string
+    text: string
+    target?: 'manual' | 'node' | 'edge'
+  }>
+  queryHelp: string
+}
+
+export interface CodeGraphSearchResult {
+  items: Array<{ node: CodeGraphVisualNode; score: number }>
+  take: number
+  hasMore: boolean
 }
 
 export interface CodeGraphQueryResult {
@@ -282,9 +304,16 @@ export async function listProjectSqlServerDatabases(
 // 內建 Neo4j 第一次啟動可能需要下載與初始化，因此保留有限的 120 秒 UI 逾時。
 const GRAPH_REQUEST_TIMEOUT_MS = 120_000
 
-async function fetchGraphApi(url: string, init?: RequestInit): Promise<Response> {
+async function fetchGraphApi(
+  url: string,
+  init?: RequestInit,
+  externalSignal?: AbortSignal,
+): Promise<Response> {
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), GRAPH_REQUEST_TIMEOUT_MS)
+  const abortFromCaller = () => controller.abort()
+  externalSignal?.addEventListener('abort', abortFromCaller, { once: true })
+  if (externalSignal?.aborted) controller.abort()
   try {
     return await fetch(url, { ...init, signal: controller.signal })
   } catch (error) {
@@ -293,6 +322,7 @@ async function fetchGraphApi(url: string, init?: RequestInit): Promise<Response>
     throw error
   } finally {
     window.clearTimeout(timer)
+    externalSignal?.removeEventListener('abort', abortFromCaller)
   }
 }
 
@@ -307,18 +337,47 @@ export async function getProjectGraphSchema(projectId: string): Promise<CodeGrap
 
 export async function getProjectGraph(
   projectId: string,
-  options?: { limit?: number; kinds?: string[]; relations?: string[] },
+  options?: {
+    limit?: number
+    filters?: Array<{ facetId: string; tokens: string[] }>
+  },
+  signal?: AbortSignal,
 ): Promise<CodeGraphVisualData> {
-  const params = new URLSearchParams()
-  if (options?.limit) params.set('limit', String(options.limit))
-  if (options?.kinds?.length) params.set('kinds', options.kinds.join(','))
-  if (options?.relations?.length) params.set('relations', options.relations.join(','))
-  const query = params.toString()
   const response = await fetchGraphApi(
-    `${AGENT_API_BASE_URL}/api/projects/${projectId}/graph${query ? `?${query}` : ''}`,
+    `${AGENT_API_BASE_URL}/api/projects/${projectId}/graph/view`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        limit: options?.limit,
+        filters: options?.filters ?? [],
+      }),
+    },
+    signal,
   )
   if (!response.ok)
     throw new Error(await errorMessage(response, `讀取知識圖譜失敗 (${response.status})`))
+  return response.json()
+}
+
+export async function searchProjectGraph(
+  projectId: string,
+  query: string,
+  filters: Array<{ facetId: string; tokens: string[] }>,
+  take = 50,
+  signal?: AbortSignal,
+): Promise<CodeGraphSearchResult> {
+  const response = await fetchGraphApi(
+    `${AGENT_API_BASE_URL}/api/projects/${projectId}/graph/search`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, filters, take }),
+    },
+    signal,
+  )
+  if (!response.ok)
+    throw new Error(await errorMessage(response, `搜尋知識圖譜失敗 (${response.status})`))
   return response.json()
 }
 
@@ -346,7 +405,7 @@ export async function expandProjectGraphNeighbors(
   options?: {
     depth?: number
     limit?: number
-    mode?: 'all' | 'callers' | 'callees' | 'same-file'
+    mode?: 'all' | 'in' | 'out'
   },
 ): Promise<CodeGraphVisualData> {
   const response = await fetchGraphApi(

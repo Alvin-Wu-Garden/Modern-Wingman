@@ -992,6 +992,24 @@ public sealed partial class GraphRetrievalService
     }
 
     /// <summary>
+    /// Viewer 的直接搜尋除了完整詞，也允許安全的詞首匹配，讓 money 可命中
+    /// MoneyMarket 這類沒有自然斷詞的程式識別碼。GraphRAG 問答檢索仍使用
+    /// <see cref="BuildLuceneQuery"/>，避免擴大其 seed 語意。
+    /// </summary>
+    public static string BuildViewerLuceneQuery(string query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        return string.Join(" OR ", SearchSeedTerms(query)
+            .Take(20)
+            .SelectMany(term =>
+            {
+                var escaped = EscapeLucene(term);
+                return new[] { $"\"{escaped}\"", $"{escaped}*" };
+            })
+            .Distinct(StringComparer.Ordinal));
+    }
+
+    /// <summary>
     /// 同時執行完整 OR query 與少量 individual term query，再以 round-robin 合併種子。
     /// 單一高分功能（例如「新增商品」）不可吃掉全部 seed，否則同一句中的 CSV／報表／覆核
     /// 會完全沒有機會進入圖遍歷。各 query 的分數先在自己的結果內正規化，避免不同 IDF

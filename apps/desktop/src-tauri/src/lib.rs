@@ -5,6 +5,7 @@
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .run(tauri::generate_context!())
         .expect("Modern Wingman 桌面應用程式啟動失敗");
 }

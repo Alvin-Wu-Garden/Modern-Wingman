@@ -31,6 +31,13 @@ public static class ProjectEndpoints
         string DestinationPath,
         string? OperationId = null);
     public sealed record GraphQueryRequest(string Cypher, int? Limit);
+    public sealed record GraphSearchRequest(
+        string Query,
+        IReadOnlyList<GraphViewerSearchFilter>? Filters,
+        int? Take);
+    public sealed record GraphViewRequest(
+        IReadOnlyList<GraphViewerSearchFilter>? Filters,
+        int? Limit);
     public sealed record GraphNeighborsRequest(
         IReadOnlyList<string> NodeKeys,
         int? Depth,
@@ -71,7 +78,8 @@ public static class ProjectEndpoints
         group.MapPost("/{id}/summaries", BuildSummaries);
         group.MapGet("/{id}/summaries/progress", GetSummaryProgress);
         group.MapGet("/{id}/graph/schema", GetGraphSchema);
-        group.MapGet("/{id}/graph", GetGraph);
+        group.MapPost("/{id}/graph/view", GetViewerGraph);
+        group.MapPost("/{id}/graph/search", SearchGraph);
         group.MapPost("/{id}/graph/query", QueryGraph);
         group.MapPost("/{id}/graph/neighbors", ExpandGraphNeighbors);
 
@@ -362,41 +370,6 @@ public static class ProjectEndpoints
         }
     }
 
-    private static async Task<IResult> GetGraph(
-        string id,
-        int? limit,
-        string? kinds,
-        string? relations,
-        IProjectRepository repo,
-        IGraphStore graphStore,
-        INeo4jRuntime neo4jLifecycle,
-        CancellationToken ct)
-    {
-        var readiness = await EnsureProjectGraphReadyAsync(id, repo, graphStore, neo4jLifecycle, ct);
-        if (readiness is not null) return readiness;
-
-        try
-        {
-            var graph = await graphStore.GetVisualGraphAsync(
-                id,
-                limit ?? 1000,
-                SplitCsv(kinds),
-                SplitCsv(relations),
-                ct);
-            return Results.Ok(graph);
-        }
-        catch (ArgumentException ex)
-        {
-            // NodeKind 與 relationship filter 都採固定白名單；不合法值是請求錯誤，
-            // 不應被包成難以判讀的伺服器 500。
-            return Results.BadRequest(new { error = ex.Message });
-        }
-        catch (ServiceUnavailableException)
-        {
-            return GraphUnavailable(neo4jLifecycle);
-        }
-    }
-
     private static async Task<IResult> QueryGraph(
         string id,
         GraphQueryRequest request,
@@ -421,6 +394,64 @@ public static class ProjectEndpoints
             return Results.BadRequest(new { error = ex.Message });
         }
         catch (ClientException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        catch (ServiceUnavailableException)
+        {
+            return GraphUnavailable(neo4jLifecycle);
+        }
+    }
+
+    private static async Task<IResult> GetViewerGraph(
+        string id,
+        GraphViewRequest request,
+        IProjectRepository repo,
+        IGraphStore graphStore,
+        INeo4jRuntime neo4jLifecycle,
+        CancellationToken ct)
+    {
+        var readiness = await EnsureProjectGraphReadyAsync(id, repo, graphStore, neo4jLifecycle, ct);
+        if (readiness is not null) return readiness;
+
+        try
+        {
+            return Results.Ok(await graphStore.GetViewerGraphAsync(
+                id, request.Limit ?? 1000, request.Filters, ct));
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        catch (ServiceUnavailableException)
+        {
+            return GraphUnavailable(neo4jLifecycle);
+        }
+    }
+
+    private static async Task<IResult> SearchGraph(
+        string id,
+        GraphSearchRequest request,
+        IProjectRepository repo,
+        IGraphStore graphStore,
+        INeo4jRuntime neo4jLifecycle,
+        CancellationToken ct)
+    {
+        var readiness = await EnsureProjectGraphReadyAsync(id, repo, graphStore, neo4jLifecycle, ct);
+        if (readiness is not null) return readiness;
+        if (string.IsNullOrWhiteSpace(request.Query))
+            return Results.BadRequest(new { error = "請輸入搜尋關鍵字。" });
+
+        try
+        {
+            return Results.Ok(await graphStore.SearchVisualGraphAsync(
+                id,
+                request.Query,
+                request.Filters,
+                request.Take ?? 50,
+                ct));
+        }
+        catch (ArgumentException ex)
         {
             return Results.BadRequest(new { error = ex.Message });
         }
@@ -523,14 +554,6 @@ public static class ProjectEndpoints
         string? activeManifest) =>
         !string.IsNullOrWhiteSpace(projectManifest) &&
         string.Equals(projectManifest, activeManifest, StringComparison.Ordinal);
-
-    private static IReadOnlyList<string> SplitCsv(string? value) =>
-        string.IsNullOrWhiteSpace(value)
-            ? Array.Empty<string>()
-            : value
-                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
 
     private static IResult GraphUnavailable(INeo4jRuntime neo4jLifecycle) =>
         Results.Json(

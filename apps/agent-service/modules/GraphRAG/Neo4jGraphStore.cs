@@ -77,15 +77,23 @@ public sealed record GraphCommunityReport(
 /// <summary>知識圖譜瀏覽器使用的 V3 node。</summary>
 public sealed record GraphVisualNodeV3(
     string Id,
-    string Kind,
-    string Role,
-    string Name,
-    string? FilePath,
-    int? StartLine,
-    int? EndLine,
-    string Language,
-    int Degree,
-    IReadOnlyDictionary<string, object?> Properties);
+    [property: JsonIgnore] string Kind,
+    [property: JsonIgnore] string Role,
+    [property: JsonIgnore] string Name,
+    [property: JsonIgnore] string? FilePath,
+    [property: JsonIgnore] int? StartLine,
+    [property: JsonIgnore] int? EndLine,
+    [property: JsonIgnore] string Language,
+    [property: JsonIgnore] int Degree,
+    IReadOnlyDictionary<string, object?> Properties)
+{
+    // V3 欄位只供 adapter 內部投影；對外只序列化穩定的 Viewer Contract。
+    public IReadOnlyList<string> Labels => [Kind];
+    public string Caption => Name;
+    public string Category => Kind;
+    public IReadOnlyDictionary<string, int> Metrics =>
+        new Dictionary<string, int> { ["degree"] = Degree };
+}
 
 /// <summary>知識圖譜瀏覽器使用的 V3 edge。</summary>
 public sealed record GraphVisualEdgeV3(
@@ -102,18 +110,113 @@ public sealed record GraphVisualDataV3(
     int TotalNodes,
     int LoadedNodes,
     int LoadedEdges,
-    bool HasMore);
+    [property: JsonIgnore] bool HasMore)
+{
+    public string ContractVersion => "1.0";
+    public bool Truncated => HasMore;
+}
 
 /// <summary>schema facet 名稱與數量。</summary>
 public sealed record GraphFacetV3(string Name, int Count);
+
+/// <summary>Viewer descriptor 中不帶實體 schema 語意的 facet value。</summary>
+public sealed record GraphViewerFacetValue(string Token, string Label, int Count);
+
+/// <summary>View 依此動態產生 filter，不直接認識 V3 kind／role／relationship。</summary>
+public sealed record GraphViewerFacetDescriptor(
+    string Id,
+    string Label,
+    string Description,
+    string Target,
+    string Selection,
+    string Match,
+    IReadOnlyList<GraphViewerFacetValue> Values);
+
+public sealed record GraphViewerCapabilities(
+    bool Search,
+    bool Neighbors,
+    bool Table,
+    bool RawQuery);
+
+public sealed record GraphViewerCaptionOption(string Id, string Label);
+
+public sealed record GraphViewerQueryTemplate(
+    string Id,
+    string Label,
+    string Text,
+    string Target = "manual");
 
 /// <summary>V3 可視化 schema；NodeKind 固定四種、relationship 固定九種。</summary>
 public sealed record GraphVisualSchemaV3(
     int TotalNodes,
     int TotalEdges,
-    IReadOnlyList<GraphFacetV3> NodeKinds,
-    IReadOnlyList<GraphFacetV3> RelationshipTypes,
-    IReadOnlyList<string> PropertyKeys);
+    [property: JsonIgnore] IReadOnlyList<GraphFacetV3> NodeKinds,
+    [property: JsonIgnore] IReadOnlyList<GraphFacetV3> NodeRoles,
+    [property: JsonIgnore] IReadOnlyList<GraphFacetV3> RelationshipTypes)
+{
+    public string ContractVersion => "1.0";
+    public string? GraphRevision { get; init; }
+    public GraphViewerCapabilities Capabilities => new(true, true, true, true);
+    public IReadOnlyList<GraphViewerCaptionOption> CaptionOptions =>
+    [
+        new("caption", "節點名稱"),
+        new("property:role", "功能角色"),
+        new("category", "節點類型"),
+    ];
+    public IReadOnlyList<GraphViewerFacetDescriptor> Facets =>
+    [
+        new("node-category", "節點類型", "節點代表哪一類知識實體；選取後只顯示該類節點。", "node", "multiple", "any",
+            NodeKinds.Select(value => new GraphViewerFacetValue(
+                value.Name, value.Name, value.Count)).ToList()),
+        new("node-role", "功能角色", "節點在系統中的用途或責任；同一節點類型可包含不同角色。", "node", "multiple", "any",
+            NodeRoles.Select(value => new GraphViewerFacetValue(
+                value.Name, value.Name, value.Count)).ToList()),
+        new("edge-type", "關係類型", "節點之間的有向連線語意；選取後只顯示參與該關係的節點與連線。", "edge", "multiple", "any",
+            RelationshipTypes.Select(value => new GraphViewerFacetValue(
+                value.Name, value.Name, value.Count)).ToList()),
+    ];
+    public IReadOnlyList<GraphViewerQueryTemplate> QueryTemplates =>
+    [
+        new(
+            "overview",
+            "目前圖譜概覽",
+            "MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "OPTIONAL MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})-[r]->" +
+            "(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "RETURN n, r, m"),
+        new(
+            "selected-node",
+            "查詢此節點",
+            "MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "WHERE n.id = '{{nodeId}}'\n" +
+            "OPTIONAL MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})-[r]-" +
+            "(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "RETURN n, r, m",
+            "node"),
+        new(
+            "selected-edge",
+            "查詢此關係",
+            "MATCH (source:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})-[r]->" +
+            "(target:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "WHERE source.id = '{{sourceId}}' AND target.id = '{{targetId}}' " +
+            "AND type(r) = '{{edgeType}}'\n" +
+            "RETURN source, r, target",
+            "edge"),
+    ];
+    public string QueryHelp =>
+        "Enter 執行；Shift+Enter 換行。查詢範本已包含目前專案與圖譜版本的限制條件；系統會自動套用結果筆數上限。";
+}
+
+public sealed record GraphViewerSearchFilter(
+    string FacetId,
+    IReadOnlyList<string> Tokens);
+
+public sealed record GraphViewerSearchHit(GraphVisualNodeV3 Node, double Score);
+
+public sealed record GraphViewerSearchResult(
+    IReadOnlyList<GraphViewerSearchHit> Items,
+    int Take,
+    bool HasMore);
 
 /// <summary>受限 read-only Cypher 的表格與可視化結果。</summary>
 public sealed record GraphVisualQueryResultV3(
@@ -230,18 +333,26 @@ public interface IGraphStore
         CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<IReadOnlyList<string>>?>(null);
 
-    /// <summary>取得 active graph 的可視化初始子圖。</summary>
-    Task<GraphVisualDataV3> GetVisualGraphAsync(
+    /// <summary>以 descriptor facet tokens 讀取可視化子圖。</summary>
+    Task<GraphVisualDataV3> GetViewerGraphAsync(
         string projectId,
         int limit,
-        IReadOnlyList<string>? kinds,
-        IReadOnlyList<string>? relationshipTypes,
+        IReadOnlyList<GraphViewerSearchFilter>? filters,
         CancellationToken cancellationToken = default);
 
     /// <summary>取得 active V3 schema facet。</summary>
     Task<GraphVisualSchemaV3> GetVisualSchemaAsync(
         string projectId,
         CancellationToken cancellationToken = default);
+
+    /// <summary>跨越目前畫布取樣範圍搜尋 active graph。</summary>
+    Task<GraphViewerSearchResult> SearchVisualGraphAsync(
+        string projectId,
+        string query,
+        IReadOnlyList<GraphViewerSearchFilter>? filters,
+        int take,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(new GraphViewerSearchResult([], Math.Clamp(take, 1, 100), false));
 
     /// <summary>從指定 node IDs 展開 active graph 鄰域。</summary>
     Task<GraphVisualDataV3> GetVisualNeighborsAsync(
@@ -273,7 +384,7 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
     private static readonly Regex UnsafeCypher = new(
-        @"\b(CREATE|MERGE|SET|DELETE|DETACH|REMOVE|DROP|ALTER|GRANT|DENY|REVOKE|LOAD\s+CSV|IMPORT|EXPORT|FOREACH|UNION|USE|SHOW|TERMINATE)\b|CALL\s+",
+        @"\b(CREATE|INSERT|MERGE|SET|DELETE|DETACH|REMOVE|DROP|ALTER|GRANT|DENY|REVOKE|LOAD\s+CSV|IMPORT|EXPORT|FOREACH|UNION|USE|SHOW|TERMINATE)\b|CALL\s+",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly Regex MatchClause = new(
         @"\b(?:OPTIONAL\s+)?MATCH\b(?<pattern>.*?)(?=\bWHERE\b|\bWITH\b|\bRETURN\b|\bOPTIONAL\s+MATCH\b|\bMATCH\b|$)",
@@ -283,9 +394,22 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         @"\((?<node>[^()]*)\)",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly Regex BoundedLimit = new(
-        @"\bLIMIT\s+\$limit\b",
+        @"\bLIMIT\s+\$limit\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant |
-        RegexOptions.Compiled);
+        RegexOptions.Compiled | RegexOptions.Singleline);
+    private static readonly Regex TerminalLimit = new(
+        @"\bLIMIT\s+(?:\d+|\$[A-Za-z_][A-Za-z0-9_]*)\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant |
+        RegexOptions.Compiled | RegexOptions.Singleline);
+    private static readonly Regex ScopedProjectProperty = new(
+        @"\bprojectId\s*:\s*\$projectId\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly Regex ScopedVersionProperty = new(
+        @"\bgraphVersion\s*:\s*\$graphVersion\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly Regex UnboundedAggregate = new(
+        @"\bcollect\s*\(",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private readonly GraphRagNeo4jOptions _options;
     private readonly ILogger<Neo4jGraphStore> _logger;
@@ -1042,17 +1166,19 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task<GraphVisualDataV3> GetVisualGraphAsync(
+    private async Task<GraphVisualDataV3> GetVisualGraphCoreAsync(
         string projectId,
         int limit,
         IReadOnlyList<string>? kinds,
         IReadOnlyList<string>? relationshipTypes,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyList<string>? roles = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
-        limit = Math.Clamp(limit, 1, 5_000);
+        limit = Math.Clamp(limit, 1, 10_000);
         var normalizedKinds = NormalizeKinds(kinds);
         var normalizedRelationships = NormalizeRelationships(relationshipTypes);
+        var normalizedRoles = NormalizeRoles(roles);
         if (_driver is null) return new([], [], 0, 0, 0, false);
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
@@ -1074,6 +1200,8 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 })
                 WHERE (size($kinds) = 0 OR
                        (source.kind IN $kinds AND target.kind IN $kinds))
+                  AND (size($roles) = 0 OR
+                       (source.role IN $roles AND target.role IN $roles))
                   AND (size($relationshipTypes) = 0 OR
                        type(relationship) IN $relationshipTypes)
                 WITH source, target, relationship,
@@ -1102,6 +1230,7 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 {
                     projectId,
                     kinds = normalizedKinds,
+                    roles = normalizedRoles,
                     relationshipTypes = normalizedRelationships,
                     edgeSeedLimit = Math.Min(limit * 4, 20_000),
                 });
@@ -1121,7 +1250,15 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                     projectId: $projectId,
                     graphVersion: p.activeManifestVersion
                 })
-                WHERE size($kinds) = 0 OR node.kind IN $kinds
+                WHERE (size($kinds) = 0 OR node.kind IN $kinds)
+                  AND (size($roles) = 0 OR node.role IN $roles)
+                  AND (size($relationshipTypes) = 0 OR EXISTS {
+                      MATCH (node)-[filteredRelationship]-(:GraphEntity {
+                          projectId: $projectId,
+                          graphVersion: p.activeManifestVersion
+                      })
+                      WHERE type(filteredRelationship) IN $relationshipTypes
+                  })
                 OPTIONAL MATCH (node)-[relationship]-(:GraphEntity {
                     projectId: $projectId,
                     graphVersion: p.activeManifestVersion
@@ -1145,6 +1282,8 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 {
                     projectId,
                     kinds = normalizedKinds,
+                    roles = normalizedRoles,
+                    relationshipTypes = normalizedRelationships,
                     coreNodeIds,
                     limit,
                 });
@@ -1194,10 +1333,24 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                     projectId: $projectId,
                     graphVersion: p.activeManifestVersion
                 })
-                WHERE size($kinds) = 0 OR node.kind IN $kinds
+                WHERE (size($kinds) = 0 OR node.kind IN $kinds)
+                  AND (size($roles) = 0 OR node.role IN $roles)
+                  AND (size($relationshipTypes) = 0 OR EXISTS {
+                      MATCH (node)-[filteredRelationship]-(:GraphEntity {
+                          projectId: $projectId,
+                          graphVersion: p.activeManifestVersion
+                      })
+                      WHERE type(filteredRelationship) IN $relationshipTypes
+                  })
                 RETURN count(node) AS total
                 """,
-                new { projectId, kinds = normalizedKinds });
+                new
+                {
+                    projectId,
+                    kinds = normalizedKinds,
+                    roles = normalizedRoles,
+                    relationshipTypes = normalizedRelationships,
+                });
             var total = (await countCursor.SingleAsync())["total"].As<int>();
             return new GraphVisualDataV3(
                 visualNodes,
@@ -1347,11 +1500,18 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         if (_driver is null)
-            return new(0, 0, [], [], VisualPropertyKeys);
+            return new(0, 0, [], [], []);
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         return await session.ExecuteReadAsync(async transaction =>
         {
+            var revisionCursor = await transaction.RunAsync(
+                """
+                MATCH (p:ProjectGraph {projectId: $projectId})
+                RETURN p.activeManifestVersion AS revision
+                """,
+                new { projectId });
+            var graphRevision = (await revisionCursor.SingleAsync())["revision"].As<string?>();
             var nodeCursor = await transaction.RunAsync(
                 """
                 MATCH (p:ProjectGraph {projectId: $projectId})
@@ -1368,6 +1528,24 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 nodeKinds.Add(new GraphFacetV3(
                     nodeCursor.Current["name"].As<string>(),
                     nodeCursor.Current["count"].As<int>()));
+
+            var roleCursor = await transaction.RunAsync(
+                """
+                MATCH (p:ProjectGraph {projectId: $projectId})
+                MATCH (node:GraphEntity {
+                    projectId: $projectId,
+                    graphVersion: p.activeManifestVersion
+                })
+                WHERE node.role IS NOT NULL AND trim(node.role) <> ''
+                RETURN node.role AS name, count(node) AS count
+                ORDER BY name
+                """,
+                new { projectId });
+            var nodeRoles = new List<GraphFacetV3>();
+            while (await roleCursor.FetchAsync())
+                nodeRoles.Add(new GraphFacetV3(
+                    roleCursor.Current["name"].As<string>(),
+                    roleCursor.Current["count"].As<int>()));
 
             var edgeCursor = await transaction.RunAsync(
                 """
@@ -1392,8 +1570,98 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 nodeKinds.Sum(item => item.Count),
                 relationships.Sum(item => item.Count),
                 nodeKinds,
-                relationships,
-                VisualPropertyKeys);
+                nodeRoles,
+                relationships)
+            {
+                GraphRevision = graphRevision,
+            };
+        });
+    }
+
+    /// <inheritdoc />
+    public Task<GraphVisualDataV3> GetViewerGraphAsync(
+        string projectId,
+        int limit,
+        IReadOnlyList<GraphViewerSearchFilter>? filters,
+        CancellationToken cancellationToken = default)
+    {
+        var normalized = NormalizeViewerFilters(filters);
+        return GetVisualGraphCoreAsync(
+            projectId,
+            limit,
+            normalized.Kinds,
+            normalized.RelationshipTypes,
+            cancellationToken,
+            normalized.Roles);
+    }
+
+    /// <inheritdoc />
+    public async Task<GraphViewerSearchResult> SearchVisualGraphAsync(
+        string projectId,
+        string query,
+        IReadOnlyList<GraphViewerSearchFilter>? filters,
+        int take,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(query);
+        take = Math.Clamp(take, 1, 100);
+        var normalizedFilters = NormalizeViewerFilters(filters);
+        if (_driver is null) return new([], take, false);
+
+        var luceneQuery = GraphRetrievalService.BuildViewerLuceneQuery(query);
+        if (string.IsNullOrWhiteSpace(luceneQuery)) return new([], take, false);
+        await using var session = OpenReadSession();
+        cancellationToken.ThrowIfCancellationRequested();
+        return await session.ExecuteReadAsync(async transaction =>
+        {
+            var cursor = await transaction.RunAsync(
+                """
+                MATCH (p:ProjectGraph {projectId: $projectId})
+                CALL db.index.fulltext.queryNodes(
+                    'graphEntitySearchV3',
+                    $query,
+                    {limit: $candidateLimit})
+                YIELD node, score
+                WHERE node.projectId = $projectId
+                  AND node.graphVersion = p.activeManifestVersion
+                  AND (size($kinds) = 0 OR node.kind IN $kinds)
+                  AND (size($roles) = 0 OR node.role IN $roles)
+                  AND (size($relationshipTypes) = 0 OR EXISTS {
+                      MATCH (node)-[incident]-(:GraphEntity {
+                          projectId: $projectId,
+                          graphVersion: p.activeManifestVersion
+                      })
+                      WHERE type(incident) IN $relationshipTypes
+                  })
+                OPTIONAL MATCH (node)-[relationship]-(:GraphEntity {
+                    projectId: $projectId,
+                    graphVersion: p.activeManifestVersion
+                })
+                WITH node, score, count(relationship) AS degree
+                RETURN node, score, degree
+                ORDER BY score DESC, node.id
+                LIMIT $resultLimit
+                """,
+                new
+                {
+                    projectId,
+                    query = luceneQuery,
+                    kinds = normalizedFilters.Kinds,
+                    roles = normalizedFilters.Roles,
+                    relationshipTypes = normalizedFilters.RelationshipTypes,
+                    candidateLimit = Math.Min((take + 1) * 20, 2_000),
+                    resultLimit = take + 1,
+                });
+            var hits = new List<GraphViewerSearchHit>();
+            while (await cursor.FetchAsync())
+                hits.Add(new GraphViewerSearchHit(
+                    MapVisualNode(
+                        cursor.Current["node"].As<INode>(),
+                        cursor.Current["degree"].As<int>()),
+                    cursor.Current["score"].As<double>()));
+            var hasMore = hits.Count > take;
+            return new GraphViewerSearchResult(hits.Take(take).ToList(), take, hasMore);
         });
     }
 
@@ -1409,20 +1677,12 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentNullException.ThrowIfNull(nodeIds);
         depth = Math.Clamp(depth, 1, 4);
-        limit = Math.Clamp(limit, 1, 5_000);
+        limit = Math.Clamp(limit, 1, 10_000);
         var normalizedMode = NormalizeVisualNeighborMode(mode);
-
-        // same-file 不是關係方向的別名，必須以中心節點的 filePath 查找同檔案節點；
-        // 若錯誤映射成 all，UI 看似有結果，實際上卻會混入其他檔案的一般鄰居。
-        if (normalizedMode == "same-file")
-            return await GetSameFileVisualGraphAsync(
-                projectId,
-                nodeIds,
-                limit,
-                cancellationToken);
 
         var selected = new Dictionary<string, GraphVisualNodeV3>(StringComparer.Ordinal);
         var edges = new Dictionary<string, GraphVisualEdgeV3>(StringComparer.Ordinal);
+        var neighborQueryReachedCap = false;
         var frontier = nodeIds.Where(value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.Ordinal)
             .ToList();
@@ -1441,7 +1701,7 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 }
                 if (level == depth) continue;
                 // 方向條件必須在 Neo4j LIMIT 之前套用。若先讀取混合方向 500 筆再於記憶體
-                // 篩選，高 degree 節點可能剛好被另一方向填滿，造成 callers/callees 漏資料。
+                // 篩選，高 degree 節點可能剛好被另一方向填滿，造成傳入／傳出漏資料。
                 var neighbors = normalizedMode == "all"
                     ? await GetNeighborsAsync(
                         projectId, id, Math.Min(limit, 500), cancellationToken)
@@ -1451,6 +1711,8 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                         Math.Min(limit, 500),
                         normalizedMode,
                         cancellationToken);
+                if (neighbors.Count >= Math.Min(limit, 500))
+                    neighborQueryReachedCap = true;
                 foreach (var neighbor in neighbors)
                 {
                     if (selected.Count >= limit &&
@@ -1482,26 +1744,25 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             stats.Nodes,
             selected.Count,
             edges.Count,
-            selected.Count < stats.Nodes && selected.Count >= limit);
+            neighborQueryReachedCap ||
+            (selected.Count < stats.Nodes && selected.Count >= limit));
     }
 
     /// <summary>
     /// 將前端語意化的展開模式轉成後端實際使用的方向。
-    /// callers 代表指向中心節點的 incoming edge；callees 則代表中心節點發出的 outgoing edge。
     /// </summary>
     /// <param name="mode">UI 或 API 傳入的展開模式。</param>
-    /// <returns>all、in、out 或 same-file。</returns>
+    /// <returns>all、in 或 out。</returns>
     internal static string NormalizeVisualNeighborMode(string mode)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(mode);
         return mode.Trim().ToLowerInvariant() switch
         {
             "all" => "all",
-            "in" or "callers" => "in",
-            "out" or "callees" => "out",
-            "same-file" => "same-file",
+            "in" => "in",
+            "out" => "out",
             _ => throw new ArgumentException(
-                "Graph neighbor mode 只允許 all、in、out、callers、callees、same-file。",
+                "Graph neighbor mode 只允許 all、in、out。",
                 nameof(mode)),
         };
     }
@@ -1515,7 +1776,7 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(cypher);
-        limit = Math.Clamp(limit, 1, 5_000);
+        limit = Math.Clamp(limit, 1, 10_000);
         cypher = EnsureReadOnlyCypher(cypher);
         var manifest = await GetActiveManifestAsync(projectId, cancellationToken) ??
             throw new InvalidOperationException("專案尚無 active V3 graph。");
@@ -1961,141 +2222,6 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         });
     }
 
-    /// <summary>
-    /// 取得中心節點所在檔案的可視化子圖。
-    /// 查詢同時限制 projectId 與 active graphVersion，並只回傳所選節點之間的有效關係。
-    /// </summary>
-    /// <param name="projectId">專案識別碼。</param>
-    /// <param name="nodeIds">作為檔案來源的中心節點 IDs。</param>
-    /// <param name="limit">最多載入的節點數量。</param>
-    /// <param name="cancellationToken">取消權杖。</param>
-    /// <returns>同檔案節點、其內部關係與截斷統計。</returns>
-    private async Task<GraphVisualDataV3> GetSameFileVisualGraphAsync(
-        string projectId,
-        IReadOnlyList<string> nodeIds,
-        int limit,
-        CancellationToken cancellationToken)
-    {
-        if (_driver is null) return new([], [], 0, 0, 0, false);
-
-        var centerIds = nodeIds
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
-        if (centerIds.Count == 0) return new([], [], 0, 0, 0, false);
-
-        await using var session = OpenReadSession();
-        cancellationToken.ThrowIfCancellationRequested();
-        return await session.ExecuteReadAsync(async transaction =>
-        {
-            // 先從 active graph 的中心節點解析檔案路徑，禁止信任前端直接提供路徑。
-            var fileCursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                MATCH (center:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
-                })
-                WHERE center.id IN $centerIds
-                  AND center.filePath IS NOT NULL
-                  AND trim(center.filePath) <> ''
-                RETURN DISTINCT center.filePath AS filePath
-                ORDER BY filePath
-                """,
-                new { projectId, centerIds });
-            var filePaths = new List<string>();
-            while (await fileCursor.FetchAsync())
-                filePaths.Add(fileCursor.Current["filePath"].As<string>());
-
-            // 即使中心節點沒有 filePath，也要保留中心本身，讓使用者看得到展開起點；
-            // 只有具備 filePath 的中心才會帶出同檔案的其他節點。
-            var nodeCursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                MATCH (node:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
-                })
-                WHERE node.id IN $centerIds OR
-                      (size($filePaths) > 0 AND node.filePath IN $filePaths)
-                OPTIONAL MATCH (node)-[relationship]-(:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
-                })
-                WITH node, count(relationship) AS degree,
-                    CASE WHEN node.id IN $centerIds THEN 0 ELSE 1 END AS centerPriority
-                ORDER BY centerPriority, degree DESC, node.id
-                LIMIT $limit
-                RETURN node, degree
-                """,
-                new { projectId, centerIds, filePaths, limit });
-            var visualNodes = new List<GraphVisualNodeV3>();
-            while (await nodeCursor.FetchAsync())
-            {
-                visualNodes.Add(MapVisualNode(
-                    nodeCursor.Current["node"].As<INode>(),
-                    nodeCursor.Current["degree"].As<int>()));
-            }
-
-            var ids = visualNodes.Select(node => node.Id).ToList();
-            var visualEdges = new List<GraphVisualEdgeV3>();
-            if (ids.Count > 0)
-            {
-                var edgeCursor = await transaction.RunAsync(
-                    """
-                    MATCH (p:ProjectGraph {projectId: $projectId})
-                    MATCH (source:GraphEntity {
-                        projectId: $projectId,
-                        graphVersion: p.activeManifestVersion
-                    })-[relationship]->(target:GraphEntity {
-                        projectId: $projectId,
-                        graphVersion: p.activeManifestVersion
-                    })
-                    WHERE source.id IN $ids AND target.id IN $ids
-                    RETURN relationship
-                    ORDER BY relationship.id
-                    LIMIT $edgeLimit
-                    """,
-                    new
-                    {
-                        projectId,
-                        ids,
-                        edgeLimit = Math.Min(limit * 4, 20_000),
-                    });
-                while (await edgeCursor.FetchAsync())
-                {
-                    visualEdges.Add(MapVisualEdge(
-                        edgeCursor.Current["relationship"].As<IRelationship>()));
-                }
-            }
-
-            var countCursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                MATCH (node:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
-                })
-                WITH node,
-                    CASE WHEN node.id IN $centerIds OR
-                              (size($filePaths) > 0 AND node.filePath IN $filePaths)
-                         THEN 1 ELSE 0 END AS eligible
-                RETURN count(node) AS total, sum(eligible) AS eligibleTotal
-                """,
-                new { projectId, centerIds, filePaths });
-            var counts = await countCursor.SingleAsync();
-            var total = counts["total"].As<int>();
-            var eligibleTotal = counts["eligibleTotal"].As<int>();
-            return new GraphVisualDataV3(
-                visualNodes,
-                visualEdges,
-                total,
-                visualNodes.Count,
-                visualEdges.Count,
-                eligibleTotal > visualNodes.Count);
-        });
-    }
-
     private async Task<GraphVisualNodeV3?> ReadNodeByIdAsync(
         string projectId,
         string nodeId,
@@ -2147,6 +2273,46 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             .ToList();
     }
 
+    private static (
+        IReadOnlyList<string> Kinds,
+        IReadOnlyList<string> Roles,
+        IReadOnlyList<string> RelationshipTypes) NormalizeViewerFilters(
+            IReadOnlyList<GraphViewerSearchFilter>? filters)
+    {
+        if (filters is null || filters.Count == 0) return ([], [], []);
+        var duplicate = filters
+            .GroupBy(filter => filter.FacetId, StringComparer.Ordinal)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicate is not null)
+            throw new ArgumentException($"重複的 graph facet：{duplicate.Key}。");
+
+        IReadOnlyList<string> Tokens(string facetId) => filters
+            .FirstOrDefault(filter => string.Equals(
+                filter.FacetId, facetId, StringComparison.Ordinal))?.Tokens ?? [];
+
+        var allowedFacets = new HashSet<string>(
+            ["node-category", "node-role", "edge-type"],
+            StringComparer.Ordinal);
+        var unknown = filters.FirstOrDefault(filter =>
+            !allowedFacets.Contains(filter.FacetId));
+        if (unknown is not null)
+            throw new ArgumentException($"不允許的 graph facet：{unknown.FacetId}。");
+
+        return (
+            NormalizeKinds(Tokens("node-category")),
+            NormalizeRoles(Tokens("node-role")),
+            NormalizeRelationships(Tokens("edge-type")));
+    }
+
+    private static IReadOnlyList<string> NormalizeRoles(IReadOnlyList<string>? roles) =>
+        roles is null
+            ? []
+            : roles.Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .Take(100)
+                .ToList();
+
     private static IReadOnlyList<string> NormalizeRelationships(
         IReadOnlyList<string>? relationships)
     {
@@ -2166,22 +2332,27 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     /// <summary>
     /// 驗證 UI 提供的 Cypher 僅能讀取同一個 active V3 graph。
     /// 每一個 MATCH node pattern 都必須明確使用 GraphEntity、projectId 與 graphVersion，
-    /// 並強制使用服務端提供的 $limit，避免只在 client 停止讀取但資料庫仍執行無界查詢。
+    /// 並由服務端補上或正規化 $limit，避免只在 client 停止讀取但資料庫仍執行無界查詢。
     /// </summary>
     /// <param name="cypher">使用者輸入的單一 read-only statement。</param>
-    /// <returns>通過隔離與 bounded validation 的原始 statement。</returns>
+    /// <returns>通過隔離驗證且已套用 bounded budget 的 statement。</returns>
     internal static string EnsureReadOnlyCypher(string cypher)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cypher);
-        if (UnsafeCypher.IsMatch(cypher))
+        cypher = cypher.Trim();
+        var structuralText = MaskCypherStringLiterals(cypher);
+        if (UnsafeCypher.IsMatch(structuralText))
             throw new InvalidOperationException("只允許 read-only V3 Cypher，禁止寫入與 procedure call。");
-        if (cypher.Contains(';') ||
-            cypher.Contains("//", StringComparison.Ordinal) ||
-            cypher.Contains("/*", StringComparison.Ordinal))
+        if (UnboundedAggregate.IsMatch(structuralText))
+            throw new InvalidOperationException("read-only V3 Cypher 不允許 collect()，避免 LIMIT 前建立無界集合。");
+        if (structuralText.Contains(';') ||
+            structuralText.Contains("//", StringComparison.Ordinal) ||
+            structuralText.Contains("/*", StringComparison.Ordinal))
             throw new InvalidOperationException("V3 Cypher 一次只允許一個 statement。");
         if (!BoundedLimit.IsMatch(cypher))
-            throw new InvalidOperationException(
-                "V3 Cypher 必須使用 LIMIT $limit，才能由服務端套用 bounded budget。");
+            cypher = TerminalLimit.IsMatch(cypher)
+                ? TerminalLimit.Replace(cypher, "LIMIT $limit")
+                : $"{cypher}\nLIMIT $limit";
 
         var matches = MatchClause.Matches(cypher);
         if (matches.Count == 0)
@@ -2196,13 +2367,44 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             {
                 var node = nodePattern.Groups["node"].Value;
                 if (!node.Contains(":GraphEntity", StringComparison.Ordinal) ||
-                    !node.Contains("$projectId", StringComparison.Ordinal) ||
-                    !node.Contains("$graphVersion", StringComparison.Ordinal))
+                    !ScopedProjectProperty.IsMatch(node) ||
+                    !ScopedVersionProperty.IsMatch(node))
                     throw new InvalidOperationException(
                         "每個 MATCH node 都必須使用 :GraphEntity，並以 $projectId、$graphVersion 限制 active graph。");
             }
         }
         return cypher;
+    }
+
+    private static string MaskCypherStringLiterals(string cypher)
+    {
+        var chars = cypher.ToCharArray();
+        for (var index = 0; index < chars.Length; index++)
+        {
+            if (chars[index] is not ('\'' or '"')) continue;
+            var quote = chars[index];
+            for (index++; index < chars.Length; index++)
+            {
+                if (chars[index] == '\\' && index + 1 < chars.Length)
+                {
+                    chars[index] = ' ';
+                    chars[++index] = ' ';
+                    continue;
+                }
+                if (chars[index] == quote)
+                {
+                    if (index + 1 < chars.Length && chars[index + 1] == quote)
+                    {
+                        chars[index] = ' ';
+                        chars[++index] = ' ';
+                        continue;
+                    }
+                    break;
+                }
+                chars[index] = ' ';
+            }
+        }
+        return new string(chars);
     }
 
     private static void CollectGraphValues(
@@ -2286,6 +2488,11 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             degree,
             new Dictionary<string, object?>
             {
+                ["role"] = node.Role,
+                ["filePath"] = node.FilePath,
+                ["startLine"] = node.StartLine,
+                ["endLine"] = node.EndLine,
+                ["language"] = node.Language,
                 ["technology"] = node.Technology,
                 ["state"] = node.State,
                 ["aliases"] = node.Aliases,
@@ -2471,21 +2678,4 @@ public sealed class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         """,
     ];
 
-    private static readonly string[] VisualPropertyKeys =
-    [
-        "id",
-        "kind",
-        "role",
-        "name",
-        "searchableText",
-        "aliases",
-        "language",
-        "technology",
-        "state",
-        "filePath",
-        "startLine",
-        "endLine",
-        "attributes",
-        "evidence",
-    ];
 }

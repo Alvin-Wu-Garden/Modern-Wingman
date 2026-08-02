@@ -641,41 +641,30 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
                 await store.GetActiveManifestAsync(projectId));
 
             // 可視化初始圖必須以 relationship 為核心，並保留 UI 使用的語意化展開模式。
-            var visual = await store.GetVisualGraphAsync(
+            var visual = await store.GetViewerGraphAsync(
                 projectId,
                 limit: 2,
-                kinds: null,
-                relationshipTypes: null);
+                filters: null);
             Assert.Equal(2, visual.LoadedNodes);
             Assert.Single(visual.Edges);
 
-            var callers = await store.GetVisualNeighborsAsync(
+            var incoming = await store.GetVisualNeighborsAsync(
                 projectId,
                 ["code:csharp:acceptance.target"],
                 depth: 1,
                 limit: 10,
-                mode: "callers");
-            Assert.Equal(2, callers.LoadedNodes);
-            Assert.Single(callers.Edges);
+                mode: "in");
+            Assert.Equal(2, incoming.LoadedNodes);
+            Assert.Single(incoming.Edges);
 
-            var callees = await store.GetVisualNeighborsAsync(
+            var outgoing = await store.GetVisualNeighborsAsync(
                 projectId,
                 ["code:csharp:acceptance.caller"],
                 depth: 1,
                 limit: 10,
-                mode: "callees");
-            Assert.Equal(2, callees.LoadedNodes);
-            Assert.Single(callees.Edges);
-
-            var sameFile = await store.GetVisualNeighborsAsync(
-                projectId,
-                ["code:csharp:acceptance.caller"],
-                depth: 1,
-                limit: 10,
-                mode: "same-file");
-            Assert.Single(sameFile.Nodes);
-            Assert.Equal("code:csharp:acceptance.caller", sameFile.Nodes[0].Id);
-            Assert.Empty(sameFile.Edges);
+                mode: "out");
+            Assert.Equal(2, outgoing.LoadedNodes);
+            Assert.Single(outgoing.Edges);
 
             // 只 RETURN relationship 時仍必須補齊兩端 node，禁止回傳 orphan edge。
             var relationshipOnly = await store.QueryVisualGraphAsync(
@@ -1917,11 +1906,10 @@ public sealed class GraphIndexingServiceV3Tests : IDisposable
             string projectId,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(_communityReports);
-        public Task<GraphVisualDataV3> GetVisualGraphAsync(
+        public Task<GraphVisualDataV3> GetViewerGraphAsync(
             string projectId,
             int limit,
-            IReadOnlyList<string>? kinds,
-            IReadOnlyList<string>? relationshipTypes,
+            IReadOnlyList<GraphViewerSearchFilter>? filters,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(new GraphVisualDataV3([], [], 0, 0, 0, false));
         public Task<GraphVisualSchemaV3> GetVisualSchemaAsync(
