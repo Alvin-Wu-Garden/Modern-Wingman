@@ -168,127 +168,39 @@ public static class AgentSchemaMigrator
 
             """, ct);
 
-        // EF EnsureCreatedAsync() 不會在「已存在其他資料表、但缺少新 entity」的舊 DB
-        // 上補建新表；因此 Atlassian 表必須在這裡以 IF NOT EXISTS 明確建立。
-        // 這個操作不會覆寫既有資料，並讓舊版 Wingman DB 能安全升級。
-        await PatchAtlassianConnectionColumnsAsync(db.Database.GetDbConnection(), ct);
+        // 目前尚未發布，不需要多版本 schema migration；只需確保目前版本的
+        // Atlassian 連線表存在，且不覆寫既有本機資料。
+        await EnsureAtlassianConnectionTableAsync(db.Database.GetDbConnection(), ct);
     }
 
-    // 欄位最低要求：這些欄位缺任何一個代表是殘缺表，直接 DROP 讓 EF 重建。
-    private static readonly string[] AtlassianRequiredColumns =
-        ["Id", "ServiceType", "BaseUrl", "AuthType", "CreatedAt", "UpdatedAt"];
-
-    // 可透過 ALTER TABLE ADD COLUMN 補齊的可選欄位（nullable 或有 DEFAULT）。
-    private static readonly Dictionary<string, string> AtlassianPatchColumns =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["Username"]            = "ALTER TABLE atlassian_connections ADD COLUMN Username TEXT",
-            ["ProtectedSecret"]     = "ALTER TABLE atlassian_connections ADD COLUMN ProtectedSecret TEXT",
-            ["EncryptionScheme"]    = "ALTER TABLE atlassian_connections ADD COLUMN EncryptionScheme TEXT",
-            ["ApiVersion"]          = "ALTER TABLE atlassian_connections ADD COLUMN ApiVersion TEXT",
-            ["IsVerified"]          = "ALTER TABLE atlassian_connections ADD COLUMN IsVerified INTEGER NOT NULL DEFAULT 0",
-            ["VerifiedAt"]          = "ALTER TABLE atlassian_connections ADD COLUMN VerifiedAt TEXT",
-            ["VerifiedDisplayName"] = "ALTER TABLE atlassian_connections ADD COLUMN VerifiedDisplayName TEXT",
-        };
-
-    /// <summary>
-    /// 對已存在但欄位不完整的 atlassian_connections 進行補丁：
-    /// - 若缺少必要欄位（殘缺表）：DROP 後由 EF EnsureCreatedAsync 在下次啟動重建。
-    ///   本次啟動會再呼叫一次 EnsureCreatedAsync 讓它立即補建。
-    /// - 若只缺可選欄位：ALTER TABLE ADD COLUMN。
-    /// - 若欄位完整：no-op。
-    /// </summary>
-    private static async Task PatchAtlassianConnectionColumnsAsync(
-        DbConnection connection, CancellationToken ct)
+    /// <summary>建立目前版本唯一需要額外確認的 Atlassian 連線表。</summary>
+    private static async Task EnsureAtlassianConnectionTableAsync(
+        DbConnection connection,
+        CancellationToken ct)
     {
         if (connection.State == System.Data.ConnectionState.Closed)
             await connection.OpenAsync(ct);
 
-        await using (var createTableCmd = connection.CreateCommand())
-        {
-            createTableCmd.CommandText = """
-                CREATE TABLE IF NOT EXISTS atlassian_connections (
-                    Id TEXT NOT NULL PRIMARY KEY,
-                    ServiceType TEXT NOT NULL,
-                    BaseUrl TEXT NOT NULL,
-                    AuthType TEXT NOT NULL,
-                    Username TEXT,
-                    ProtectedSecret TEXT,
-                    EncryptionScheme TEXT,
-                    ApiVersion TEXT,
-                    IsVerified INTEGER NOT NULL DEFAULT 0,
-                    VerifiedAt TEXT,
-                    VerifiedDisplayName TEXT,
-                    CreatedAt TEXT NOT NULL,
-                    UpdatedAt TEXT NOT NULL
-                );
-                CREATE UNIQUE INDEX IF NOT EXISTS IX_atlassian_connections_ServiceType
-                    ON atlassian_connections (ServiceType);
-                """;
-            await createTableCmd.ExecuteNonQueryAsync(ct);
-        }
-
-        // 讀取現有欄位清單
-        var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        await using (var pragmaCmd = connection.CreateCommand())
-        {
-            pragmaCmd.CommandText = "PRAGMA table_info(atlassian_connections)";
-            await using var reader = await pragmaCmd.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-                existingColumns.Add(reader.GetString(1)); // index 1 = column name
-        }
-
-        // CREATE TABLE IF NOT EXISTS 已處理表不存在的情況；保留防禦判斷避免
-        // 非 SQLite provider 或權限異常時繼續執行不必要的 ALTER。
-        if (existingColumns.Count == 0) return;
-
-        // 殘缺表（缺少必要欄位）→ DROP，讓後面的 EnsureCreatedAsync 重建
-        var missingRequired = AtlassianRequiredColumns
-            .FirstOrDefault(c => !existingColumns.Contains(c));
-        if (missingRequired is not null)
-        {
-            await using var dropCmd = connection.CreateCommand();
-            dropCmd.CommandText = "DROP TABLE IF EXISTS atlassian_connections";
-            await dropCmd.ExecuteNonQueryAsync(ct);
-
-            // 立即重建：用 CREATE TABLE 補建完整結構
-            await using var createCmd = connection.CreateCommand();
-            createCmd.CommandText = """
-                CREATE TABLE IF NOT EXISTS atlassian_connections (
-                    Id TEXT NOT NULL PRIMARY KEY,
-                    ServiceType TEXT NOT NULL,
-                    BaseUrl TEXT NOT NULL,
-                    AuthType TEXT NOT NULL,
-                    Username TEXT,
-                    ProtectedSecret TEXT,
-                    EncryptionScheme TEXT,
-                    ApiVersion TEXT,
-                    IsVerified INTEGER NOT NULL DEFAULT 0,
-                    VerifiedAt TEXT,
-                    VerifiedDisplayName TEXT,
-                    CreatedAt TEXT NOT NULL,
-                    UpdatedAt TEXT NOT NULL
-                );
-                """;
-            await createCmd.ExecuteNonQueryAsync(ct);
-
-            await using var idxCmd = connection.CreateCommand();
-            idxCmd.CommandText =
-                "CREATE UNIQUE INDEX IF NOT EXISTS IX_atlassian_connections_ServiceType " +
-                "ON atlassian_connections (ServiceType)";
-            await idxCmd.ExecuteNonQueryAsync(ct);
-            return;
-        }
-
-        // 補齊可選欄位
-        foreach (var (columnName, alterSql) in AtlassianPatchColumns)
-        {
-            if (!existingColumns.Contains(columnName))
-            {
-                await using var alterCmd = connection.CreateCommand();
-                alterCmd.CommandText = alterSql;
-                await alterCmd.ExecuteNonQueryAsync(ct);
-            }
-        }
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS atlassian_connections (
+                Id TEXT NOT NULL PRIMARY KEY,
+                ServiceType TEXT NOT NULL,
+                BaseUrl TEXT NOT NULL,
+                AuthType TEXT NOT NULL,
+                Username TEXT,
+                ProtectedSecret TEXT,
+                EncryptionScheme TEXT,
+                ApiVersion TEXT,
+                IsVerified INTEGER NOT NULL DEFAULT 0,
+                VerifiedAt TEXT,
+                VerifiedDisplayName TEXT,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_atlassian_connections_ServiceType
+                ON atlassian_connections (ServiceType);
+            """;
+        await command.ExecuteNonQueryAsync(ct);
     }
 }
