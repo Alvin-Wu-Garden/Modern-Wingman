@@ -36,6 +36,15 @@ public static class ProjectEndpoints
         int? Depth,
         int? Limit,
         string? Mode);
+    /// <summary>Viewer Contract 的 bounded 初始圖請求。</summary>
+    public sealed record GraphViewRequest(
+        IReadOnlyList<GraphViewerSearchFilter>? Filters,
+        int? Limit);
+    /// <summary>Viewer Contract 的全域搜尋請求。</summary>
+    public sealed record GraphSearchRequest(
+        string Query,
+        IReadOnlyList<GraphViewerSearchFilter>? Filters,
+        int? Take);
     public sealed record ProjectListItem(
         string Id,
         string Name,
@@ -71,6 +80,8 @@ public static class ProjectEndpoints
         group.MapGet("/{id}/summaries/progress", GetSummaryProgress);
         group.MapGet("/{id}/graph/schema", GetGraphSchema);
         group.MapGet("/{id}/graph", GetGraph);
+        group.MapPost("/{id}/graph/view", GetGraphView);
+        group.MapPost("/{id}/graph/search", SearchGraph);
         group.MapPost("/{id}/graph/query", QueryGraph);
         group.MapPost("/{id}/graph/neighbors", ExpandGraphNeighbors);
 
@@ -384,6 +395,77 @@ public static class ProjectEndpoints
         {
             // NodeKind 與 relationship filter 都採固定白名單；不合法值是請求錯誤，
             // 不應被包成難以判讀的伺服器 500。
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        catch (ServiceUnavailableException)
+        {
+            return GraphUnavailable(neo4jLifecycle);
+        }
+    }
+
+    /// <summary>
+    /// Viewer Contract 初始圖入口。保留既有 GET /graph，不讓舊版桌面端或驗收腳本失效。
+    /// </summary>
+    private static async Task<IResult> GetGraphView(
+        string id,
+        GraphViewRequest request,
+        IProjectRepository repo,
+        IGraphStore graphStore,
+        INeo4jRuntime neo4jLifecycle,
+        CancellationToken ct)
+    {
+        var readiness = await EnsureProjectGraphReadyAsync(
+            id, repo, graphStore, neo4jLifecycle, ct);
+        if (readiness is not null) return readiness;
+
+        try
+        {
+            return Results.Ok(await graphStore.GetViewerGraphAsync(
+                id,
+                request.Limit ?? 1000,
+                request.Filters,
+                ct));
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        catch (ServiceUnavailableException)
+        {
+            return GraphUnavailable(neo4jLifecycle);
+        }
+    }
+
+    /// <summary>
+    /// Viewer Contract 全域搜尋入口。搜尋只使用 active V4 full-text index，
+    /// 不會把任意 Cypher 或未驗證 node id 交給 Neo4j。
+    /// </summary>
+    private static async Task<IResult> SearchGraph(
+        string id,
+        GraphSearchRequest request,
+        IProjectRepository repo,
+        IGraphStore graphStore,
+        INeo4jRuntime neo4jLifecycle,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.Query))
+            return Results.BadRequest(new { error = "搜尋文字不可為空白。" });
+
+        var readiness = await EnsureProjectGraphReadyAsync(
+            id, repo, graphStore, neo4jLifecycle, ct);
+        if (readiness is not null) return readiness;
+
+        try
+        {
+            return Results.Ok(await graphStore.SearchVisualGraphAsync(
+                id,
+                request.Query,
+                request.Take ?? 20,
+                request.Filters,
+                ct));
+        }
+        catch (ArgumentException ex)
+        {
             return Results.BadRequest(new { error = ex.Message });
         }
         catch (ServiceUnavailableException)

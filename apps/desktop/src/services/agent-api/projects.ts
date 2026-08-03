@@ -91,6 +91,11 @@ export interface CodeGraphVisualNode {
   language: string | null
   degree: number
   properties: Record<string, unknown>
+  /** Viewer Contract 投影欄位；canonical V4 欄位仍是上方必要欄位。 */
+  labels?: string[]
+  caption?: string
+  category?: string
+  metrics?: Record<string, number>
 }
 
 export interface CodeGraphVisualEdge {
@@ -108,6 +113,8 @@ export interface CodeGraphVisualData {
   loadedNodes: number
   loadedEdges: number
   hasMore: boolean
+  contractVersion?: string
+  truncated?: boolean
 }
 
 export interface CodeGraphFacet {
@@ -121,6 +128,53 @@ export interface CodeGraphSchema {
   nodeKinds: CodeGraphFacet[]
   relationshipTypes: CodeGraphFacet[]
   propertyKeys: string[]
+  /** Viewer Contract V1 欄位；保留舊欄位供既有圖譜頁相容使用。 */
+  contractVersion?: string
+  graphRevision?: string | null
+  facets?: CodeGraphViewerFacet[]
+  captionOptions?: Array<{ id: string; label: string }>
+  capabilities?: {
+    search: boolean
+    neighbors: boolean
+    table: boolean
+    rawQuery: boolean
+  }
+  queryTemplates?: Array<{
+    id: string
+    label: string
+    text: string
+    target?: string
+  }>
+  queryHelp?: string
+}
+
+/** Viewer Contract 的動態篩選面板描述。 */
+export interface CodeGraphViewerFacet {
+  id: string
+  label: string
+  kind: 'node' | 'edge' | string
+  values: Array<{ token: string; label: string; count: number }>
+  multiSelect?: boolean
+}
+
+/** Viewer Contract 的篩選值；只傳 facet token，不傳任意 Cypher。 */
+export interface CodeGraphSearchFilter {
+  facetId: string
+  tokens: string[]
+}
+
+/** Viewer 全域搜尋命中。 */
+export interface CodeGraphSearchHit {
+  node: CodeGraphVisualNode
+  score: number
+}
+
+/** Viewer 全域搜尋結果。 */
+export interface CodeGraphSearchResult {
+  hits: CodeGraphSearchHit[]
+  total: number
+  hasMore: boolean
+  contractVersion?: string
 }
 
 export interface CodeGraphQueryResult {
@@ -340,6 +394,56 @@ export async function getProjectGraph(
   )
   if (!response.ok)
     throw new Error(await errorMessage(response, `讀取知識圖譜失敗 (${response.status})`))
+  return response.json()
+}
+
+/**
+ * 使用通用 Viewer Contract 取得 bounded 初始圖。
+ * 舊版 GET /graph 保留給既有頁面與驗收腳本，本函式只供新版 Viewer 使用。
+ */
+export async function getProjectGraphView(
+  projectId: string,
+  options?: { limit?: number; filters?: CodeGraphSearchFilter[] },
+): Promise<CodeGraphVisualData> {
+  const response = await fetchGraphApi(
+    `${AGENT_API_BASE_URL}/api/projects/${projectId}/graph/view`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filters: options?.filters ?? [],
+        limit: options?.limit ?? 1000,
+      }),
+    },
+  )
+  if (!response.ok)
+    throw new Error(await errorMessage(response, `讀取知識圖譜失敗 (${response.status})`))
+  return response.json()
+}
+
+/**
+ * 使用 active V4 full-text index 執行 bounded 全域搜尋。
+ * 查詢文字由後端 tokenization；前端不建立或拼接 Cypher。
+ */
+export async function searchProjectGraph(
+  projectId: string,
+  query: string,
+  options?: { take?: number; filters?: CodeGraphSearchFilter[] },
+): Promise<CodeGraphSearchResult> {
+  const response = await fetchGraphApi(
+    `${AGENT_API_BASE_URL}/api/projects/${projectId}/graph/search`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query,
+        filters: options?.filters ?? [],
+        take: options?.take ?? 20,
+      }),
+    },
+  )
+  if (!response.ok)
+    throw new Error(await errorMessage(response, `搜尋知識圖譜失敗 (${response.status})`))
   return response.json()
 }
 

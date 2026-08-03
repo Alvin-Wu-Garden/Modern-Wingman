@@ -205,6 +205,29 @@ public sealed class GraphRetrievalService
     }
 
     /// <summary>
+    /// 建立知識圖譜 Viewer 使用的安全 Lucene 查詢。
+    /// Viewer 只需要完整詞與詞首匹配，不應直接把使用者輸入當成 Lucene 語法；
+    /// 因此沿用 FBL Query Plan 的 deterministic tokenization，再逐詞跳脫控制字元。
+    /// </summary>
+    /// <param name="query">Viewer 搜尋框輸入的自然語言或程式符號。</param>
+    /// <returns>可交給 Neo4j V4 full-text index 的 bounded query。</returns>
+    public static string BuildViewerLuceneQuery(string query)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(query);
+        var terms = BuildQueryPlan(query, 20).Queries
+            .SelectMany(searchQuery => SearchTokenPattern.Matches(searchQuery.Text)
+                .Select(match => match.Value.Trim()))
+            .Where(value => value.Length is >= 2 and <= 100)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(20)
+            .Select(EscapeLuceneTerm)
+            .ToArray();
+        if (terms.Length == 0)
+            throw new ArgumentException("搜尋文字沒有可用的 FBL token。", nameof(query));
+        return string.Join(" OR ", terms.Select(term => $"\"{term}\" OR {term}*"));
+    }
+
+    /// <summary>
     /// 提供給仍使用舊 JIRA GraphRAG 契約的應用層相容入口。
     ///
     /// V4 的權威圖仍只使用 FBL authority node/relationship；本方法只在邊界上
@@ -585,6 +608,20 @@ public sealed class GraphRetrievalService
             .Select(match => match.Value.Trim())
             .Where(value => value.Length is >= 2 and <= 100));
         return normalized.Length is >= 2 and <= 100 ? normalized : null;
+    }
+
+    /// <summary>跳脫 Neo4j full-text 使用的 Lucene 控制字元，避免搜尋輸入改變查詢語意。</summary>
+    private static string EscapeLuceneTerm(string value)
+    {
+        const string luceneControlCharacters = "+-!(){}[]^\"~*?:/|&";
+        var builder = new StringBuilder(value.Length + 8);
+        foreach (var character in value)
+        {
+            if (luceneControlCharacters.Contains(character, StringComparison.Ordinal))
+                builder.Append('\\');
+            builder.Append(character);
+        }
+        return builder.ToString();
     }
 
     /// <summary>只有沒有精確識別碼且確定性查詢完全無命中時，才啟用一次 LLM Rewrite。</summary>

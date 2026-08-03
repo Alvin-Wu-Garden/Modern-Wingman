@@ -26,10 +26,14 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import {
   expandProjectGraphNeighbors,
-  getProjectGraph,
+  getProjectGraphView,
   getProjectGraphSchema,
   queryProjectGraph,
+  searchProjectGraph,
+  type CodeGraphSearchFilter,
   type CodeGraphQueryResult,
+  type CodeGraphSearchHit,
+  type CodeGraphSearchResult,
   type CodeGraphSchema,
   type CodeGraphVisualData,
   type CodeGraphVisualEdge,
@@ -75,7 +79,7 @@ interface CanvasTheme {
   isDark: boolean
 }
 
-type GraphOperation = 'load' | 'query'
+type GraphOperation = 'load' | 'query' | 'search'
 
 const DEFAULT_LIMIT = 1000
 // 後端目前最多只接受 5,000 個節點，前端選項必須保持相同上限。
@@ -176,6 +180,8 @@ function mergeGraphData(base: CodeGraphVisualData | null, incoming: CodeGraphVis
     loadedNodes: nodes.size,
     loadedEdges: edges.size,
     hasMore: base.hasMore || incoming.hasMore,
+    contractVersion: incoming.contractVersion ?? base.contractVersion,
+    truncated: incoming.truncated ?? base.truncated ?? (base.hasMore || incoming.hasMore),
   }
 }
 
@@ -199,6 +205,10 @@ function cleanGraphData(data: CodeGraphVisualData | null): CodeGraphVisualData |
       language: node.language,
       degree: node.degree,
       properties: node.properties,
+      labels: node.labels,
+      caption: node.caption,
+      category: node.category,
+      metrics: node.metrics,
     })),
     edges: data.edges.map((edge) => ({
       id: edge.id,
@@ -212,6 +222,8 @@ function cleanGraphData(data: CodeGraphVisualData | null): CodeGraphVisualData |
     loadedNodes: data.loadedNodes,
     loadedEdges: data.loadedEdges,
     hasMore: data.hasMore,
+    contractVersion: data.contractVersion,
+    truncated: data.truncated,
   }
 }
 
@@ -276,6 +288,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   const [graphReadyProjectId, setGraphReadyProjectId] = useState<string | null>(null)
   const [graph, setGraph] = useState<CodeGraphVisualData | null>(null)
   const [queryResult, setQueryResult] = useState<CodeGraphQueryResult | null>(null)
+  const [searchResult, setSearchResult] = useState<CodeGraphSearchResult | null>(null)
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null)
   const [hoverNode, setHoverNode] = useState<GraphNode | null>(null)
   const [selectedLink, setSelectedLink] = useState<GraphLink | null>(null)
@@ -292,6 +305,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   const [error, setError] = useState<string | null>(null)
   const loading = activeGraphOperation === 'load'
   const querying = activeGraphOperation === 'query'
+  const searching = activeGraphOperation === 'search'
 
   const loadGraph = useCallback(async () => {
     // 篩選、Cypher、展開共用同一代數，避免不同操作的舊回應覆蓋最新畫面。
@@ -299,14 +313,23 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     setActiveGraphOperation('load')
     setError(null)
     try {
-      const nextGraph = await getProjectGraph(project.id, {
+      // 優先使用 Viewer Contract；後端仍保留 GET /graph，供舊版呼叫端相容。
+      const filters: CodeGraphSearchFilter[] = [
+        ...(selectedKinds.length > 0
+          ? [{ facetId: 'node-category', tokens: selectedKinds }]
+          : []),
+        ...(selectedRelations.length > 0
+          ? [{ facetId: 'edge-type', tokens: selectedRelations }]
+          : []),
+      ]
+      const nextGraph = await getProjectGraphView(project.id, {
         limit,
-        kinds: selectedKinds,
-        relations: selectedRelations,
+        filters,
       })
       if (requestGeneration !== graphRequestGenerationRef.current) return
       setGraph(nextGraph)
       setQueryResult(null)
+      setSearchResult(null)
       setSelectedNode(null)
       setSelectedLink(null)
       setContextMenu(null)
@@ -457,6 +480,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       const result = await queryProjectGraph(project.id, queryText, limit)
       if (requestGeneration !== graphRequestGenerationRef.current) return
       setQueryResult(result)
+      setSearchResult(null)
       // 手動 Cypher 是一個新的檢視結果，不能殘留先前圖譜；只有「展開」才合併節點。
       setGraph(result.graph)
       setSelectedNode(null)
@@ -486,6 +510,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       if (requestGeneration !== graphRequestGenerationRef.current) return
       setGraph((current) => mergeGraphData(current, nextGraph))
       setQueryResult(null)
+      setSearchResult(null)
       setContextMenu(null)
       setViewMode('graph')
       setTimeout(() => graphRef.current?.zoomToFit(500, 64), 80)
@@ -497,9 +522,67 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     }
   }, [limit, project.id, selectedNode])
 
-  const searchNode = useCallback(() => {
+  const searchNode = useCallback(async () => {
     const keyword = searchText.trim().toLowerCase()
     if (!keyword) return
+    const requestGeneration = ++graphRequestGenerationRef.current
+    setActiveGraphOperation('search')
+    setError(null)
+    try {
+      // 先查 active V4 full-text index；這能找到目前未載入初始子圖的節點。
+      const filters: CodeGraphSearchFilter[] = [
+        ...(selectedKinds.length > 0
+          ? [{ facetId: 'node-category', tokens: selectedKinds }]
+          : []),
+      ]
+      const result = await searchProjectGraph(project.id, searchText.trim(), {
+        take: 20,
+        filters,
+      })
+      if (requestGeneration !== graphRequestGenerationRef.current) return
+      setSearchResult(result)
+      const hit = result.hits[0]
+      if (hit) {
+        // 搜尋結果只帶 bounded node，不強行下載鄰居；使用者選取後仍可透過
+        // 既有 Expand/Callers/Callees 操作取得下一層，避免單次查詢膨脹。
+        setGraph({
+          nodes: [hit.node],
+          edges: [],
+          totalNodes: result.total,
+          loadedNodes: 1,
+          loadedEdges: 0,
+          hasMore: result.hasMore,
+          contractVersion: result.contractVersion,
+          truncated: result.hasMore,
+        })
+        setSelectedNode(hit.node as GraphNode)
+        setSelectedLink(null)
+        setContextMenu(null)
+        setViewMode('graph')
+        return
+      }
+    } catch (err) {
+      if (requestGeneration !== graphRequestGenerationRef.current) return
+      // Viewer API 不可用時仍嘗試目前已載入子圖的本地搜尋，維持既有使用體驗。
+      const fallback = graphData.nodes.find((node) => (
+        node.name.toLowerCase().includes(keyword) ||
+        node.id.toLowerCase().includes(keyword) ||
+        node.role.toLowerCase().includes(keyword) ||
+        (node.filePath?.toLowerCase().includes(keyword) ?? false)
+      ))
+      if (!fallback) {
+        setError(err instanceof Error ? err.message : String(err))
+        return
+      }
+      setSelectedNode(fallback)
+      setSelectedLink(null)
+      return
+    } finally {
+      if (requestGeneration === graphRequestGenerationRef.current) setActiveGraphOperation(null)
+    }
+
+    // 遠端搜尋沒有命中時，再以目前已載入資料做一次本地比對，
+    // 讓使用者仍可快速定位已在畫布中的節點。
     // 搜尋 ForceGraph 的 view-model，才能取得模擬完成後的 x/y 並正確置中。
     const found = graphData.nodes.find((node) => (
       node.name.toLowerCase().includes(keyword) ||
@@ -517,7 +600,34 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       graphRef.current?.centerAt(found.x, found.y, 700)
       graphRef.current?.zoom(3.4, 700)
     }
-  }, [graphData.nodes, searchText])
+  }, [graphData.nodes, project.id, searchText, selectedKinds])
+
+  /**
+   * 選取全域搜尋結果時只載入單一 bounded 命中，避免把搜尋結果無限制累加到畫布；
+   * 使用者仍可透過既有「展開」按鈕載入該節點鄰域。
+   */
+  const selectSearchHit = useCallback((
+    hit: CodeGraphSearchHit,
+    total: number,
+    hasMore: boolean,
+    contractVersion?: string,
+  ) => {
+    setGraph({
+      nodes: [hit.node],
+      edges: [],
+      totalNodes: total,
+      loadedNodes: 1,
+      loadedEdges: 0,
+      hasMore,
+      contractVersion,
+      truncated: hasMore,
+    })
+    setSelectedNode(hit.node as GraphNode)
+    setSelectedLink(null)
+    setContextMenu(null)
+    setViewMode('graph')
+    window.setTimeout(() => graphRef.current?.zoomToFit(500, 96), 80)
+  }, [])
 
   const drawNode = useCallback((
     node: NodeObject<GraphNode>,
@@ -650,6 +760,26 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     ))
   }
 
+  // Viewer Contract 優先使用動態 facet；若後端仍是舊版，退回既有 nodeKinds／relationshipTypes。
+  const nodeFacets = useMemo(() => {
+    const facet = schema?.facets?.find((item) => item.id === 'node-category')
+    return facet?.values.map((value) => ({ name: value.token, count: value.count }))
+      ?? schema?.nodeKinds
+      ?? []
+  }, [schema])
+  const relationFacets = useMemo(() => {
+    const facet = schema?.facets?.find((item) => item.id === 'edge-type')
+    return facet?.values.map((value) => ({ name: value.token, count: value.count }))
+      ?? schema?.relationshipTypes
+      ?? []
+  }, [schema])
+  // 舊版 schema 沒有 capabilities 時，維持既有畫面全部可用的相容預設值。
+  const capabilities = schema?.capabilities ?? {
+    search: true,
+    neighbors: true,
+    table: true,
+    rawQuery: true,
+  }
   const queryRows = queryResult?.rows ?? []
 
   return (
@@ -730,7 +860,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                 全部
               </button>
               <div className="space-y-1.5">
-                {schema?.nodeKinds.map((facet, index) => {
+                {nodeFacets.map((facet, index) => {
                   const color = styles.nodeColors[facet.name] ?? NODE_PALETTE[index % NODE_PALETTE.length]
                   const active = selectedKinds.length === 0 || selectedKinds.includes(facet.name)
                   return (
@@ -781,7 +911,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                 全部
               </button>
               <div className="space-y-1.5">
-                {schema?.relationshipTypes.map((facet, index) => {
+                {relationFacets.map((facet, index) => {
                   const color = styles.relationColors[facet.name] ?? REL_PALETTE[index % REL_PALETTE.length]
                   const active = selectedRelations.length === 0 || selectedRelations.includes(facet.name)
                   return (
@@ -850,13 +980,15 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
               <input
                 value={searchText}
                 onChange={(event) => setSearchText(event.target.value)}
-                onKeyDown={(event) => event.key === 'Enter' && searchNode()}
-                placeholder="搜尋節點"
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void searchNode()
+                }}
+                placeholder="全域搜尋節點"
                 className="h-8 w-full rounded-lg border border-border bg-input-bg pl-8 pr-3 text-xs text-ink placeholder:text-ink-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
               />
             </div>
-            <Button variant="ghost" size="sm" className="shrink-0" onClick={searchNode} title="搜尋">
-              <Search className="w-3.5 h-3.5" />
+            <Button variant="ghost" size="sm" className="shrink-0" onClick={() => void searchNode()} disabled={!capabilities.search || searching} title="搜尋">
+              <Search className={cn('w-3.5 h-3.5', searching && 'animate-pulse')} />
             </Button>
             <select
               value={limit}
@@ -868,7 +1000,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
               ))}
             </select>
             <div className="ml-auto flex shrink-0 items-center gap-1">
-              <Button variant="ghost" size="sm" className="whitespace-nowrap" onClick={() => void expandNodes('all')} disabled={!selectedNode}>
+              <Button variant="ghost" size="sm" className="whitespace-nowrap" onClick={() => void expandNodes('all')} disabled={!capabilities.neighbors || !selectedNode}>
                 <Expand className="w-3.5 h-3.5" />
                 展開
               </Button>
@@ -882,6 +1014,36 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
               </Button>
             </div>
           </div>
+
+          {searchResult && searchText.trim() && (
+            <div className="shrink-0 border-b border-border bg-surface px-3 py-2 text-xs">
+              <div className="mb-1 flex items-center justify-between text-ink-secondary">
+                <span>全域搜尋結果：{searchResult.total}{searchResult.hasMore ? '+' : ''} 筆</span>
+                <button type="button" className="text-ink-subtle hover:text-ink" onClick={() => setSearchResult(null)}>
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="flex max-w-full gap-1 overflow-x-auto">
+                {searchResult.hits.map((hit) => (
+                  <button
+                    type="button"
+                    key={hit.node.id}
+                    className="max-w-64 shrink-0 rounded-md border border-border bg-surface-alt px-2 py-1 text-left hover:border-brand/60"
+                    onClick={() => selectSearchHit(
+                      hit,
+                      searchResult.total,
+                      searchResult.hasMore,
+                      searchResult.contractVersion,
+                    )}
+                    title={hit.node.filePath ?? hit.node.id}
+                  >
+                    <span className="block truncate font-medium text-ink">{hit.node.caption ?? hit.node.name}</span>
+                    <span className="block truncate text-[10px] text-ink-subtle">{hit.node.category ?? hit.node.kind} · {hit.score.toFixed(2)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div ref={canvasWrapRef} className="relative min-h-0 flex-1 overflow-hidden bg-surface-alt">
             <ForceGraph2D<GraphNode, GraphLink>
@@ -999,9 +1161,12 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                   key={value}
                   type="button"
                   onClick={() => setViewMode(value)}
+                  disabled={(value === 'table' && !capabilities.table) ||
+                    (value === 'raw' && !capabilities.rawQuery)}
                   className={cn(
                     'flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors flex items-center justify-center gap-1.5',
                     viewMode === value ? 'bg-brand text-white' : 'text-ink-secondary hover:text-ink hover:bg-surface',
+                    'disabled:cursor-not-allowed disabled:opacity-40',
                   )}
                 >
                   <Icon className="w-3.5 h-3.5" />
@@ -1031,16 +1196,16 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                         </p>
                       )}
                       <div className="grid grid-cols-2 gap-2">
-                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('all')}>
+                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('all')} disabled={!capabilities.neighbors}>
                           全部鄰居
                         </Button>
-                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('same-file')}>
+                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('same-file')} disabled={!capabilities.neighbors}>
                           同檔案
                         </Button>
-                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('callers')}>
+                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('callers')} disabled={!capabilities.neighbors}>
                           傳入關係
                         </Button>
-                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('callees')}>
+                        <Button variant="ghost" size="sm" onClick={() => void expandNodes('callees')} disabled={!capabilities.neighbors}>
                           傳出關係
                         </Button>
                       </div>
@@ -1079,7 +1244,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                     spellCheck={false}
                     className="h-40 w-full resize-none rounded-lg border border-border bg-input-bg px-3 py-2 font-mono text-xs leading-relaxed text-ink placeholder:text-ink-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
                   />
-                  <Button variant="primary" size="sm" className="w-full" onClick={runQuery} isLoading={querying} leftIcon={<Play className="w-3.5 h-3.5" />}>
+                  <Button variant="primary" size="sm" className="w-full" onClick={runQuery} disabled={!capabilities.rawQuery} isLoading={querying} leftIcon={<Play className="w-3.5 h-3.5" />}>
                     執行 read-only 查詢
                   </Button>
                 </section>
@@ -1123,7 +1288,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
 
             {viewMode === 'raw' && (
               <pre className="m-3 overflow-auto rounded-lg border border-border bg-input-bg p-3 text-[11px] leading-relaxed text-ink-secondary">
-                {JSON.stringify(queryResult ?? { graph }, null, 2)}
+                {JSON.stringify({ schema, queryResult, graph }, null, 2)}
               </pre>
             )}
           </div>

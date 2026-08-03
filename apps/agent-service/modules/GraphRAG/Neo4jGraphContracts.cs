@@ -83,7 +83,27 @@ public sealed record GraphVisualNode(
     int? EndLine,
     string Language,
     int Degree,
-    IReadOnlyDictionary<string, object?> Properties);
+    IReadOnlyDictionary<string, object?> Properties)
+{
+    /// <summary>
+    /// Viewer Contract 使用的 labels 投影。V4 canonical schema 只有一個 kind，
+    /// 因此不額外製造與權威圖不同的節點分類。
+    /// </summary>
+    public IReadOnlyList<string> Labels => [Kind];
+
+    /// <summary>Viewer 預設顯示名稱；保留 Name 作為既有 API 的相容欄位。</summary>
+    public string Caption => Name;
+
+    /// <summary>Viewer 的通用分類欄位，直接對應 V4 node kind。</summary>
+    public string Category => Kind;
+
+    /// <summary>Viewer 使用的聚合指標；目前只提供 bounded degree。</summary>
+    public IReadOnlyDictionary<string, int> Metrics =>
+        new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["degree"] = Degree,
+        };
+}
 
 /// <summary>知識圖譜瀏覽器使用的 V4 edge。</summary>
 public sealed record GraphVisualEdge(
@@ -100,10 +120,62 @@ public sealed record GraphVisualData(
     int TotalNodes,
     int LoadedNodes,
     int LoadedEdges,
-    bool HasMore);
+    bool HasMore)
+{
+    /// <summary>Viewer Contract 版本；不影響既有 graph API 欄位。</summary>
+    public string ContractVersion => "1.0";
+
+    /// <summary>Viewer Contract 使用的截斷欄位，與既有 HasMore 同義。</summary>
+    public bool Truncated => HasMore;
+}
 
 /// <summary>schema facet 名稱與數量。</summary>
 public sealed record GraphFacet(string Name, int Count);
+
+/// <summary>Viewer 動態 facet 中的一個可選值。</summary>
+public sealed record GraphViewerFacetValue(string Token, string Label, int Count);
+
+/// <summary>Viewer 動態 facet 描述；由 active V4 graph 的實際統計產生。</summary>
+public sealed record GraphViewerFacetDescriptor(
+    string Id,
+    string Label,
+    string Kind,
+    IReadOnlyList<GraphViewerFacetValue> Values,
+    bool MultiSelect = true);
+
+/// <summary>Viewer 目前可使用的 bounded 功能。</summary>
+public sealed record GraphViewerCapabilities(
+    bool Search = true,
+    bool Neighbors = true,
+    bool Table = true,
+    bool RawQuery = true);
+
+/// <summary>Viewer 可選的節點標題欄位。</summary>
+public sealed record GraphViewerCaptionOption(string Id, string Label);
+
+/// <summary>Viewer 內建的唯讀查詢範本。</summary>
+public sealed record GraphViewerQueryTemplate(
+    string Id,
+    string Label,
+    string Text,
+    string Target = "table");
+
+/// <summary>Viewer 搜尋或初始圖譜載入的 facet 篩選。</summary>
+public sealed record GraphViewerSearchFilter(
+    string FacetId,
+    IReadOnlyList<string> Tokens);
+
+/// <summary>Viewer 全域搜尋命中；只回傳 active V4 graph 的節點。</summary>
+public sealed record GraphViewerSearchHit(
+    GraphVisualNode Node,
+    double Score);
+
+/// <summary>Viewer 全域搜尋結果與 bounded 截斷資訊。</summary>
+public sealed record GraphViewerSearchResult(
+    IReadOnlyList<GraphViewerSearchHit> Hits,
+    int Total,
+    bool HasMore,
+    string ContractVersion = "1.0");
 
 /// <summary>V4 可視化 schema；由 active graph 的實際 node 與 relationship 統計產生。</summary>
 public sealed record GraphVisualSchema(
@@ -111,7 +183,66 @@ public sealed record GraphVisualSchema(
     int TotalEdges,
     IReadOnlyList<GraphFacet> NodeKinds,
     IReadOnlyList<GraphFacet> RelationshipTypes,
-    IReadOnlyList<string> PropertyKeys);
+    IReadOnlyList<string> PropertyKeys)
+{
+    /// <summary>Viewer Contract 版本。</summary>
+    public string ContractVersion => "1.0";
+
+    /// <summary>目前 active graph 的 immutable version；舊 store 可為 null。</summary>
+    public string? GraphRevision { get; init; }
+
+    /// <summary>Viewer 可直接使用的功能旗標。</summary>
+    public GraphViewerCapabilities Capabilities { get; init; } = new();
+
+    /// <summary>可切換的標題欄位；role 不列入，避免混淆 V4 kind。</summary>
+    public IReadOnlyList<GraphViewerCaptionOption> CaptionOptions { get; init; } =
+    [
+        new("caption", "節點名稱"),
+        new("category", "節點類型"),
+    ];
+
+    /// <summary>
+    /// 將既有 nodeKinds／relationshipTypes 投影為通用 facet，
+    /// 讓新版 Viewer 不必綁定 Neo4j 或 FBL 內部欄位名稱。
+    /// </summary>
+    public IReadOnlyList<GraphViewerFacetDescriptor> Facets =>
+    [
+        new(
+            "node-category",
+            "節點類型",
+            "node",
+            NodeKinds.Select(item =>
+                    new GraphViewerFacetValue(item.Name, item.Name, item.Count))
+                .ToArray()),
+        new(
+            "edge-type",
+            "關係類型",
+            "edge",
+            RelationshipTypes.Select(item =>
+                    new GraphViewerFacetValue(item.Name, item.Name, item.Count))
+                .ToArray()),
+    ];
+
+    /// <summary>Viewer 內建查詢範本；實際版本由 API 注入 graphVersion 參數。</summary>
+    public IReadOnlyList<GraphViewerQueryTemplate> QueryTemplates =>
+    [
+        new(
+            "entrypoints",
+            "入口與功能鏈",
+            "MATCH path=(n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})-[r*1..4]->(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "RETURN path LIMIT $limit"),
+        new(
+            "high-degree",
+            "高連結節點",
+            "MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "OPTIONAL MATCH (n)-[r]-()\n" +
+            "RETURN n, count(r) AS degree ORDER BY degree DESC LIMIT $limit"),
+    ];
+
+    /// <summary>提供前端顯示的查詢限制與語意說明。</summary>
+    public string QueryHelp =>
+        "只允許目前 active V4 graph 的唯讀查詢；查詢結果會套用節點與資料列上限。";
+}
 
 /// <summary>受限 read-only Cypher 的表格與可視化結果。</summary>
 public sealed record GraphVisualQueryResult(
@@ -340,4 +471,38 @@ public interface IGraphStore
         string cypher,
         int limit,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Viewer Contract 的 bounded 初始圖。預設投影到既有 V4 graph API，
+    /// 讓測試 store 與舊呼叫端不必同步改寫。
+    /// </summary>
+    Task<GraphVisualData> GetViewerGraphAsync(
+        string projectId,
+        int limit,
+        IReadOnlyList<GraphViewerSearchFilter>? filters,
+        CancellationToken cancellationToken = default) =>
+        GetVisualGraphAsync(
+            projectId,
+            limit,
+            filters?.Where(filter =>
+                    filter.FacetId.Equals("node-category", StringComparison.OrdinalIgnoreCase))
+                .SelectMany(filter => filter.Tokens)
+                .ToArray(),
+            filters?.Where(filter =>
+                    filter.FacetId.Equals("edge-type", StringComparison.OrdinalIgnoreCase))
+                .SelectMany(filter => filter.Tokens)
+                .ToArray(),
+            cancellationToken);
+
+    /// <summary>Viewer Contract 的全域節點搜尋；舊 store 預設回傳空結果。</summary>
+    Task<GraphViewerSearchResult> SearchVisualGraphAsync(
+        string projectId,
+        string query,
+        int take,
+        IReadOnlyList<GraphViewerSearchFilter>? filters,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(new GraphViewerSearchResult(
+            Array.Empty<GraphViewerSearchHit>(),
+            0,
+            false));
 }

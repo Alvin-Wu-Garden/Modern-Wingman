@@ -10,6 +10,97 @@ namespace AgentService.Modules.GraphRAG;
 public sealed partial class Neo4jGraphStore
 {
 
+    /// <summary>
+    /// 以通用 Viewer Contract 取得 active V4 graph 初始子圖。
+    /// 篩選值先轉回既有 V4 kind／relationship 白名單，避免 Viewer 引入第二套 schema。
+    /// </summary>
+    public Task<GraphVisualData> GetViewerGraphAsync(
+        string projectId,
+        int limit,
+        IReadOnlyList<GraphViewerSearchFilter>? filters,
+        CancellationToken cancellationToken = default)
+    {
+        var (kinds, relationships) = ResolveViewerFilters(filters);
+        return GetVisualGraphAsync(
+            projectId,
+            Math.Clamp(limit, 1, 5_000),
+            kinds,
+            relationships,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// 以 V4 full-text index 執行 bounded 全域搜尋，供圖譜 Viewer 在既有初始子圖之外
+    /// 尋找遠端節點。搜尋結果仍使用 authority node 投影，不建立任何新的 graph entity。
+    /// </summary>
+    public async Task<GraphViewerSearchResult> SearchVisualGraphAsync(
+        string projectId,
+        string query,
+        int take,
+        IReadOnlyList<GraphViewerSearchFilter>? filters,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(query);
+        take = Math.Clamp(take, 1, 100);
+        var (kinds, _) = ResolveViewerFilters(filters);
+        var allowedKinds = kinds.Count == 0
+            ? null
+            : kinds.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var luceneQuery = GraphRetrievalService.BuildViewerLuceneQuery(query);
+        // SearchAsync 內部已按 active project/version 分頁；多取一點再套 facet，
+        // 避免高分但不符合 kind 的節點把真正候選擠出結果。
+        var candidates = await SearchAsync(
+            projectId,
+            luceneQuery,
+            Math.Min(100, Math.Max(take * 3, take)),
+            cancellationToken);
+        var hits = candidates
+            .Where(hit => allowedKinds is null ||
+                          allowedKinds.Contains(hit.Node.Kind.ToString()))
+            .Take(take)
+            .Select(hit => new GraphViewerSearchHit(
+                MapVisualNode(hit.Node, 0),
+                hit.Score))
+            .ToArray();
+        return new GraphViewerSearchResult(
+            hits,
+            hits.Length,
+            candidates.Count > hits.Length);
+    }
+
+    /// <summary>將 Viewer facet 轉成現有 V4 API 的嚴格白名單。</summary>
+    private static (IReadOnlyList<string> Kinds, IReadOnlyList<string> Relationships)
+        ResolveViewerFilters(IReadOnlyList<GraphViewerSearchFilter>? filters)
+    {
+        if (filters is null || filters.Count == 0)
+            return ([], []);
+
+        var kinds = new List<string>();
+        var relationships = new List<string>();
+        foreach (var filter in filters)
+        {
+            if (filter is null ||
+                string.IsNullOrWhiteSpace(filter.FacetId) ||
+                filter.Tokens is null)
+                continue;
+            switch (filter.FacetId.Trim().ToLowerInvariant())
+            {
+                case "node-category":
+                    kinds.AddRange(filter.Tokens);
+                    break;
+                case "edge-type":
+                    relationships.AddRange(filter.Tokens);
+                    break;
+                default:
+                    throw new ArgumentException(
+                        $"不允許的 Viewer facet：{filter.FacetId}。",
+                        nameof(filters));
+            }
+        }
+        return (NormalizeKinds(kinds), NormalizeRelationships(relationships));
+    }
+
     /// <inheritdoc />
     public async Task<GraphVisualData> GetVisualGraphAsync(
         string projectId,
@@ -323,6 +414,17 @@ public sealed partial class Neo4jGraphStore
         cancellationToken.ThrowIfCancellationRequested();
         return await session.ExecuteReadAsync(async transaction =>
         {
+            var revisionCursor = await transaction.RunAsync(
+                """
+                MATCH (p:ProjectGraph {projectId: $projectId})
+                RETURN p.activeManifestVersion AS graphRevision
+                LIMIT 1
+                """,
+                new { projectId });
+            var graphRevision = await revisionCursor.FetchAsync()
+                ? revisionCursor.Current["graphRevision"].As<string?>()
+                : null;
+
             var nodeCursor = await transaction.RunAsync(
                 """
                 MATCH (p:ProjectGraph {projectId: $projectId})
@@ -364,7 +466,10 @@ public sealed partial class Neo4jGraphStore
                 relationships.Sum(item => item.Count),
                 nodeKinds,
                 relationships,
-                VisualPropertyKeys);
+                VisualPropertyKeys)
+            {
+                GraphRevision = graphRevision,
+            };
         });
     }
 
