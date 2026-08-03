@@ -43,7 +43,7 @@ public sealed partial class Neo4jGraphStore
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
         take = Math.Clamp(take, 1, 100);
-        var (kinds, _) = ResolveViewerFilters(filters);
+        var (kinds, relationships) = ResolveViewerFilters(filters);
         var allowedKinds = kinds.Count == 0
             ? null
             : kinds.ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -55,9 +55,18 @@ public sealed partial class Neo4jGraphStore
             luceneQuery,
             Math.Min(100, Math.Max(take * 3, take)),
             cancellationToken);
+        var relationshipNodeIds = relationships.Count == 0 || candidates.Count == 0
+            ? null
+            : await FindNodesWithRelationshipTypesAsync(
+                projectId,
+                candidates.Select(hit => hit.Node.Key).ToArray(),
+                relationships,
+                cancellationToken);
         var hits = candidates
             .Where(hit => allowedKinds is null ||
                           allowedKinds.Contains(hit.Node.Kind.ToString()))
+            .Where(hit => relationshipNodeIds is null ||
+                          relationshipNodeIds.Contains(hit.Node.Key))
             .Take(take)
             .Select(hit => new GraphViewerSearchHit(
                 MapVisualNode(hit.Node, 0),
@@ -67,6 +76,57 @@ public sealed partial class Neo4jGraphStore
             hits,
             hits.Length,
             candidates.Count > hits.Length);
+    }
+
+    /// <summary>
+    /// 將 edge-type facet 套用到全域搜尋候選。
+    /// 搜尋本身由 full-text index 完成，關係 facet 則以單次 bounded Cypher
+    /// 只保留同 active project/version 且具有指定 relationship type 的候選 node，
+    /// 避免 UI 顯示已套用篩選、實際結果卻完全忽略 edge-type 的落差。
+    /// </summary>
+    private async Task<IReadOnlySet<string>> FindNodesWithRelationshipTypesAsync(
+        string projectId,
+        IReadOnlyList<string> candidateIds,
+        IReadOnlyList<string> relationshipTypes,
+        CancellationToken cancellationToken)
+    {
+        if (_driver is null || candidateIds.Count == 0 || relationshipTypes.Count == 0)
+            return new HashSet<string>(StringComparer.Ordinal);
+
+        await using var session = OpenReadSession();
+        cancellationToken.ThrowIfCancellationRequested();
+        return await session.ExecuteReadAsync(async transaction =>
+        {
+            var cursor = await transaction.RunAsync(
+                """
+                MATCH (p:ProjectGraph {projectId: $projectId})
+                MATCH (source:GraphEntity {
+                    projectId: $projectId,
+                    graphVersion: p.activeManifestVersion
+                })-[relationship]->(target:GraphEntity {
+                    projectId: $projectId,
+                    graphVersion: p.activeManifestVersion
+                })
+                WHERE type(relationship) IN $relationshipTypes
+                  AND (source.id IN $candidateIds OR target.id IN $candidateIds)
+                WITH collect(DISTINCT source.id) + collect(DISTINCT target.id) AS ids
+                UNWIND ids AS id
+                RETURN DISTINCT id
+                """,
+                new
+                {
+                    projectId,
+                    candidateIds,
+                    relationshipTypes,
+                });
+            var matched = new HashSet<string>(StringComparer.Ordinal);
+            while (await cursor.FetchAsync())
+            {
+                var id = cursor.Current["id"].As<string>();
+                if (!string.IsNullOrWhiteSpace(id)) matched.Add(id);
+            }
+            return matched;
+        });
     }
 
     /// <summary>將 Viewer facet 轉成現有 V4 API 的嚴格白名單。</summary>

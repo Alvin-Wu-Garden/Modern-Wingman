@@ -141,7 +141,11 @@ public sealed record GraphViewerFacetDescriptor(
     string Label,
     string Kind,
     IReadOnlyList<GraphViewerFacetValue> Values,
-    bool MultiSelect = true);
+    bool MultiSelect = true,
+    string? Description = null,
+    string? Target = null,
+    string Selection = "multiple",
+    string Match = "any");
 
 /// <summary>Viewer 目前可使用的 bounded 功能。</summary>
 public sealed record GraphViewerCapabilities(
@@ -213,14 +217,24 @@ public sealed record GraphVisualSchema(
             "node",
             NodeKinds.Select(item =>
                     new GraphViewerFacetValue(item.Name, item.Name, item.Count))
-                .ToArray()),
+                .ToArray(),
+            true,
+            "依 V4 權威節點 kind 篩選目前 active graph。",
+            "node",
+            "multiple",
+            "any"),
         new(
             "edge-type",
             "關係類型",
             "edge",
             RelationshipTypes.Select(item =>
                     new GraphViewerFacetValue(item.Name, item.Name, item.Count))
-                .ToArray()),
+                .ToArray(),
+            true,
+            "依 V4 權威 relationship type 篩選圖譜與搜尋結果。",
+            "edge",
+            "multiple",
+            "any"),
     ];
 
     /// <summary>Viewer 內建查詢範本；實際版本由 API 注入 graphVersion 參數。</summary>
@@ -230,13 +244,30 @@ public sealed record GraphVisualSchema(
             "entrypoints",
             "入口與功能鏈",
             "MATCH path=(n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})-[r*1..4]->(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
-            "RETURN path LIMIT $limit"),
+            "RETURN path LIMIT $limit",
+            "manual"),
         new(
             "high-degree",
             "高連結節點",
             "MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
             "OPTIONAL MATCH (n)-[r]-()\n" +
-            "RETURN n, count(r) AS degree ORDER BY degree DESC LIMIT $limit"),
+            "RETURN n, count(r) AS degree ORDER BY degree DESC LIMIT $limit",
+            "manual"),
+        new(
+            "selected-node",
+            "選取節點的一階關係",
+            "MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion, id: '{{nodeId}}'})\n" +
+            "OPTIONAL MATCH (n)-[r]-(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "RETURN n, r, m LIMIT $limit",
+            "node"),
+        new(
+            "selected-edge",
+            "選取關係的兩端",
+            "MATCH (source:GraphEntity {projectId: $projectId, graphVersion: $graphVersion, id: '{{sourceId}}'})\n" +
+            "-[relationship]->(target:GraphEntity {projectId: $projectId, graphVersion: $graphVersion, id: '{{targetId}}'})\n" +
+            "WHERE type(relationship) = '{{edgeType}}'\n" +
+            "RETURN source, relationship, target LIMIT $limit",
+            "edge"),
     ];
 
     /// <summary>提供前端顯示的查詢限制與語意說明。</summary>

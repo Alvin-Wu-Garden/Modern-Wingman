@@ -14,6 +14,10 @@ interface ResizablePanelOptions {
   minWidth: number
   maxWidth: number
   collapsedWidth?: number
+  /** 拖曳把手位於左側時，寬度需反向計算。 */
+  resizeFrom?: 'start' | 'end'
+  /** 知識圖譜側欄使用雙擊把手收合；一般側欄維持重設寬度。 */
+  collapseOnDoubleClick?: boolean
 }
 
 interface StoredPanelPreference {
@@ -56,6 +60,8 @@ export function useResizablePanel({
   minWidth,
   maxWidth,
   collapsedWidth = 64,
+  resizeFrom = 'end',
+  collapseOnDoubleClick = false,
 }: ResizablePanelOptions) {
   const initialPreference = useRef(
     readPreference(storageKey, defaultWidth, minWidth, maxWidth),
@@ -78,6 +84,14 @@ export function useResizablePanel({
     setCollapsed((current) => !current)
   }, [])
 
+  /**
+   * 讓外部選取事件可以直接展開面板，例如點擊圖譜節點後顯示 Inspector。
+   * 與 toggleCollapsed 分開，避免外部事件在面板已展開時反而把它收合。
+   */
+  const expand = useCallback(() => {
+    setCollapsed(false)
+  }, [])
+
   const resetWidth = useCallback(() => {
     setWidth(defaultWidth)
   }, [defaultWidth])
@@ -97,7 +111,10 @@ export function useResizablePanel({
     document.body.style.userSelect = 'none'
 
     const handleMove = (moveEvent: PointerEvent) => {
-      setWidth(clamp(startWidth + moveEvent.clientX - startX, minWidth, maxWidth))
+      const delta = resizeFrom === 'start'
+        ? startX - moveEvent.clientX
+        : moveEvent.clientX - startX
+      setWidth(clamp(startWidth + delta, minWidth, maxWidth))
     }
     const cleanup = () => {
       window.removeEventListener('pointermove', handleMove)
@@ -113,7 +130,7 @@ export function useResizablePanel({
     window.addEventListener('pointermove', handleMove)
     window.addEventListener('pointerup', cleanup)
     window.addEventListener('pointercancel', cleanup)
-  }, [collapsed, maxWidth, minWidth, width])
+  }, [collapsed, maxWidth, minWidth, resizeFrom, width])
 
   const resizeWithKeyboard = useCallback((
     event: KeyboardEvent<HTMLDivElement>,
@@ -123,10 +140,18 @@ export function useResizablePanel({
 
     if (event.key === 'ArrowLeft') {
       event.preventDefault()
-      setWidth((current) => clamp(current - step, minWidth, maxWidth))
+      setWidth((current) => clamp(
+        current + (resizeFrom === 'start' ? step : -step),
+        minWidth,
+        maxWidth,
+      ))
     } else if (event.key === 'ArrowRight') {
       event.preventDefault()
-      setWidth((current) => clamp(current + step, minWidth, maxWidth))
+      setWidth((current) => clamp(
+        current + (resizeFrom === 'start' ? -step : step),
+        minWidth,
+        maxWidth,
+      ))
     } else if (event.key === 'Home') {
       event.preventDefault()
       setWidth(minWidth)
@@ -134,10 +159,11 @@ export function useResizablePanel({
       event.preventDefault()
       setWidth(maxWidth)
     }
-  }, [collapsed, maxWidth, minWidth])
+  }, [collapsed, maxWidth, minWidth, resizeFrom])
 
   return {
     collapsed,
+    expand,
     panelStyle: {
       width: collapsed ? collapsedWidth : width,
     } satisfies CSSProperties,
@@ -148,7 +174,7 @@ export function useResizablePanel({
       'aria-valuemax': maxWidth,
       'aria-valuemin': minWidth,
       'aria-valuenow': width,
-      onDoubleClick: resetWidth,
+      onDoubleClick: collapseOnDoubleClick ? toggleCollapsed : resetWidth,
       onKeyDown: resizeWithKeyboard,
       onPointerDown: startResize,
       role: 'separator',
