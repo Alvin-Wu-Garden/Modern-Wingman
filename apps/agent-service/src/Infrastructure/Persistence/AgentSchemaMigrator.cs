@@ -168,8 +168,9 @@ public static class AgentSchemaMigrator
 
             """, ct);
 
-        // atlassian_connections 由 EF EnsureCreatedAsync() 負責初始建立。
-        // 對已存在但欄位不完整的舊 DB（例如手動建立或版本升級前的殘缺表）進行補丁。
+        // EF EnsureCreatedAsync() 不會在「已存在其他資料表、但缺少新 entity」的舊 DB
+        // 上補建新表；因此 Atlassian 表必須在這裡以 IF NOT EXISTS 明確建立。
+        // 這個操作不會覆寫既有資料，並讓舊版 Wingman DB 能安全升級。
         await PatchAtlassianConnectionColumnsAsync(db.Database.GetDbConnection(), ct);
     }
 
@@ -203,6 +204,30 @@ public static class AgentSchemaMigrator
         if (connection.State == System.Data.ConnectionState.Closed)
             await connection.OpenAsync(ct);
 
+        await using (var createTableCmd = connection.CreateCommand())
+        {
+            createTableCmd.CommandText = """
+                CREATE TABLE IF NOT EXISTS atlassian_connections (
+                    Id TEXT NOT NULL PRIMARY KEY,
+                    ServiceType TEXT NOT NULL,
+                    BaseUrl TEXT NOT NULL,
+                    AuthType TEXT NOT NULL,
+                    Username TEXT,
+                    ProtectedSecret TEXT,
+                    EncryptionScheme TEXT,
+                    ApiVersion TEXT,
+                    IsVerified INTEGER NOT NULL DEFAULT 0,
+                    VerifiedAt TEXT,
+                    VerifiedDisplayName TEXT,
+                    CreatedAt TEXT NOT NULL,
+                    UpdatedAt TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS IX_atlassian_connections_ServiceType
+                    ON atlassian_connections (ServiceType);
+                """;
+            await createTableCmd.ExecuteNonQueryAsync(ct);
+        }
+
         // 讀取現有欄位清單
         var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         await using (var pragmaCmd = connection.CreateCommand())
@@ -213,7 +238,8 @@ public static class AgentSchemaMigrator
                 existingColumns.Add(reader.GetString(1)); // index 1 = column name
         }
 
-        // 表不存在 → EF EnsureCreatedAsync 會負責，這裡不插手
+        // CREATE TABLE IF NOT EXISTS 已處理表不存在的情況；保留防禦判斷避免
+        // 非 SQLite provider 或權限異常時繼續執行不必要的 ALTER。
         if (existingColumns.Count == 0) return;
 
         // 殘缺表（缺少必要欄位）→ DROP，讓後面的 EnsureCreatedAsync 重建
