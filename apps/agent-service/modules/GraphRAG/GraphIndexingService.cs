@@ -791,6 +791,12 @@ public interface IGraphIndexWatcherRegistry
 
     /// <summary>解除專案監看與尚未執行的 debounce。</summary>
     bool UnregisterProject(string projectId);
+
+    /// <summary>
+    /// 判斷目前是否仍有 watcher 監看指定專案。
+    /// 問答端點用這個狀態決定是否需要執行一次昂貴的完整檔案指紋 fallback。
+    /// </summary>
+    bool IsRegistered(string projectId);
 }
 
 /// <summary>
@@ -860,6 +866,10 @@ public sealed class GraphIndexWatcherService(
             watcher.Created += (_, args) => Schedule(project.Id, args.FullPath);
             watcher.Deleted += (_, args) => Schedule(project.Id, args.FullPath);
             watcher.Renamed += (_, args) => Schedule(project.Id, args.FullPath);
+            // FileSystemWatcher 的內部緩衝區溢位或底層 I/O 錯誤可能造成事件遺失。
+            // 這時不能假設索引仍然是最新，先標記 PendingChanges，讓下一次索引
+            // 或問答的安全流程重新建立權威 Graph。
+            watcher.Error += (_, args) => HandleWatcherError(project.Id, args.GetException());
             _watchers[project.Id] = watcher;
             return true;
         }
@@ -887,6 +897,10 @@ public sealed class GraphIndexWatcherService(
             return true;
         }
     }
+
+    /// <inheritdoc />
+    public bool IsRegistered(string projectId) =>
+        !string.IsNullOrWhiteSpace(projectId) && _watchers.ContainsKey(projectId);
 
     /// <summary>合併短時間異動並觸發一次完整 authority rebuild。</summary>
     private void Schedule(string projectId, string path)
@@ -929,6 +943,39 @@ public sealed class GraphIndexWatcherService(
                 debounce.Dispose();
             }
         }, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// 將 watcher 的底層錯誤轉成持久化的 PendingChanges。
+    /// 不在錯誤事件執行緒直接重建 Graph，避免阻塞 FileSystemWatcher 的事件處理。
+    /// </summary>
+    private void HandleWatcherError(string projectId, Exception exception)
+    {
+        logger.LogWarning(
+            "FBL Graph watcher 發生檔案系統錯誤，將要求下一次索引重新確認。Project={ProjectId}, ExceptionType={ExceptionType}",
+            projectId,
+            exception.GetType().Name);
+
+        _ = MarkWatcherErrorPendingAsync(projectId);
+    }
+
+    /// <summary>非同步保存 watcher 錯誤狀態，避免未觀察的背景例外。</summary>
+    private async Task MarkWatcherErrorPendingAsync(string projectId)
+    {
+        try
+        {
+            await indexing.MarkPendingChangesAsync(projectId, cancellationToken: _stoppingToken);
+        }
+        catch (OperationCanceledException) when (_stoppingToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(
+                "FBL Graph watcher 無法保存 PendingChanges。Project={ProjectId}, ExceptionType={ExceptionType}",
+                projectId,
+                exception.GetType().Name);
+        }
     }
 
     /// <inheritdoc />

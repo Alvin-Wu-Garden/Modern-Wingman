@@ -110,6 +110,7 @@ public static class ConversationEndpoints
         INeo4jRuntime neo4j,
         WingmanChatAgent agent,
         ILlmCompletionService llm,
+        IGraphIndexWatcherRegistry watcherRegistry,
         HttpContext http,
         CancellationToken ct)
     {
@@ -150,10 +151,15 @@ public static class ConversationEndpoints
                 return;
             }
 
-            // 資料庫設定異動不會改變任何 source file；PendingChanges／Stale 必須直接
-            // 進入完整 fingerprint 決策，不能只靠 CatchUpAsync 的檔案 hash 判斷。
-            if (RequiresFullIndexRefreshForProjectQuestion(project) ||
-                await indexing.CatchUpAsync(project.Id, ct))
+            // 正常情況由 FileSystemWatcher 在檔案異動當下標記 PendingChanges，
+            // 不應在每一次問答前重新列舉並 SHA-256 整個專案。
+            // 只有索引已知過期，或 watcher 沒有成功註冊時，才啟用一次性 hash fallback。
+            if (RequiresFullIndexRefreshForProjectQuestion(project))
+            {
+                project = await indexing.IndexProjectAsync(project.Id, ct);
+            }
+            else if (!watcherRegistry.IsRegistered(project.Id) &&
+                     await indexing.CatchUpAsync(project.Id, ct))
             {
                 project = await indexing.IndexProjectAsync(project.Id, ct);
             }
@@ -364,9 +370,9 @@ public static class ConversationEndpoints
             : ConversationScope.General;
 
     /// <summary>
-    /// 判斷專案問答是否必須先執行完整索引指紋檢查。
+    /// 判斷專案問答是否必須先執行完整索引。
     /// PendingChanges 包含檔案 watcher 與資料庫設定異動；Stale 表示上一輪更新失敗但
-    /// 仍有舊圖可用。兩者都應在回答前重試，Partial 則保留可用的降級圖，避免每題重建。
+    /// 仍有舊圖可用。兩者都應在回答前重試；Indexed 且 watcher 正常時則直接使用現有 Graph。
     /// </summary>
     /// <param name="project">本次專案對話綁定的持久化專案狀態。</param>
     /// <returns>需要先呼叫 IndexProjectAsync 時為 true。</returns>
