@@ -5,6 +5,7 @@ using AgentService.Application.Models;
 using AgentService.Domain.Models;
 using AgentService.Infrastructure.AgentFramework;
 using AgentService.Modules.GraphRAG;
+using Microsoft.Extensions.AI;
 
 namespace AgentService.Host.RestEndpoints;
 
@@ -105,6 +106,7 @@ public static class ConversationEndpoints
         IModelProviderService providers,
         GraphIndexingService indexing,
         GraphRetrievalService graphRag,
+        IGraphStore graphStore,
         INeo4jRuntime neo4j,
         WingmanChatAgent agent,
         ILlmCompletionService llm,
@@ -125,10 +127,12 @@ public static class ConversationEndpoints
             ? profile.ModelId
             : request.ModelId;
         var prompt = request.UserMessage;
+        ProjectEntity? project = null;
+        IReadOnlyList<AIFunction> projectTools = [];
 
         if (conversation.Scope == ConversationScope.Project)
         {
-            var project = string.IsNullOrWhiteSpace(conversation.ProjectId)
+            project = string.IsNullOrWhiteSpace(conversation.ProjectId)
                 ? null
                 : await projects.GetAsync(conversation.ProjectId, ct);
             if (project is null)
@@ -162,14 +166,20 @@ public static class ConversationEndpoints
                 }, ct);
                 return;
             }
-
-            // 只把本次問題拿去檢索；歷史訊息仍由共用 Agent 以正常對話歷史提供。
-            // 這可避免舊問題污染 GraphRAG 關鍵字，同時保留多輪對話的語意連續性。
-            prompt = await graphRag.BuildAnswerPromptAsync(
-                project.Id,
-                project.RootPath,
-                request.UserMessage,
-                ct);
+            var activeVersion = await graphStore.GetActiveManifestAsync(project.Id, ct);
+            if (!string.Equals(
+                    activeVersion,
+                    project.IndexManifestVersion,
+                    StringComparison.Ordinal))
+            {
+                http.Response.StatusCode = StatusCodes.Status409Conflict;
+                await http.Response.WriteAsJsonAsync(new
+                {
+                    error = "專案索引版本與目前啟用的 Graph 版本不一致，暫時不開放問答。",
+                    errorCode = "graph_manifest_mismatch",
+                }, ct);
+                return;
+            }
         }
 
         var firstExchange = conversation.Messages.Count == 0;
@@ -182,6 +192,14 @@ public static class ConversationEndpoints
         http.Response.Headers["X-Accel-Buffering"] = "no";
         http.Response.Headers.AccessControlAllowOrigin = "*";
 
+        var runId = Guid.NewGuid().ToString("N");
+        var activity = new AgentActivityReporter(
+            runId,
+            eventValue => WriteSseAsync(
+                http,
+                new { activity = eventValue },
+                ct));
+        string? runActivityId = null;
         var fullResponse = new StringBuilder();
         TokenUsage? usage = null;
         try
@@ -191,7 +209,37 @@ public static class ConversationEndpoints
                 resolvedProviderId = profile.Id,
                 resolvedModelId = modelId,
                 scope = ToWireValue(conversation.Scope),
+                runId,
             }, ct);
+            runActivityId = await activity.StartAsync(
+                "run.started",
+                "正在分析問題",
+                detail: conversation.Scope == ConversationScope.Project
+                    ? "準備 GraphRAG 與專案工具"
+                    : "準備模型回應");
+
+            if (project is not null)
+            {
+                // 只把本次問題拿去檢索；歷史訊息仍由共用 Agent 以正常對話歷史提供。
+                // 這可避免舊問題污染 GraphRAG 關鍵字，同時保留多輪對話的語意連續性。
+                prompt = await graphRag.BuildAnswerPromptAsync(
+                    project.Id,
+                    project.RootPath,
+                    request.UserMessage,
+                    ct,
+                    profile.Id,
+                    modelId,
+                    activity: activity);
+
+                // 工具實例綁定本輪 projectId 與 rootPath，不註冊成全域 Singleton，
+                // 避免另一個對話誤查到不同專案，也不讓模型自行指定任意工作目錄。
+                projectTools = new ProjectAnalysisTools(
+                        project.Id,
+                        project.RootPath,
+                        graphStore,
+                        activity)
+                    .CreateTools();
+            }
 
             await foreach (var token in agent.RunStreamingAsync(
                 prompt,
@@ -201,6 +249,8 @@ public static class ConversationEndpoints
                 onUsage: value => usage = value,
                 attachments: request.Attachments,
                 includeSkills: conversation.Scope == ConversationScope.General,
+                tools: projectTools,
+                activity: activity,
                 ct: ct))
             {
                 fullResponse.Append(token);
@@ -237,6 +287,10 @@ public static class ConversationEndpoints
                     conversations,
                     llm);
 
+            if (runActivityId is not null)
+                await activity.CompleteAsync(
+                    runActivityId,
+                    "回答已完成");
             await WriteSseAsync(http, new { done = true }, CancellationToken.None);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -245,6 +299,10 @@ public static class ConversationEndpoints
         }
         catch (Exception ex)
         {
+            if (runActivityId is not null)
+                await activity.FailAsync(
+                    runActivityId,
+                    "Agent 執行失敗，請查看錯誤訊息後重試");
             await WriteSseAsync(http, new { error = ex.Message }, CancellationToken.None);
         }
     }

@@ -55,6 +55,18 @@ public sealed class AtlassianConnectionRepository(
         return row is null ? null : MapToModel(row);
     }
 
+    /// <summary>讀取並解密伺服器即將發送請求所需的連線設定。</summary>
+    public async Task<AtlassianConnection?> GetForUseAsync(
+        AtlassianServiceType serviceType,
+        CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        var row = await db.AtlassianConnections
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.ServiceType == serviceType.ToString(), ct);
+        return row is null ? null : MapToModel(row, includeSecret: true);
+    }
+
     /// <summary>
     /// 新增或更新連線設定。
     /// 若 <paramref name="connection"/>.SecretValue 為 null，保留 DB 中既有的 DPAPI 加密 PAT，
@@ -109,14 +121,16 @@ public sealed class AtlassianConnectionRepository(
         }
     }
 
-    private AtlassianConnection MapToModel(AtlassianConnectionRecord row) => new()
+    private AtlassianConnection MapToModel(
+        AtlassianConnectionRecord row,
+        bool includeSecret = false) => new()
     {
         Id = row.Id,
         ServiceType = Enum.Parse<AtlassianServiceType>(row.ServiceType),
         BaseUrl = row.BaseUrl,
         AuthType = Enum.Parse<AtlassianAuthType>(row.AuthType),
         Username = row.Username,
-        SecretValue = (row.ProtectedSecret is not null && row.EncryptionScheme is not null)
+        SecretValue = includeSecret && row.ProtectedSecret is not null && row.EncryptionScheme is not null
             ? TryUnprotect(row.ProtectedSecret, row.EncryptionScheme) : null,
         HasSecret = !string.IsNullOrEmpty(row.ProtectedSecret),
         ApiVersion = row.ApiVersion,

@@ -94,7 +94,7 @@ public static class AtlassianEndpoints
             return Results.BadRequest(new { error = "Basic 驗證方式必須提供使用者名稱。" });
 
         // 讀取既有設定以備 Token 留空時沿用
-        var existing = await repo.GetAsync(svcType, ct);
+        var existing = await repo.GetForUseAsync(svcType, ct);
 
         // 若未提供新 Token，使用既有解密後的 Token；若兩者都無 → 回傳錯誤
         var tokenToTest = !string.IsNullOrWhiteSpace(request.Token)
@@ -180,7 +180,7 @@ public static class AtlassianEndpoints
         if (localIssue is not null)
             return Results.Ok(localIssue.Preview);
 
-        var conn = await repo.GetAsync(AtlassianServiceType.Jira, ct);
+        var conn = await repo.GetForUseAsync(AtlassianServiceType.Jira, ct);
         if (conn is null || !conn.HasSecret)
             return Results.UnprocessableEntity(new { error = AtlassianErrorCodes.NotConfigured });
         if (conn.SecretValue is null)
@@ -260,7 +260,7 @@ public static class AtlassianEndpoints
                 return;
             }
 
-            var conn = await atlassianRepo.GetAsync(AtlassianServiceType.Jira, ct);
+            var conn = await atlassianRepo.GetForUseAsync(AtlassianServiceType.Jira, ct);
             if (conn is null || !conn.HasSecret || conn.SecretValue is null)
             {
                 http.Response.StatusCode = StatusCodes.Status422UnprocessableEntity;

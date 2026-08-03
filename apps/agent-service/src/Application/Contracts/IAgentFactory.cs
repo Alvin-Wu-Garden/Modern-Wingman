@@ -1,5 +1,6 @@
 using AgentService.Domain.Models;
 using Microsoft.Agents.AI;
+using Microsoft.Extensions.AI;
 
 namespace AgentService.Application.Contracts;
 
@@ -33,4 +34,10 @@ public sealed class AgentCreationContext
     /// 無 Skill 時為空字串，且不包含任何可執行 script 或 MCP tool。
     /// </summary>
     public string SkillsPrompt { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 本次 Agent invocation 可使用的受控工具。一般對話維持空集合；
+    /// 專案解析只會傳入綁定當前專案根目錄的唯讀工具。
+    /// </summary>
+    public IReadOnlyList<AIFunction> Tools { get; init; } = [];
 }

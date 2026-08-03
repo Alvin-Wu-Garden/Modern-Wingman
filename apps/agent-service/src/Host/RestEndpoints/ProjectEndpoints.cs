@@ -15,7 +15,7 @@ namespace AgentService.Host.RestEndpoints;
 /// POST   /api/projects/{id}/index            → 啟動全量索引（背景執行）
 /// POST   /api/projects/{id}/index/incremental → 增量索引
 /// GET    /api/projects/{id}/index/progress   → 索引進度（輪詢）
-/// POST   /api/projects/{id}/summaries        → 建立社群摘要（GraphRAG 索引期）
+/// GET    /api/projects/{id}/summaries/progress → 查詢背景 AI 社群摘要進度
 /// POST   /api/projects/{id}/query            → GraphRAG 問答（auto/global/local）
 /// GET    /api/projects/{id}/repomap          → Repo Map
 /// </summary>
@@ -68,7 +68,6 @@ public static class ProjectEndpoints
         group.MapPost("/{id}/index", StartIndex);
         group.MapPost("/{id}/index/incremental", IncrementalIndex);
         group.MapGet("/{id}/index/progress", GetProgress);
-        group.MapPost("/{id}/summaries", BuildSummaries);
         group.MapGet("/{id}/summaries/progress", GetSummaryProgress);
         group.MapGet("/{id}/graph/schema", GetGraphSchema);
         group.MapGet("/{id}/graph", GetGraph);
@@ -136,7 +135,10 @@ public static class ProjectEndpoints
     }
 
     private static async Task<IResult> CreateProject(
-        CreateProjectRequest request, IProjectRepository repo, CancellationToken ct)
+        CreateProjectRequest request,
+        IProjectRepository repo,
+        IGraphIndexWatcherRegistry watcherRegistry,
+        CancellationToken ct)
     {
         if (!Directory.Exists(request.RootPath))
             return Results.BadRequest(new { error = $"目錄不存在: {request.RootPath}" });
@@ -149,6 +151,8 @@ public static class ProjectEndpoints
             RootPath = request.RootPath,
         };
         await repo.SaveAsync(project, ct);
+        // SQLite 寫入成功後立即開始監看，不再等待背景服務下一次輪詢。
+        watcherRegistry.RegisterProject(project);
         return Results.Ok(project);
     }
 
@@ -160,6 +164,7 @@ public static class ProjectEndpoints
         ISvnClient svn,
         IProjectImportProgressStore importProgress,
         ISensitiveDataRedactor redactor,
+        IGraphIndexWatcherRegistry watcherRegistry,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.DestinationPath) ||
@@ -238,6 +243,8 @@ public static class ProjectEndpoints
                 RootPath = destination,
             };
             await projects.SaveAsync(project, ct);
+            // Clone/checkout 與專案資料列均完成後，立即註冊實際 destination。
+            watcherRegistry.RegisterProject(project);
             await vcsState.SaveBindingAsync(new ProjectVcsBinding
             {
                 ProjectId = project.Id,
@@ -280,6 +287,7 @@ public static class ProjectEndpoints
         IProjectRepository repo,
         IGraphStore graphStore,
         GraphIndexingService indexService,
+        IGraphIndexWatcherRegistry watcherRegistry,
         CancellationToken ct)
     {
         try
@@ -292,6 +300,8 @@ public static class ProjectEndpoints
         }
         indexService.ForgetProjectState(id);
         await repo.DeleteAsync(id, ct);
+        // 先完成持久化刪除，再解除監看；若 SQLite 刪除失敗，仍保留原有 Watcher。
+        watcherRegistry.UnregisterProject(id);
         return Results.NoContent();
     }
 
@@ -322,25 +332,8 @@ public static class ProjectEndpoints
             : Results.Ok(progress);
     }
 
-    private static async Task<IResult> BuildSummaries(
-        string id,
-        GraphRetrievalService graphRag,
-        INeo4jRuntime neo4jLifecycle,
-        IProjectJobQueue executionQueue,
-        CancellationToken ct)
-    {
-        if (!await EnsureGraphAvailableAsync(neo4jLifecycle, ct))
-            return GraphUnavailable(neo4jLifecycle);
-
-        await executionQueue.EnqueueAsync(async workerCt =>
-        {
-            await graphRag.BuildCommunitySummariesAsync(id, null, workerCt);
-        }, ct);
-        return Results.Accepted($"/api/projects/{id}/summaries/progress");
-    }
-
-    private static IResult GetSummaryProgress(string id, GraphRetrievalService graphRag) =>
-        Results.Ok(graphRag.GetEnrichmentStatus(id));
+    private static IResult GetSummaryProgress(string id, GraphCommunityAiService communityAi) =>
+        Results.Ok(communityAi.GetProgress(id));
 
     private static async Task<IResult> GetGraphSchema(
         string id,
@@ -349,7 +342,8 @@ public static class ProjectEndpoints
         INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
-        var readiness = await EnsureProjectGraphReadyAsync(id, repo, graphStore, neo4jLifecycle, ct);
+        var readiness = await EnsureProjectGraphReadyAsync(
+            id, repo, graphStore, neo4jLifecycle, ct);
         if (readiness is not null) return readiness;
 
         try
@@ -372,7 +366,8 @@ public static class ProjectEndpoints
         INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
-        var readiness = await EnsureProjectGraphReadyAsync(id, repo, graphStore, neo4jLifecycle, ct);
+        var readiness = await EnsureProjectGraphReadyAsync(
+            id, repo, graphStore, neo4jLifecycle, ct);
         if (readiness is not null) return readiness;
 
         try
@@ -405,7 +400,8 @@ public static class ProjectEndpoints
         INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
-        var readiness = await EnsureProjectGraphReadyAsync(id, repo, graphStore, neo4jLifecycle, ct);
+        var readiness = await EnsureProjectGraphReadyAsync(
+            id, repo, graphStore, neo4jLifecycle, ct);
         if (readiness is not null) return readiness;
 
         try
@@ -438,7 +434,8 @@ public static class ProjectEndpoints
         INeo4jRuntime neo4jLifecycle,
         CancellationToken ct)
     {
-        var readiness = await EnsureProjectGraphReadyAsync(id, repo, graphStore, neo4jLifecycle, ct);
+        var readiness = await EnsureProjectGraphReadyAsync(
+            id, repo, graphStore, neo4jLifecycle, ct);
         if (readiness is not null) return readiness;
 
         try

@@ -1,0 +1,619 @@
+{
+  "schemaVersion": "1.0",
+  "reportType": "graphrag-v4-independent-human-quality-review",
+  "generatedAt": "2026-07-30T16:00:35.5929753+08:00",
+  "projectId": "91eecf4369f147fa9f0cf26ecf729ec6",
+  "graphVersion": "149f39449d7f4e0da7ef94f49229296f",
+  "repositoryRoot": "D:\\FBL_Release_Trunk",
+  "policy": {
+    "agentServiceApi": "read-only diagnostics and graph query",
+    "sqlite": "SELECT only",
+    "externalDatabase": "SELECT only",
+    "passRule": "不能因為有 seed 就通過；必須核對 Graph path、hydrated evidence 與實際原始碼或資料物件。",
+    "questionThreshold": "Q1-Q8 至少 7 題人工評分 >= 4，且 Q6-Q8 不得缺少有效 seed。"
+  },
+  "searchSeeds": [
+    {
+      "id": "S1",
+      "input": "債券交易",
+      "normalizedQuery": "債券交易",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topEntityId": "feature:menu:140042",
+        "topEntityName": "140042-債券交易作業",
+        "rank": 1
+      },
+      "graphPath": [
+        "feature:menu:140042 -[ROUTES_TO]-> entry:web:bondtransaction/index",
+        "entry:web:bondtransaction/index -[HANDLES]-> code:csharp:apex.rmweb.controllers.bondtransactioncontroller"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "sql",
+          "confidence": "certain",
+          "artifact": "db:fbl_spv_sit/tblMenuMap/140042",
+          "details": "LinkAddress=/BondTransaction/Index/；menuPath=Root > 14-交易管理 > 債券 > 140042-債券交易作業"
+        },
+        {
+          "source": "framework",
+          "confidence": "certain",
+          "artifact": "riskmaster_web/controllers/bondtransactioncontroller.cs",
+          "lines": "31-36"
+        }
+      ],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\RiskMaster_Web\\Controllers\\BondTransactionController.cs",
+          "lines": "31-36",
+          "snippet": "public ActionResult Index() 對應 /BondTransaction/Index。"
+        }
+      ],
+      "confidence": 0.98,
+      "knownGaps": [
+        "入口到 frmBondTransaction.js 的頁面載入關係未連成單一路徑。"
+      ],
+      "manualScore": 5,
+      "status": "PASS"
+    },
+    {
+      "id": "S2",
+      "input": "BondTradeService",
+      "normalizedQuery": "bond trade service",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topEntityId": "code:csharp:apex.bz_apreclassificationgentrade",
+        "topEntityName": "BZ_APReclassificationGenTrade",
+        "rank": 1,
+        "isRelevant": false
+      },
+      "graphPath": [],
+      "hydratedEvidence": [],
+      "sourceSnippets": [],
+      "confidence": 0.05,
+      "knownGaps": [
+        "D:\\FBL_Release_Trunk 全庫文字搜尋找不到 BondTradeService；golden seed 與實際專案命名不符。",
+        "Diagnostics 回傳的候選均非 BondTradeService，missingSeed=false 是假陰性。"
+      ],
+      "manualScore": 1,
+      "status": "FAIL"
+    },
+    {
+      "id": "S3",
+      "input": "ProcessLogin",
+      "normalizedQuery": "process login",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topRelevantEntityId": "code:csharp:apex.loginandpassword.loginandpasswordprocess",
+        "rank": 3
+      },
+      "graphPath": [
+        "entry:web:account/processloginfromportal -[HANDLES]-> code:csharp:apex.rmweb.controllers.accountcontroller",
+        "原始碼核對：AccountController.Login 直接呼叫 LoginAndPasswordProcess.ProcessLogin"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "compiler",
+          "confidence": "certain",
+          "artifact": "loginandpassword/loginandpassword.cs",
+          "lines": "17-43",
+          "details": "LoginAndPasswordProcess 宣告 ProcessLogin。"
+        }
+      ],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\LoginAndPassword\\LoginAndPassword.cs",
+          "lines": "23-33",
+          "snippet": "建構子建立 LoginUtility(dbConnectionString, \"tblUser\", \"tblUserPrePassword\")；第 33 行宣告 ProcessLogin。"
+        },
+        {
+          "file": "D:\\FBL_Release_Trunk\\RiskMaster_Web\\Controllers\\AccountController.cs",
+          "lines": "595-605",
+          "snippet": "建立 LoginAndPasswordProcess，並呼叫 _LoginAndPassword.ProcessLogin(...)。"
+        }
+      ],
+      "confidence": 0.95,
+      "knownGaps": [
+        "Controller 到 ProcessLogin 的直接 CALLS 邊未被 Graph 保存。"
+      ],
+      "manualScore": 5,
+      "status": "PASS"
+    },
+    {
+      "id": "S4",
+      "input": "SettlementDate 交割日",
+      "normalizedQuery": "settlement date 交割日",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topRelevantEntityId": "data:sql:project-db/dbo/table/tblinventorybondoption",
+        "rank": 5
+      },
+      "graphPath": [
+        "data:sql:project-db/dbo/table/tblinventorybondoption 的 columns metadata 包含 SettlementDate",
+        "code:csharp:apex.formcollection.frmmaintainfx 的方法參數包含 SettlementDate"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "ast",
+          "confidence": "certain",
+          "artifact": "database/dbo/functions/apex_udf_getinventorybydaterange.sql",
+          "lines": "468-468",
+          "details": "NamedTableReference=TblInventoryBondOption"
+        }
+      ],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\FormCollection\\frmMaintainFX.cs",
+          "snippet": "FXSwapConvertToFXForward(...) 的方法簽章含 DateTime SettlementDate。"
+        }
+      ],
+      "confidence": 0.78,
+      "knownGaps": [
+        "V4 未建立 Column 細粒度節點，因此只能從 Table metadata 與方法 evidence 找到 SettlementDate。",
+        "Top 5 前存在多個泛化候選，精確欄位排名仍偏低。"
+      ],
+      "manualScore": 4,
+      "status": "PASS"
+    },
+    {
+      "id": "S5",
+      "input": "/Account/ProcessLogin",
+      "normalizedQuery": "account process login",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topRelevantEntityId": "entry:web:account/processloginfromportal",
+        "rank": 2,
+        "isExactRoute": false
+      },
+      "graphPath": [
+        "entry:web:account/processloginfromportal -[HANDLES]-> code:csharp:apex.rmweb.controllers.accountcontroller"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "framework",
+          "confidence": "certain",
+          "artifact": "riskmaster_web/controllers/accountcontroller.cs",
+          "details": "實際入口包含 /Account/Login 與 /Account/ProcessLoginFromPortal，沒有 /Account/ProcessLogin。"
+        }
+      ],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\RiskMaster_Web\\Controllers\\AccountController.cs",
+          "lines": "595-605",
+          "snippet": "Login action 內部呼叫 ProcessLogin；ProcessLogin 是方法，不是 /Account/ProcessLogin route。"
+        }
+      ],
+      "confidence": 0.35,
+      "knownGaps": [
+        "golden seed 把 service method 名稱誤當 route；實際專案不存在 /Account/ProcessLogin。"
+      ],
+      "manualScore": 2,
+      "status": "FAIL"
+    },
+    {
+      "id": "S6",
+      "input": "usp_ fn_ function stored procedure",
+      "normalizedQuery": "usp fn function stored procedure",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topEntityName": "Function",
+        "topEntityKind": "Code",
+        "topRelevantDataEntityRank": 3
+      },
+      "graphPath": [
+        "泛化關鍵字可召回一筆 project-db procedure，但 Top 1 是 NPOI Function 類別，並非 SQL module。"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "ast/sql",
+          "confidence": "mixed",
+          "details": "有 SQL procedure/function 候選，但亦把 live table usp_GetErrorInfo 與一般程式 Function 類別混入。"
+        }
+      ],
+      "sourceSnippets": [],
+      "confidence": 0.32,
+      "knownGaps": [
+        "測試字串沒有指定真實 SQL 物件名稱，無法驗證 exact identifier。",
+        "Entity kind 與 SQL object type 排序不足，Top 1 明顯不相關。"
+      ],
+      "manualScore": 2,
+      "status": "FAIL"
+    }
+  ],
+  "questions": [
+    {
+      "id": "Q1",
+      "input": "另類基金畫面加欄位要改哪些檔案？",
+      "normalizedQuery": "另類基金畫面加欄位要改哪些檔案",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topEntityId": "feature:menu:20028",
+        "topEntityName": "檔案上傳",
+        "isRelevant": false,
+        "effectiveMissingSeed": true
+      },
+      "graphPath": [
+        "應有：entry:page:riskmaster_web/views/alternativefund/frmalternativefund.aspx",
+        "應有：entry:page:riskmaster_web/scripts/view/frmalternativefund.js -[ROUTES_TO]-> entry:web:alternativefund/processsave",
+        "應有：entry:web:alternativefund/processsave -[HANDLES]-> code:csharp:apex.rmweb.controllers.alternativefundcontroller",
+        "原始碼補證：AlternativeFundController 直接建立 QRAlternativeFund 並呼叫 Search_By_SymID",
+        "code:csharp:apex.riskmaster.query.qralternativefund -[READS]-> data:sql:project-db/dbo/table/tblalternativefund"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "compiler",
+          "confidence": "certain",
+          "artifact": "riskmaster_web/controllers/alternativefundcontroller.cs",
+          "lines": "140-141"
+        }
+      ],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\RiskMaster_Web\\Controllers\\AlternativeFundController.cs",
+          "lines": "140-141",
+          "snippet": "建立 QRAlternativeFund 並呼叫 Search_By_SymID。"
+        }
+      ],
+      "confidence": 0.42,
+      "knownGaps": [
+        "自然語言 seed 未命中另類基金頁面、Controller 或 tblAlternativeFund。",
+        "Controller 到 QRAlternativeFund 的直接 CALLS 關係只存在原始碼，Graph 未連接。",
+        "因此現行問答上下文容易列錯檔案或漏掉後端與資料表。"
+      ],
+      "manualScore": 2,
+      "status": "FAIL"
+    },
+    {
+      "id": "Q2",
+      "input": "利息收入增減分析數字不對，應該檢查哪裡？",
+      "normalizedQuery": "利息收入增減分析數字不對應該檢查哪裡",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topEntityId": "feature:menu:79004",
+        "topEntityName": "利息收入增減分析",
+        "effectiveMissingSeed": false
+      },
+      "graphPath": [
+        "feature:menu:79004 -[DISPATCHES_TO]-> code:csharp:plugin_report_fbl.interestincomeanlz_reportkernel",
+        "code:csharp:plugin_report_fbl.interestincomeanlz_reportkernel -[READS]-> data:report-source:b267a0fa-7dca-4206-97b6-d2e73709133e",
+        "data:report-source:b267a0fa-7dca-4206-97b6-d2e73709133e -[READS]-> tblFXRate/tblTranINV/tblTranLog/tblTran/vw_NoteBase_UID/tblInvestmentCategory/tblTranPortfolio"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "sql",
+          "confidence": "certain",
+          "artifact": "db:fbl_spv_sit/tblMenuMap/79004"
+        },
+        {
+          "source": "compiler",
+          "confidence": "certain",
+          "artifact": "plugin_report_fbl/interestincomeanlz_reportkernel.cs",
+          "lines": "25-862"
+        },
+        {
+          "source": "compiler",
+          "confidence": "certain",
+          "artifact": "plugin_report_fbl/interestincomeanlz_reportkernel.cs",
+          "lines": "633-635",
+          "details": "CustomDataSourceName.ProductBookValueTWD"
+        }
+      ],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\PlugIn_Report_FBL\\InterestIncomeAnlz_ReportKernel.cs",
+          "lines": "630-637",
+          "snippet": "GetBookValueTWDProduct 取得 ProductBookValueTWD 參數後呼叫 GetDataSource。"
+        }
+      ],
+      "confidence": 0.96,
+      "knownGaps": [
+        "報表數字根因仍須用日期、投組、匯率與來源資料重現；Graph 能提供正確檢查入口但不能單獨證明數字錯誤原因。"
+      ],
+      "manualScore": 5,
+      "status": "PASS"
+    },
+    {
+      "id": "Q3",
+      "input": "tblPosition105 加欄位會影響哪些地方？",
+      "normalizedQuery": "tbl position105 加欄位會影響哪些地方",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topEntityName": "Position105D",
+        "effectiveMissingSeed": true
+      },
+      "graphPath": [],
+      "hydratedEvidence": [],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\RMReportKernel\\Position105D_ReportKernel.cs",
+          "snippet": "全庫只找到 Position105D/Position105U 報表或 Controller 命名，沒有 tblPosition105 資料表參照。"
+        }
+      ],
+      "confidence": 0.05,
+      "knownGaps": [
+        "Graph 與 D:\\FBL_Release_Trunk 原始碼均不存在 tblPosition105。",
+        "golden question 疑似將 Position105D 報表名稱誤寫成資料表；必須先確認真實 table 名稱，否則不得宣稱影響範圍。"
+      ],
+      "manualScore": 1,
+      "status": "FAIL"
+    },
+    {
+      "id": "Q4",
+      "input": "公告管理驗證改動會影響哪些前端？",
+      "normalizedQuery": "公告管理驗證改動會影響哪些前端",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topEntityId": "feature:menu:149003",
+        "topEntityName": "公開資訊公告(買入)",
+        "effectiveMissingSeed": false
+      },
+      "graphPath": [
+        "feature:menu:149003 -[ROUTES_TO]-> entry:web:announcement/index",
+        "entry:web:announcement/index -[HANDLES]-> code:csharp:apex.rmweb.controllers.announcementcontroller",
+        "code:frontend:riskmaster_web/scripts/component/frmannouncement/editwindow.tsx 具有 /Announcement/CheckSaveData/、/Announcement/Save/ 等 httpUrls evidence"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "sql",
+          "confidence": "certain",
+          "artifact": "db:fbl_spv_sit/tblMenuMap/149003",
+          "details": "LinkAddress=/Announcement/Index/Buy"
+        },
+        {
+          "source": "framework",
+          "confidence": "certain",
+          "artifact": "riskmaster_web/controllers/announcementcontroller.cs",
+          "lines": "31-2540"
+        },
+        {
+          "source": "ast",
+          "confidence": "certain",
+          "artifact": "riskmaster_web/scripts/component/frmannouncement/editwindow.tsx",
+          "lines": "1-818",
+          "details": "httpUrls 包含 /Announcement/CheckSaveData/、/Announcement/Save/、/Announcement/GetShareOutstandingUnit/"
+        }
+      ],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\RiskMaster_Web\\Scripts\\component\\frmAnnouncement\\EditWindow.tsx",
+          "lines": "423-433",
+          "snippet": "前端呼叫 /Announcement/CheckSaveData/，失敗時停止 loading。"
+        },
+        {
+          "file": "D:\\FBL_Release_Trunk\\RiskMaster_Web\\Controllers\\AnnouncementController.cs",
+          "lines": "240-252",
+          "snippet": "Controller 宣告 CheckSaveData_Candidate 驗證 Action。"
+        }
+      ],
+      "confidence": 0.7,
+      "knownGaps": [
+        "Graph 沒有把 Announcement Action 與 production TSX component 連成可遍歷的完整 route path。",
+        "搜尋 seed 指到業務入口，但無法僅靠 Graph 列完整受影響的 EditWindow/MainPanel/AsyncConfirm 元件。"
+      ],
+      "manualScore": 3,
+      "status": "FAIL"
+    },
+    {
+      "id": "Q5",
+      "input": "Bloomberg 匯率排程在哪裡？",
+      "normalizedQuery": "bloomberg 匯率排程在哪裡",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topRelevantEntityId": "feature:schedule:350",
+        "topRelevantEntityName": "Bloomberg FXRate每日擷取",
+        "rank": 2,
+        "effectiveMissingSeed": false
+      },
+      "graphPath": [
+        "feature:schedule:350 -[TRIGGERS]-> entry:task:informationstreamconnected",
+        "entry:task:informationstreamconnected -[HANDLES]-> code:csharp:apex.rmscheduletaskdefinition.informationstreamconnectedtask"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "sql",
+          "confidence": "certain",
+          "artifact": "db:fbl_spv_sit/tblSchedule/350",
+          "details": "enabled=False；frequency=3；taskCount=1"
+        },
+        {
+          "source": "sql",
+          "confidence": "certain",
+          "artifact": "db:fbl_spv_sit/tblScheduleTask/1016/1",
+          "details": "Name=InformationStreamConnected；description=資訊源擷取"
+        },
+        {
+          "source": "compiler",
+          "confidence": "certain",
+          "artifact": "rmscheduletaskdefinition/scheduletask.cs",
+          "lines": "2316-2439"
+        }
+      ],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\RMScheduleTaskDefinition\\ScheduleTask.cs",
+          "lines": "2316-2344",
+          "snippet": "InformationStreamConnectedTask 繼承 ScheduleTaskBase，建構時反序列化 scheduleTask.Parameter。"
+        }
+      ],
+      "confidence": 0.97,
+      "knownGaps": [
+        "Top 1 是『排程測試寄信』假陽性，但正確 Bloomberg schedule 位於 Top 2。",
+        "目前資料庫證據顯示該排程 enabled=False，回答時必須揭露停用狀態。"
+      ],
+      "manualScore": 5,
+      "status": "PASS"
+    },
+    {
+      "id": "Q6",
+      "input": "登入流程是什麼？",
+      "normalizedQuery": "登入流程是什麼",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topCandidatesRelevant": false,
+        "effectiveMissingSeed": true
+      },
+      "graphPath": [
+        "正確圖中存在 entry:web:account/login -[HANDLES]-> code:csharp:apex.rmweb.controllers.accountcontroller",
+        "原始碼補證：AccountController.Login -> LoginAndPasswordProcess.ProcessLogin -> LoginUtility(tblUser, tblUserPrePassword)"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "framework/compiler",
+          "confidence": "certain",
+          "artifact": "riskmaster_web/controllers/accountcontroller.cs",
+          "lines": "572-686"
+        },
+        {
+          "source": "compiler",
+          "confidence": "certain",
+          "artifact": "loginandpassword/loginandpassword.cs",
+          "lines": "17-43"
+        }
+      ],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\RiskMaster_Web\\Controllers\\AccountController.cs",
+          "lines": "595-605",
+          "snippet": "建立 LoginAndPasswordProcess、登出既有 FormsAuthentication，呼叫 ProcessLogin。"
+        },
+        {
+          "file": "D:\\FBL_Release_Trunk\\LoginAndPassword\\LoginAndPassword.cs",
+          "lines": "23-40",
+          "snippet": "LoginUtility 使用 tblUser/tblUserPrePassword；ProcessLogin 先檢查 SystemExpireDate。"
+        }
+      ],
+      "confidence": 0.38,
+      "knownGaps": [
+        "Diagnostics 雖回報 missingSeed=false，但 Top candidates 只有無關 Data/Feature，沒有 Account/Login、AccountController 或 LoginAndPasswordProcess。",
+        "Graph 缺少 AccountController 到 LoginAndPasswordProcess 的 CALLS 邊，也未建立對 tblUser 的資料邊。",
+        "現行自然語言問答無法自動取得上述人工找到的正確流程。"
+      ],
+      "manualScore": 2,
+      "status": "FAIL"
+    },
+    {
+      "id": "Q7",
+      "input": "債券交易流程是什麼？",
+      "normalizedQuery": "債券交易流程是什麼",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topEntityId": "feature:menu:140042",
+        "topEntityName": "140042-債券交易作業",
+        "effectiveMissingSeed": false
+      },
+      "graphPath": [
+        "feature:menu:140042 -[ROUTES_TO]-> entry:web:bondtransaction/index",
+        "entry:web:bondtransaction/index -[HANDLES]-> code:csharp:apex.rmweb.controllers.bondtransactioncontroller",
+        "entry:page:riskmaster_web/scripts/view/frmbondtransaction.js -[ROUTES_TO]-> BondTransaction actions"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "sql",
+          "confidence": "certain",
+          "artifact": "db:fbl_spv_sit/tblMenuMap/140042"
+        },
+        {
+          "source": "framework",
+          "confidence": "certain",
+          "artifact": "riskmaster_web/controllers/bondtransactioncontroller.cs",
+          "lines": "31-1099"
+        },
+        {
+          "source": "ast",
+          "confidence": "certain",
+          "artifact": "riskmaster_web/scripts/view/frmbondtransaction.js",
+          "lines": "1-1638"
+        }
+      ],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\RiskMaster_Web\\Scripts\\View\\frmBondTransaction.js",
+          "lines": "505-515",
+          "snippet": "Grid store 以 POST 呼叫 /BondTransaction/LoadTempSaveData/。"
+        },
+        {
+          "file": "D:\\FBL_Release_Trunk\\RiskMaster_Web\\Controllers\\BondTransactionController.cs",
+          "lines": "189-210",
+          "snippet": "LoadData 建立 QRudfApex_UDF_BondTransactionList 並執行 GetAll。"
+        }
+      ],
+      "confidence": 0.68,
+      "knownGaps": [
+        "Menu/Index 與 frmBondTransaction.js 未連成同一條 page path。",
+        "Controller 到 QRudfApex_UDF_BondTransactionList、交易儲存類別及資料表的直接依賴未完整建圖。",
+        "因此只能回答入口與部分查詢流程，不能可靠說明完整交易生命週期。"
+      ],
+      "manualScore": 3,
+      "status": "FAIL"
+    },
+    {
+      "id": "Q8",
+      "input": "修改 SettlementDate 會影響哪裡？",
+      "normalizedQuery": "修改 settlement date 會影響哪裡",
+      "seed": {
+        "diagnosticMissingSeed": false,
+        "topRelevantEntityId": "data:sql:project-db/dbo/table/tblinventorybondoption",
+        "topRelevantRank": 4,
+        "effectiveMissingSeed": false
+      },
+      "graphPath": [
+        "tblInventoryBondOption/tblInventoryFXForward/tblInventoryFXSwap 的 columns metadata 含 SettlementDate",
+        "code:csharp:apex.formcollection.frmmaintainfx 的方法參數含 SettlementDate",
+        "現有 Table 鄰居主要是 DEPENDS_ON tblCustomProductType，未形成 Column -> Table -> Code/SQL -> Job/Report 影響路徑"
+      ],
+      "hydratedEvidence": [
+        {
+          "source": "ast",
+          "confidence": "certain",
+          "artifact": "database/dbo/functions/apex_udf_getinventorybydaterange.sql",
+          "lines": "468-468",
+          "details": "NamedTableReference=TblInventoryBondOption"
+        }
+      ],
+      "sourceSnippets": [
+        {
+          "file": "D:\\FBL_Release_Trunk\\FormCollection\\frmMaintainFX.cs",
+          "snippet": "FXSwapConvertToFXForward(...) 接收 DateTime SettlementDate；全庫另有大量 SettlementDate 使用點。"
+        }
+      ],
+      "confidence": 0.45,
+      "knownGaps": [
+        "沒有 Column 節點，無法對 SettlementDate 做精確 reverse traversal。",
+        "候選 Table 缺少 READ_BY/WRITTEN_BY 到程式、SQL、Job、Report 的完整路徑。",
+        "Top results 混入多種商品，未能依業務上下文消歧；目前不足以回答完整影響範圍。"
+      ],
+      "manualScore": 2,
+      "status": "FAIL"
+    }
+  ],
+  "summary": {
+    "searchSeedsAtLeast4": 3,
+    "searchSeedsTotal": 6,
+    "searchAcceptancePassed": false,
+    "questionsAtLeast4": 2,
+    "questionsTotal": 8,
+    "requiredQuestionsAtLeast4": 7,
+    "questionAcceptancePassed": false,
+    "q6ToQ8MissingSeed": {
+      "diagnosticFlags": {
+        "Q6": false,
+        "Q7": false,
+        "Q8": false
+      },
+      "humanEffectiveAssessment": {
+        "Q6": true,
+        "Q7": false,
+        "Q8": false
+      },
+      "passed": false,
+      "reason": "Q6 的 API missingSeed=false 是假陰性；候選沒有登入入口或登入程式。Q7/Q8 有可用 seed，但 traversal coverage 不足。"
+    },
+    "overallAcceptancePassed": false,
+    "primaryBlockers": [
+      "Business wording 到實際 Page/Action/Code/Data 的 seed ranking 不穩定（Q1、Q6）。",
+      "Framework/frontend 路由與 C# 直接 invocation 未完整連圖（Q1、Q4、Q6、Q7）。",
+      "SettlementDate 缺少可反向遍歷的 Column/field usage 表示（Q8）。",
+      "golden fixture 含不存在或類型錯置的識別字：BondTradeService、/Account/ProcessLogin、tblPosition105。",
+      "Diagnostics 的 missingSeed 只表示有候選，不代表有相關候選，造成假通過。"
+    ]
+  }
+}

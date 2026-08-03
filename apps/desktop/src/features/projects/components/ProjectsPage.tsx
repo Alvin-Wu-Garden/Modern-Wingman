@@ -52,7 +52,6 @@ export function ProjectsPage() {
     progress,
     loading,
     error,
-    fetchProjects,
     addProject,
     importRemoteProject,
     removeProject,
@@ -83,10 +82,6 @@ export function ProjectsPage() {
   const [jiraProjectId, setJiraProjectId] = useState<string | null>(null)
   const [menu, setMenu] = useState<ProjectMenu | null>(null)
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null)
-
-  useEffect(() => {
-    void fetchProjects()
-  }, [fetchProjects])
 
   useEffect(() => {
     if (!showAddProject || addMode === 'local') return

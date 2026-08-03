@@ -66,6 +66,46 @@
         "start: wingman"
       ],
       "problemMatcher": []
+    },
+    {
+      "label": "modern-wingman: start all",
+      "type": "process",
+      "command": "pwsh.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev/start-all.ps1"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "modern-wingman-debug",
+        "clear": true,
+        "showReuseMessage": false
+      }
+    },
+    {
+      "label": "modern-wingman: stop all",
+      "type": "process",
+      "command": "pwsh.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev/stop-all.ps1"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "group": "modern-wingman-debug",
+        "clear": true,
+        "showReuseMessage": false
+      }
     }
   ]
 }

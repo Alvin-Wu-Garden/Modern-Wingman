@@ -1,22 +1,23 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using AgentService.Modules.GraphRAG.FblAuthority;
 
 namespace AgentService.Modules.GraphRAG;
 
 /// <summary>
-/// GraphRAG V3 唯一 DI composition root。
+/// GraphRAG V4 唯一 DI composition root。
 /// 所有 extractor、store、runtime、indexing、retrieval 與 watcher 都必須由此註冊，
 /// 禁止在 ServiceRegistration 重新散落一份 GraphRAG 建構邏輯。
 /// </summary>
 public static class GraphRagModule
 {
     /// <summary>
-    /// 註冊完整 V3 module。此方法只綁定技術 budget 與連線設定，不提供任何 schema profile。
+    /// 註冊完整 V4 module。此方法只綁定技術 budget 與連線設定，不提供任何 schema profile。
     /// </summary>
     /// <param name="services">Agent Service DI container。</param>
     /// <param name="configuration">應用程式設定；Neo4j 密碼應由環境變數或 DPAPI 注入。</param>
     /// <returns>同一個 service collection，供 fluent registration 使用。</returns>
-    public static IServiceCollection AddGraphRagV3(
+    public static IServiceCollection AddGraphRagV4(
         this IServiceCollection services,
         IConfiguration configuration)
     {
@@ -40,30 +41,33 @@ public static class GraphRagModule
                 CheckCertificateRevocationList = false,
             });
 
-        services.AddSingleton<CSharpGraphExtractor>();
-        services.AddSingleton<JavaGraphExtractor>();
-        services.AddSingleton<FrontendGraphExtractor>();
-        services.AddSingleton<SqlServerGraphExtractor>();
-        services.AddSingleton<ProjectGraphDatabaseExtractor>();
-        services.AddSingleton<IGraphExtractor>(
-            provider => provider.GetRequiredService<CSharpGraphExtractor>());
-        services.AddSingleton<IGraphExtractor>(
-            provider => provider.GetRequiredService<JavaGraphExtractor>());
-        services.AddSingleton<IGraphExtractor>(
-            provider => provider.GetRequiredService<FrontendGraphExtractor>());
-        services.AddSingleton<IGraphExtractor>(
-            provider => provider.GetRequiredService<SqlServerGraphExtractor>());
-
-        services.AddSingleton<IGraphStore, Neo4jGraphStore>();
+        // FBLAuthority 是唯一抽取核心；禁止再註冊通用語言 Extractor 或舊 Graph assembler。
+        services.AddSingleton<FblAuthorityGraphBuilder>();
+        services.AddSingleton<Neo4jGraphStore>();
+        services.AddSingleton<IGraphStore>(
+            provider => provider.GetRequiredService<Neo4jGraphStore>());
+        services.AddSingleton<GraphCommunitySummaryQueue>();
+        services.AddSingleton<IGraphCommunitySummaryQueue>(
+            provider => provider.GetRequiredService<GraphCommunitySummaryQueue>());
+        services.AddHostedService(
+            provider => provider.GetRequiredService<GraphCommunitySummaryQueue>());
+        services.AddSingleton<GraphCommunityAiService>();
         services.AddSingleton<Neo4jRuntime>();
         services.AddSingleton<INeo4jRuntime>(
             provider => provider.GetRequiredService<Neo4jRuntime>());
         services.AddSingleton<
             IGraphDatabaseSourceProvider,
             ProjectGraphDatabaseSourceProvider>();
+        services.AddSingleton<ProjectGraphDatabaseExtractor>();
         services.AddSingleton<GraphIndexingService>();
         services.AddSingleton<GraphRetrievalService>();
-        services.AddHostedService<GraphIndexWatcherService>();
+        // Watcher 必須同時以 Singleton 與 HostedService 使用同一個實例，讓專案端點能在
+        // Save/Delete 完成後立即註冊或解除監看，而不是由背景服務輪詢 SQLite。
+        services.AddSingleton<GraphIndexWatcherService>();
+        services.AddSingleton<IGraphIndexWatcherRegistry>(
+            provider => provider.GetRequiredService<GraphIndexWatcherService>());
+        services.AddHostedService(
+            provider => provider.GetRequiredService<GraphIndexWatcherService>());
         return services;
     }
 }

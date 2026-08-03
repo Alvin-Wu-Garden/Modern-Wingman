@@ -1,6 +1,8 @@
 {
   "recommendations": [
     "ms-dotnettools.csdevkit",
-    "ms-dotnettools.csharp"
+    "ms-dotnettools.csharp",
+    "ms-vscode.cpptools",
+    "rust-lang.rust-analyzer"
   ]
 }

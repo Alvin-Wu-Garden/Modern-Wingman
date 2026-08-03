@@ -45,3 +45,6 @@ Thumbs.db
 /db-backups/
 /temp/
 /apps/agent-service/publish-verification/
+
+# Local-only test project. Tests can be run from apps/UnitTests but are not versioned.
+/apps/UnitTests/

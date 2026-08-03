@@ -2,6 +2,11 @@ using System.Diagnostics;
 using AgentService.Application.Atlassian;
 using AgentService.Modules.GraphRAG;
 using Microsoft.Extensions.Logging;
+using GraphNode = AgentService.Modules.GraphRAG.LegacyGraphNode;
+using GraphNodeKind = AgentService.Modules.GraphRAG.LegacyGraphNodeKind;
+using GraphRelationship = AgentService.Modules.GraphRAG.LegacyGraphRelationship;
+using ScoredGraphNode = AgentService.Modules.GraphRAG.LegacyScoredGraphNode;
+using GraphRetrievalContext = AgentService.Modules.GraphRAG.LegacyGraphRetrievalContext;
 
 namespace AgentService.Infrastructure.Atlassian;
 

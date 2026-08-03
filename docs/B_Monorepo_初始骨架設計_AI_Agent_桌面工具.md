@@ -395,11 +395,7 @@ apps/agent-service/
 │     ├─ Events/
 │     └─ Dtos/
 │
-├─ tests/
-│  ├─ UnitTests/
-│  ├─ IntegrationTests/
-│  ├─ ContractTests/
-│  └─ E2ETests/
+├─ UnitTests/                            # 本機測試專案，不納入版控
 │
 ├─ appsettings.json
 ├─ appsettings.Development.json

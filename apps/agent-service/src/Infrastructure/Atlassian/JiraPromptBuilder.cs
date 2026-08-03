@@ -236,8 +236,8 @@ public static class JiraPromptBuilder
 
         // 主要命中節點
         var nonEntry = ctx.Hits
-            .Where(h => h.NodeKind != nameof(AgentService.Modules.GraphRAG.GraphNodeKind.EntryPoint)
-                        && h.NodeKind != nameof(AgentService.Modules.GraphRAG.GraphNodeKind.Feature))
+            .Where(h => h.NodeKind != nameof(AgentService.Modules.GraphRAG.LegacyGraphNodeKind.EntryPoint)
+                        && h.NodeKind != nameof(AgentService.Modules.GraphRAG.LegacyGraphNodeKind.Feature))
             .Take(40)
             .ToList();
 

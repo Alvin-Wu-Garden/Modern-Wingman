@@ -271,6 +271,9 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   const graphRequestGenerationRef = useRef(0)
   const [canvasSize, setCanvasSize] = useState({ width: 900, height: 640 })
   const [schema, setSchema] = useState<CodeGraphSchema | null>(null)
+  // schema 與 graph 共用同一個 Neo4j readiness；先完成 schema 請求，
+  // 再載入圖譜，避免頁面初次開啟時同時觸發兩次 lifecycle 啟動檢查。
+  const [graphReadyProjectId, setGraphReadyProjectId] = useState<string | null>(null)
   const [graph, setGraph] = useState<CodeGraphVisualData | null>(null)
   const [queryResult, setQueryResult] = useState<CodeGraphQueryResult | null>(null)
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null)
@@ -355,21 +358,33 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   }, [])
 
   useEffect(() => {
+    let disposed = false
+    setGraphReadyProjectId(null)
     const load = async () => {
       setError(null)
       try {
         const nextSchema = await getProjectGraphSchema(project.id)
+        if (disposed) return
         setSchema(nextSchema)
         const nextStyles = loadStyles(project.id, nextSchema)
         setStyles(nextStyles)
+        setGraphReadyProjectId(project.id)
       } catch (err) {
+        if (disposed) return
         setError(err instanceof Error ? err.message : String(err))
       }
     }
     void load()
+    return () => {
+      disposed = true
+      graphRequestGenerationRef.current += 1
+    }
   }, [project.id])
 
   useEffect(() => {
+    // 圖譜頁面初次載入時，schema 成功後才允許 graph request；
+    // 篩選條件變更時則沿用已完成的 schema，不重複請求 schema。
+    if (graphReadyProjectId !== project.id) return
     // 種類、關係與載入上限都屬於即時篩選條件；任一條件改變便重抓圖譜，
     // 避免 UI 顯示已選取條件，Canvas 卻仍停留在舊資料。
     void loadGraph()
@@ -377,7 +392,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       // 條件切換或頁面卸載時，讓尚未完成的舊回應失效。
       graphRequestGenerationRef.current += 1
     }
-  }, [loadGraph])
+  }, [graphReadyProjectId, loadGraph, project.id])
 
   useEffect(() => {
     if (!schema) return
