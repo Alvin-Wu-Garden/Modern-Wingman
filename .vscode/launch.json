@@ -2,45 +2,39 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "偵錯 Agent Service + Wingman",
+      "name": "Modern Wingman AgentService（背景子程序）",
       "type": "dotnet",
       "request": "launch",
-      "preLaunchTask": "prepare: debug agent-service + wingman",
-      "projectPath": "${workspaceFolder}/apps/agent-service/AgentService.csproj"
+      "projectPath": "${workspaceFolder}/apps/agent-service/AgentService.csproj",
+      "presentation": {
+        "hidden": true
+      }
     },
     {
-      "name": "偵錯 Agent Service",
-      "type": "dotnet",
-      "request": "launch",
-      "preLaunchTask": "build: agent-service",
-      "projectPath": "${workspaceFolder}/apps/agent-service/AgentService.csproj"
-    },
-    {
-      "name": "附加至 Agent Service（已在執行）",
-      "type": "coreclr",
-      "request": "attach",
-      "processId": "${command:pickProcess}"
-    },
-    {
-      "name": "啟動 Wingman（start-all.ps1）",
+      "name": "Modern Wingman Desktop（背景子程序）",
       "type": "node-terminal",
       "request": "launch",
-      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\dev\\start-all.ps1\" -DesktopOnly",
-      "cwd": "${workspaceFolder}"
-    },
+      "command": "cargo run --bin modern-wingman-desktop",
+      "cwd": "${workspaceFolder}/apps/desktop/src-tauri",
+      "presentation": {
+        "hidden": true
+      }
+    }
+  ],
+  "compounds": [
     {
-      "name": "啟動 Agent Service（start-all.ps1）",
-      "type": "node-terminal",
-      "request": "launch",
-      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\dev\\start-all.ps1\" -AgentOnly",
-      "cwd": "${workspaceFolder}"
-    },
-    {
-      "name": "啟動全部（start-all.ps1）",
-      "type": "node-terminal",
-      "request": "launch",
-      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\dev\\start-all.ps1\"",
-      "cwd": "${workspaceFolder}"
+      "name": "Modern Wingman（全端 Debug）",
+      "configurations": [
+        "Modern Wingman AgentService（背景子程序）",
+        "Modern Wingman Desktop（背景子程序）"
+      ],
+      "preLaunchTask": "modern-wingman: prepare debug",
+      "postDebugTask": "modern-wingman: stop all",
+      "stopAll": true,
+      "presentation": {
+        "group": "modern-wingman",
+        "order": 1
+      }
     }
   ]
 }

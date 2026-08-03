@@ -2,73 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "build: agent-service",
-      "command": "dotnet",
-      "type": "process",
-      "args": [
-        "build",
-        "${workspaceFolder}/apps/agent-service/AgentService.csproj",
-        "/property:GenerateFullPaths=true",
-        "/consoleloggerparameters:NoSummary"
-      ],
-      "problemMatcher": "$msCompile",
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      }
-    },
-    {
-      "label": "start: agent-service",
-      "type": "process",
-      "command": "powershell",
-      "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}/scripts/dev/start-all.ps1",
-        "-AgentOnly"
-      ],
-      "problemMatcher": []
-    },
-    {
-      "label": "start: wingman",
-      "type": "process",
-      "command": "powershell",
-      "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}/scripts/dev/start-all.ps1",
-        "-DesktopOnly"
-      ],
-      "problemMatcher": []
-    },
-    {
-      "label": "start: all",
-      "type": "process",
-      "command": "powershell",
-      "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}/scripts/dev/start-all.ps1"
-      ],
-      "problemMatcher": []
-    },
-    {
-      "label": "prepare: debug agent-service + wingman",
-      "dependsOrder": "sequence",
-      "dependsOn": [
-        "build: agent-service",
-        "start: wingman"
-      ],
-      "problemMatcher": []
-    },
-    {
-      "label": "modern-wingman: start all",
+      "label": "modern-wingman: prepare debug",
       "type": "process",
       "command": "pwsh.exe",
       "args": [
@@ -76,13 +10,14 @@
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        "${workspaceFolder}/scripts/dev/start-all.ps1"
+        "${workspaceFolder}/scripts/dev/start-all.ps1",
+        "-SkipBuild"
       ],
       "problemMatcher": [],
       "presentation": {
         "reveal": "always",
         "panel": "dedicated",
-        "group": "modern-wingman-debug",
+        "group": "modern-wingman",
         "clear": true,
         "showReuseMessage": false
       }
@@ -102,7 +37,7 @@
       "presentation": {
         "reveal": "silent",
         "panel": "dedicated",
-        "group": "modern-wingman-debug",
+        "group": "modern-wingman",
         "clear": true,
         "showReuseMessage": false
       }
