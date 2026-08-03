@@ -1,6 +1,5 @@
 import { create } from 'zustand'
 import {
-  buildSummaries,
   createProject,
   deleteProject,
   getIndexProgress,
@@ -9,6 +8,7 @@ import {
   listProjects,
   startIndex,
   type IndexProgress,
+  type AiEnrichmentProgress,
   type ProjectInfo,
 } from '@/services/agent-api/projects'
 
@@ -16,6 +16,7 @@ interface ProjectsState {
   projects: ProjectInfo[]
   activeProjectId: string | null
   progress: IndexProgress | null
+  summaryProgress: AiEnrichmentProgress | null
   loading: boolean
   error: string | null
 
@@ -28,26 +29,35 @@ interface ProjectsState {
   removeProject: (projectId: string) => Promise<void>
   setActiveProject: (projectId: string | null) => void
   indexProject: (projectId: string) => Promise<void>
+  startSummaryPolling: (projectId: string) => void
+  stopSummaryPolling: () => void
   clearError: () => void
 }
 
 const messageOf = (error: unknown) =>
   error instanceof Error ? error.message : String(error)
 
+let summaryPollTimer: ReturnType<typeof setTimeout> | null = null
+let summaryPollEpoch = 0
+
 export const useProjectsStore = create<ProjectsState>((set, get) => ({
   projects: [],
   activeProjectId: null,
   progress: null,
+  summaryProgress: null,
   loading: false,
   error: null,
 
   fetchProjects: async () => {
-    set({ loading: true })
+    // 新一輪載入開始時清除上一輪的錯誤，避免成功後仍在專案頁顯示
+    // 已過期的「Failed to fetch」或舊的後端錯誤。
+    set({ loading: true, error: null })
     try {
       const projects = await listProjects()
       set((state) => ({
         projects,
         loading: false,
+        error: null,
         activeProjectId:
           state.activeProjectId ?? projects[0]?.id ?? null,
       }))
@@ -99,6 +109,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
   indexProject: async (projectId) => {
     set({
       error: null,
+      summaryProgress: null,
       progress: {
         projectId,
         phase: 'starting',
@@ -123,39 +134,11 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
             return
           }
 
-          // 結構圖譜已可問答；業務摘要在背景繼續，不再把專案標成「部分可用」。
+          // 結構圖譜已可立即問答；V4 後端會自動預熱 C0 摘要，
+          // C1/C2 則在第一次命中時排程，因此前端只需讀取獨立進度。
           await get().fetchProjects()
-          await buildSummaries(projectId)
-          const pollSummary = async (): Promise<void> => {
-            try {
-              const summary = await getSummaryProgress(projectId)
-              const terminal = ['Ready', 'Degraded', 'Superseded', 'Canceled']
-                .includes(summary.state)
-              set({
-                progress: terminal
-                  ? null
-                  : {
-                      projectId,
-                      phase: 'summaries',
-                      message: `索引可用 · 業務摘要生成中 ${summary.completedCommunities}/${summary.totalCommunities}`,
-                      percent: summary.totalCommunities > 0
-                        ? Math.round(
-                            (summary.completedCommunities /
-                              summary.totalCommunities) *
-                              100,
-                          )
-                        : 0,
-                    },
-                error: summary.state === 'Degraded'
-                  ? summary.error ?? summary.message ?? '部分業務摘要生成失敗。'
-                  : get().error,
-              })
-              if (!terminal) setTimeout(() => void pollSummary(), 1000)
-            } catch (error) {
-              set({ error: messageOf(error), progress: null })
-            }
-          }
-          void pollSummary()
+          set({ progress: null })
+          get().startSummaryPolling(projectId)
         } catch (error) {
           set({ error: messageOf(error), progress: null })
         }
@@ -164,6 +147,58 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     } catch (error) {
       set({ error: messageOf(error), progress: null })
     }
+  },
+
+  /**
+   * 持續觀察目前專案的 AI 摘要進度。
+   *
+   * queued/running 清空且 completed/failed 已涵蓋 total 時立即停止 timer，避免應用程式閒置時
+   * 仍持續呼叫 AgentService。切換專案、索引完成或一輪問答完成時會由呼叫端重新啟動檢查，
+   * 因此 C1/C2 晚到工作仍能被發現。
+   */
+  startSummaryPolling: (projectId) => {
+    summaryPollEpoch += 1
+    const epoch = summaryPollEpoch
+    if (summaryPollTimer) clearTimeout(summaryPollTimer)
+
+    const poll = async (): Promise<void> => {
+      if (
+        epoch !== summaryPollEpoch ||
+        get().activeProjectId !== projectId
+      ) return
+      let delay = 5000
+      try {
+        const summary = await getSummaryProgress(projectId)
+        const working = summary.queued > 0 || summary.running > 0
+        const terminal =
+          !working &&
+          summary.completed + summary.failed >= summary.total
+        set({
+          summaryProgress: summary,
+          error: summary.failed > 0
+            ? summary.message ?? `${summary.failed} 個 AI 摘要失敗，結構索引仍可使用。`
+            : get().error,
+        })
+        if (terminal) {
+          summaryPollTimer = null
+          return
+        }
+        delay = working ? 1000 : 5000
+      } catch {
+        // AI 摘要為非阻塞能力。短暫 API 失敗不清除最後已知進度，也不撤銷結構索引。
+      }
+      if (epoch === summaryPollEpoch)
+        summaryPollTimer = setTimeout(() => void poll(), delay)
+    }
+
+    void poll()
+  },
+
+  /** 停止全域摘要輪詢，供應用程式卸載或目前沒有專案時清理 timer。 */
+  stopSummaryPolling: () => {
+    summaryPollEpoch += 1
+    if (summaryPollTimer) clearTimeout(summaryPollTimer)
+    summaryPollTimer = null
   },
 
   clearError: () => set({ error: null }),

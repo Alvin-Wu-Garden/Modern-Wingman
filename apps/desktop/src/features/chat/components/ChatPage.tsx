@@ -13,6 +13,7 @@ import { SidebarNavigation } from '@/components/layout/sidebar-navigation'
 import { Button } from '@/components/ui/button'
 import { SettingsPage } from '@/features/settings/components/SettingsPage'
 import { ProjectsPage } from '@/features/projects/components/ProjectsPage'
+import { CommunitySummaryProgressToast } from '@/features/projects/components/CommunitySummaryProgressToast'
 import { useProjectsStore } from '@/features/projects/store/useProjectsStore'
 import { cn } from '@/lib/utils'
 import { useChatStore } from '../store/useChatStore'
@@ -31,20 +32,39 @@ type ActiveView = 'home' | 'chat' | 'projects' | 'marketplace' | 'settings'
  */
 export function ChatPage() {
   const [activeView, setActiveView] = useState<ActiveView>('home')
-  const projectProgress = useProjectsStore((state) => state.progress)
   const {
     conversations,
     activeConversationId,
     isLoadingList,
+    isStreaming,
     loadConversations,
     openConversation,
     startNewConversation,
     deleteConv,
   } = useChatStore()
+  const {
+    activeProjectId,
+    fetchProjects,
+    startSummaryPolling,
+    stopSummaryPolling,
+  } = useProjectsStore()
 
   useEffect(() => {
     void loadConversations()
-  }, [loadConversations])
+    void fetchProjects()
+  }, [fetchProjects, loadConversations])
+
+  useEffect(() => {
+    if (!activeProjectId) {
+      stopSummaryPolling()
+      return stopSummaryPolling
+    }
+
+    // 進入專案或一輪問答結束時重新檢查一次。Store 會在摘要進入終態後自行停止，
+    // 因此閒置期間沒有固定五秒輪詢，也不會漏掉問答期間才入列的 C1/C2 摘要。
+    if (!isStreaming) startSummaryPolling(activeProjectId)
+    return stopSummaryPolling
+  }, [activeProjectId, isStreaming, startSummaryPolling, stopSummaryPolling])
 
   const generalConversations = useMemo(
     () => conversations.filter((conversation) => conversation.scope === 'general'),
@@ -199,25 +219,7 @@ export function ChatPage() {
         </React.Suspense>
       )}
       </AppShell>
-
-      {projectProgress?.phase === 'summaries' && (
-        <aside
-          role="status"
-          aria-live="polite"
-          className="fixed bottom-5 right-5 z-50 w-80 rounded-xl border border-border bg-surface p-4 shadow-lg"
-        >
-          <div className="flex items-center justify-between gap-3 text-xs">
-            <span className="font-medium text-ink">{projectProgress.message}</span>
-            <span className="shrink-0 text-ink-subtle">{projectProgress.percent}%</span>
-          </div>
-          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border">
-            <div
-              className="h-full rounded-full bg-brand transition-all"
-              style={{ width: `${projectProgress.percent}%` }}
-            />
-          </div>
-        </aside>
-      )}
+      <CommunitySummaryProgressToast />
     </>
   )
 }

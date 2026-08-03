@@ -23,7 +23,7 @@ public sealed class ProjectEntity
     /// <summary>專案根目錄絕對路徑。</summary>
     public required string RootPath { get; set; }
 
-    /// <summary>偵測到的語言（"csharp" / "java"，逗號分隔）。</summary>
+    /// <summary>FBL 解析涵蓋的語言與檔案類型，以逗號分隔。</summary>
     public string Languages { get; set; } = "";
 
     public ProjectIndexStatus IndexStatus { get; set; } = ProjectIndexStatus.NotIndexed;

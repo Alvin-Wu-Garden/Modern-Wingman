@@ -97,12 +97,12 @@ modern-wingman/
 │       │   └── Infrastructure/
 │       │       └── AgentFramework/
 │       │           └── .gitkeep
-│       ├── tests/
-│       │   └── UnitTests/
-│       │       └── .gitkeep
 │       ├── appsettings.json
 │       ├── appsettings.Development.json
 │       └── AgentService.csproj
+│
+├── UnitTests/                          # local-only, not versioned
+│   └── AgentService.UnitTests.csproj
 │
 ├── packages/
 │   ├── contracts/                      # Tauri IPC payload types

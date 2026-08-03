@@ -102,7 +102,7 @@ public static class ServiceRegistration
         services.AddSingleton<IProjectRepository, ProjectRepository>();
         services.AddSingleton<IProjectIndexManifestStore, ProjectIndexManifestStore>();
         services.AddSingleton<ILlmCompletionService, CopilotCompletionService>();
-        services.AddGraphRagV3(configuration);
+        services.AddGraphRagV4(configuration);
 
         // ── Speech-to-Text：本機 whisper.cpp（企業內網離線優先）──────────────
         services.Configure<SpeechToTextOptions>(

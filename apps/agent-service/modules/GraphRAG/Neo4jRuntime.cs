@@ -64,6 +64,13 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<Neo4jRuntime> _logger;
     private readonly SemaphoreSlim _startGate = new(1, 1);
+    // Neo4j 的 launcher process 先建立，Bolt listener 才會稍後完成啟動。
+    // 所有 managed graph request 必須共用這個 gate，避免第二個 request 在
+    // 第一個 request 等待 Bolt ready 時，直接把「process 存在」誤判成錯誤。
+    private static readonly TimeSpan ManagedReadinessTimeout =
+        TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan ManagedReadinessPollInterval =
+        TimeSpan.FromSeconds(2);
     private readonly int _agentProcessId = Environment.ProcessId;
     private readonly long _agentProcessStartTimeUtcTicks =
         GetProcessStartTimeUtcTicks(Environment.ProcessId);
@@ -92,11 +99,11 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
     public string? LastError { get; private set; }
 
     /// <summary>
-    /// 確保 V3 store 可用。managed 模式不會把同 port 的 Docker／外部 Neo4j 誤認成 Wingman process。
+    /// 確保 V4 store 可用。managed 模式不會把同 port 的 Docker／外部 Neo4j 誤認成 Wingman process。
     /// </summary>
     /// <param name="progress">可選安裝進度。</param>
     /// <param name="cancellationToken">取消安裝或啟動的 token。</param>
-    /// <returns>可安全讀寫 V3 graph 時為 true。</returns>
+    /// <returns>可安全讀寫 V4 graph 時為 true。</returns>
     public async Task<bool> EnsureAvailableAsync(
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
@@ -132,9 +139,6 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
             LastError = "目前內建 Neo4j managed runtime 只支援 Windows；其他平台請使用 external 模式。";
             return false;
         }
-        if (_process is { HasExited: false })
-            return await VerifyManagedProcessAsync(cancellationToken);
-
         await _startGate.WaitAsync(cancellationToken);
         FileStream? crossProcessLock = null;
         try
@@ -170,7 +174,7 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
                 return false;
             }
             Status = "starting";
-            progress?.Report("正在啟動 Neo4j V3 runtime...");
+            progress?.Report("正在啟動 Neo4j V4 runtime...");
             var started = await StartProcessAsync(home, cancellationToken);
             Status = started ? "running" : "start-failed";
             LastError ??= started ? null : "Wingman 管理的 Neo4j 無法啟動。";
@@ -692,14 +696,54 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
     private async Task<bool> VerifyManagedProcessAsync(
         CancellationToken cancellationToken)
     {
-        if (await _store.PingAsync(cancellationToken))
+        // Process.HasExited == false 只代表 launcher 還活著，不代表 Neo4j
+        // 已完成 Bolt/auth/schema 初始化。這裡必須和首次啟動使用相同的
+        // readiness 等待，否則並發的 graph/schema request 會收到 503。
+        Status = "starting";
+        var deadline = DateTimeOffset.UtcNow + ManagedReadinessTimeout;
+        while (DateTimeOffset.UtcNow < deadline)
         {
-            Status = "running";
-            LastError = null;
-            return true;
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (_process is null || _process.HasExited)
+            {
+                Status = "start-failed";
+                LastError = "Neo4j process 在等待連線時異常退出。";
+                return false;
+            }
+
+            if (await _store.PingAsync(cancellationToken))
+            {
+                // Agent Service 重啟後可能沿用既有 Neo4j process；此時
+                // store 尚未標記 schema ready，因此仍要完成一次 schema 檢查。
+                try
+                {
+                    await _store.EnsureSchemaAsync(cancellationToken);
+                    Status = "running";
+                    LastError = null;
+                    return true;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    // Bolt 已可連線但 schema transaction 仍可能正在初始化；
+                    // 繼續等待，避免把短暫的 Neo4j ready race 變成 HTTP 500。
+                    _logger.LogDebug(
+                        "Neo4j managed schema 尚未 ready；繼續等待。ExceptionType={ExceptionType}",
+                        exception.GetType().Name);
+                }
+            }
+
+            await Task.Delay(ManagedReadinessPollInterval, cancellationToken);
         }
+
         Status = "unreachable";
-        LastError = "Wingman 管理的 Neo4j process 仍存在，但無法在連線逾時內回應。";
+        LastError =
+            "Wingman 管理的 Neo4j process 仍存在，但在 90 秒內仍無法回應；" +
+            "請確認 Neo4j Bolt 服務與認證設定。";
         return false;
     }
 
@@ -786,12 +830,24 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
-        if (_ownsManagedProcess && _process is { HasExited: false })
+        var managedProcess = _process;
+        var managedProcessRunning = false;
+        try
+        {
+            managedProcessRunning = _ownsManagedProcess &&
+                                    managedProcess is not null &&
+                                    !managedProcess.HasExited;
+        }
+        catch (InvalidOperationException)
+        {
+            // 測試或啟動失敗可能留下尚未 Start 的 Process 物件；它沒有可終止程序。
+        }
+        if (managedProcessRunning)
         {
             try
             {
-                _process.Kill(entireProcessTree: true);
-                await _process.WaitForExitAsync();
+                managedProcess!.Kill(entireProcessTree: true);
+                await managedProcess.WaitForExitAsync();
                 // Windows 上 neo4j.bat 會再啟動 Java 子程序。父程序結束時，Java 的
                 // Bolt listener 可能仍需數百毫秒才真正釋放；若此時立即刪除資料庫，
                 // 會造成檔案占用或下一次啟動誤判 port conflict。

@@ -10,10 +10,13 @@ import {
   type ConversationScope,
   type ConversationSummary,
   type MessageItem,
+  type AgentActivityEvent,
 } from '@/services/agent-api/client'
 
 export interface LocalMessage extends MessageItem {
   streaming?: boolean
+  /** 本次串流期間的活動，不會寫入對話歷史。 */
+  activities?: AgentActivityEvent[]
 }
 
 interface FailedRequest {
@@ -149,6 +152,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       content: '',
       createdAt: new Date().toISOString(),
       streaming: true,
+      activities: [],
     }
     set((state) => ({
       messages: [...state.messages, user, assistant],
@@ -191,6 +195,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
             modelId,
             attachments,
           },
+        })),
+        onActivity: (activity) => set((state) => ({
+          messages: state.messages.map((message) => {
+            if (!message.streaming) return message
+            const activities = [...(message.activities ?? [])]
+            const existingIndex = activities.findIndex((item) =>
+              item.activityId === activity.activityId)
+            if (existingIndex < 0) {
+              activities.push(activity)
+            } else {
+              activities[existingIndex] = {
+                ...activities[existingIndex],
+                ...activity,
+              }
+            }
+            return { ...message, activities }
+          }),
         })),
       },
       abortController.signal,

@@ -32,11 +32,7 @@ public sealed class ByokAgentFactory(
         var agent = new ChatClientAgent(chatClient, new ChatClientAgentOptions
         {
             Name = "WingmanAgent",
-            ChatOptions = new ChatOptions
-            {
-                Instructions = context.Instructions + context.SkillsPrompt,
-                Tools = null,
-            },
+            ChatOptions = BuildChatOptions(context),
         });
 
         logger.LogDebug(
@@ -47,6 +43,22 @@ public sealed class ByokAgentFactory(
 
         return agent;
     }
+
+    /// <summary>
+    /// 將共用 Agent context 轉為 BYOK ChatOptions。
+    /// 保留原始 <see cref="AIFunction"/> 實例，讓 ChatClientAgent 能實際呼叫函式，
+    /// 而不是只收到無法執行的工具宣告。
+    /// </summary>
+    /// <param name="context">包含本輪系統指示及受控唯讀工具的建立資訊。</param>
+    /// <returns>只帶入呼叫端明確提供工具的 ChatOptions。</returns>
+    internal static ChatOptions BuildChatOptions(AgentCreationContext context) =>
+        new()
+        {
+            Instructions = context.Instructions + context.SkillsPrompt,
+            Tools = context.Tools.Count == 0
+                ? null
+                : context.Tools.Cast<AITool>().ToList(),
+        };
 
     private IChatClient? BuildOpenAIChatClient(ModelProviderProfile profile, string? modelOverride)
     {

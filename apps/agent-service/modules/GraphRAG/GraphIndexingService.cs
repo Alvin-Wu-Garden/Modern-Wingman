@@ -1,14 +1,11 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using AgentService.Application.Contracts;
 using AgentService.Application.Models;
 using AgentService.Domain.Models;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
+using AgentService.Modules.GraphRAG.FblAuthority;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -16,35 +13,28 @@ using Microsoft.Extensions.Options;
 namespace AgentService.Modules.GraphRAG;
 
 /// <summary>
-/// GraphRAG V3 索引技術設定。
-/// 這些開關不允許選擇 NodeKind／EdgeKind 或改變 schema，因此不是索引 profile。
+/// FBL GraphRAG 索引的技術上限。
+/// 此設定不允許切換語言或 Graph schema；Modern Wingman 的專案解析固定只支援 FBL 投資系統。
 /// </summary>
 public sealed class GraphIndexingOptions
 {
     /// <summary>設定 section 名稱。</summary>
     public const string SectionName = "GraphRAG";
 
-    /// <summary>內容、schema、extractor、DB fingerprint 全相同時啟用 no-op。</summary>
+    /// <summary>來源、資料庫設定與索引版本相同時允許略過重建。</summary>
     public bool EnableNoOpFastPath { get; set; } = true;
 
-    /// <summary>緊急除錯用 full rebuild kill switch。</summary>
+    /// <summary>除錯時強制重新抽取全部 FBL 圖。</summary>
     public bool ForceFullIndex { get; set; }
 
-    /// <summary>檔案 watcher 的 debounce 毫秒數。</summary>
+    /// <summary>檔案異動合併等待時間。</summary>
     public int WatcherDebounceMilliseconds { get; set; } = 800;
 
-    /// <summary>單一專案一次最多索引的原始檔案數，避免錯誤 root 耗盡資源。</summary>
+    /// <summary>單一 FBL working copy 最多掃描的相關檔案數。</summary>
     public int MaximumFiles { get; set; } = 250_000;
 }
 
-/// <summary>前端輪詢用的 V3 索引進度。</summary>
-/// <param name="ProjectId">專案 ID。</param>
-/// <param name="Phase">scan、extract、assemble、publish、complete 或 failed。</param>
-/// <param name="Message">繁體中文進度訊息。</param>
-/// <param name="Percent">0 到 100。</param>
-/// <param name="RunId">本次索引 run ID。</param>
-/// <param name="Mode">full 或 no-op。</param>
-/// <param name="ElapsedMilliseconds">目前經過毫秒。</param>
+/// <summary>右下角與專案頁顯示的一次索引進度。</summary>
 public sealed record GraphIndexProgress(
     string ProjectId,
     string Phase,
@@ -54,20 +44,7 @@ public sealed record GraphIndexProgress(
     string Mode,
     long ElapsedMilliseconds);
 
-/// <summary>一次 V3 index run 的可診斷結果。</summary>
-/// <param name="ProjectId">專案 ID。</param>
-/// <param name="RunId">run ID。</param>
-/// <param name="Mode">full 或 no-op。</param>
-/// <param name="Status">succeeded、partial、failed。</param>
-/// <param name="StartedAt">開始時間。</param>
-/// <param name="CompletedAt">完成時間。</param>
-/// <param name="ElapsedMilliseconds">總耗時。</param>
-/// <param name="NodeCount">active node 數。</param>
-/// <param name="EdgeCount">active edge 數。</param>
-/// <param name="ManifestVersion">成功發布版本。</param>
-/// <param name="CanonicalDigest">V3 canonical digest。</param>
-/// <param name="StageDurationsMilliseconds">各階段耗時。</param>
-/// <param name="Error">已去敏感的失敗說明。</param>
+/// <summary>保存最近一次索引執行的去敏感統計。</summary>
 public sealed record GraphIndexRun(
     string ProjectId,
     string RunId,
@@ -81,66 +58,53 @@ public sealed record GraphIndexRun(
     string? ManifestVersion,
     string? CanonicalDigest,
     IReadOnlyDictionary<string, long> StageDurationsMilliseconds,
-    string? Error = null);
+    string? Error = null,
+    long PeakWorkingSetBytes = 0);
 
 /// <summary>
-/// GraphRAG V3 索引 orchestrator。
-/// 順序固定為 artifact hash → extractor → canonical validation → Neo4j staging/publish → SQLite promote；
-/// 任一步失敗都不會覆寫 ProjectEntity 的上一個成功 manifest 與統計。
+/// FBL GraphRAG 唯一索引協調器。
+/// 流程固定為來源指紋、696 Menu 權威抽取、Preflight、Neo4j 原子發布與背景 Community 摘要；
+/// 不再執行舊的通用語言 Extractor、SQLite Evidence 雙寫或 Reconciliation 輪詢。
 /// </summary>
 public sealed class GraphIndexingService
 {
+    private const string IndexerVersion = "fbl-authority-v1";
+    private const string RequiredDatabaseName = "FBL_SPV_SIT";
+    private const long TransientIndexMemoryCollectionThresholdBytes = 1L * 1024 * 1024 * 1024;
     private static readonly IReadOnlySet<string> SupportedExtensions = new HashSet<string>(
-        [".cs", ".java", ".js", ".jsx", ".ts", ".tsx", ".sql"],
+        [
+            ".cs", ".csproj", ".sln",
+            ".js", ".jsx", ".ts", ".tsx",
+            ".aspx", ".ascx", ".master",
+            ".sql", ".xml", ".config",
+        ],
         StringComparer.OrdinalIgnoreCase);
     private static readonly IReadOnlySet<string> ExcludedDirectories = new HashSet<string>(
-        [".git", ".vs", "bin", "obj", "node_modules", "packages", "target", "dist", "build", "out", "vendor"],
+        [".git", ".svn", ".vs", "bin", "obj", "node_modules", "packages", "dist", "build", "out", "vendor"],
         StringComparer.OrdinalIgnoreCase);
-    private static readonly string IndexerVersion =
-        typeof(GraphIndexingService).Assembly
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-        ?? typeof(GraphIndexingService).Assembly.GetName().Version?.ToString()
-        ?? "development";
 
-    private readonly IReadOnlyList<IGraphExtractor> _extractors;
-    private readonly SqlServerGraphExtractor _sqlExtractor;
-    private readonly ProjectGraphDatabaseExtractor _databaseExtractor;
+    private readonly FblAuthorityGraphBuilder _builder;
     private readonly IGraphStore _graphStore;
+    private readonly GraphCommunityAiService _communityAi;
     private readonly INeo4jRuntime _neo4jRuntime;
     private readonly IProjectRepository _projects;
     private readonly IProjectIndexManifestStore _manifests;
     private readonly IGraphDatabaseSourceProvider _databaseSources;
     private readonly GraphIndexingOptions _options;
     private readonly ILogger<GraphIndexingService> _logger;
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates =
-        new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, GraphIndexProgress> _progress =
-        new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, GraphIndexRun> _runs =
-        new(StringComparer.Ordinal);
-
-    /// <summary>
-    /// 產生目前索引管線的完整版本識別。除了程式組版本，也包含每個 extractor 的
-    /// ID 與版本；因此解析規則升版時，即使原始檔案完全相同也會安全失效 no-op，
-    /// 避免沿用缺少新節點或關係的舊圖譜。
-    /// </summary>
-    private string CurrentIndexerVersion =>
-        $"{IndexerVersion}|{string.Join(
-            ";",
-            _extractors
-                .OrderBy(extractor => extractor.Id, StringComparer.Ordinal)
-                .Select(extractor => $"{extractor.Id}={extractor.Version}"))}";
-    private readonly ConcurrentDictionary<string, GraphSnapshot> _activeSnapshots =
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, GraphIndexProgress> _progress = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, GraphIndexRun> _runs = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, GraphIndexRun>> _runsByMode =
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _pendingFiles =
         new(StringComparer.Ordinal);
 
-    /// <summary>建立 V3 index orchestrator。</summary>
+    /// <summary>建立只依賴 FBL 權威抽取器與單一 Neo4j store 的索引服務。</summary>
     public GraphIndexingService(
-        IEnumerable<IGraphExtractor> extractors,
-        SqlServerGraphExtractor sqlExtractor,
-        ProjectGraphDatabaseExtractor databaseExtractor,
+        FblAuthorityGraphBuilder builder,
         IGraphStore graphStore,
+        GraphCommunityAiService communityAi,
         INeo4jRuntime neo4jRuntime,
         IProjectRepository projects,
         IProjectIndexManifestStore manifests,
@@ -148,13 +112,9 @@ public sealed class GraphIndexingService
         IOptions<GraphIndexingOptions> options,
         ILogger<GraphIndexingService> logger)
     {
-        _extractors = extractors
-            .DistinctBy(extractor => extractor.Id, StringComparer.Ordinal)
-            .OrderBy(extractor => extractor.Id, StringComparer.Ordinal)
-            .ToList();
-        _sqlExtractor = sqlExtractor;
-        _databaseExtractor = databaseExtractor;
+        _builder = builder;
         _graphStore = graphStore;
+        _communityAi = communityAi;
         _neo4jRuntime = neo4jRuntime;
         _projects = projects;
         _manifests = manifests;
@@ -162,60 +122,69 @@ public sealed class GraphIndexingService
         _options = options.Value;
         _logger = logger;
         ValidateOptions(_options);
-        if (_extractors.Count == 0)
-            throw new InvalidOperationException("GraphRAG V3 至少需要一個 extractor。");
     }
 
-    /// <summary>取得目前或最後一筆索引進度。</summary>
+    /// <summary>取得目前或最後索引進度。</summary>
     public GraphIndexProgress? GetProgress(string projectId) =>
         _progress.TryGetValue(projectId, out var value) ? value : null;
 
-    /// <summary>取得最後一次 V3 index run。</summary>
-    public GraphIndexRun? GetLastRun(string projectId) =>
-        _runs.TryGetValue(projectId, out var value) ? value : null;
+    /// <summary>取得最近一次執行；指定 mode 時讀取該模式最近結果。</summary>
+    public GraphIndexRun? GetLastRun(string projectId, string? mode = null)
+    {
+        if (string.IsNullOrWhiteSpace(mode))
+        {
+            return _runs.TryGetValue(projectId, out var value) ? value : null;
+        }
+        return _runsByMode.TryGetValue(projectId, out var modes) &&
+               modes.TryGetValue(mode.Trim(), out var result)
+            ? result
+            : null;
+    }
 
-    /// <summary>取得本 process 最近成功的 canonical snapshot，供 diagnostics 與測試使用。</summary>
-    public GraphSnapshot? GetActiveSnapshotForDiagnostics(string projectId) =>
-        _activeSnapshots.TryGetValue(projectId, out var value) ? value : null;
-
-    /// <summary>刪除 watcher／progress／memory snapshot 狀態；不刪持久化 graph。</summary>
+    /// <summary>清除 process 內的 watcher、進度與背景摘要狀態；不刪除持久化 Graph。</summary>
     public void ForgetProjectState(string projectId)
     {
-        _activeSnapshots.TryRemove(projectId, out _);
         _pendingFiles.TryRemove(projectId, out _);
         _progress.TryRemove(projectId, out _);
         _runs.TryRemove(projectId, out _);
+        _runsByMode.TryRemove(projectId, out _);
+        _communityAi.ForgetProject(projectId);
     }
 
-    /// <summary>Watcher 記錄待處理檔案；不會直接修改 active graph。</summary>
+    /// <summary>由 watcher 或資料庫設定端點標記專案需要重新索引。</summary>
     public async Task MarkPendingChangesAsync(
         string projectId,
         string? fullPath = null,
         CancellationToken cancellationToken = default)
     {
         var project = await _projects.GetAsync(projectId, cancellationToken);
-        if (project is null) return;
+        if (project is null)
+        {
+            return;
+        }
+
         if (!string.IsNullOrWhiteSpace(fullPath) && IsInsideRoot(project.RootPath, fullPath))
         {
-            var relativePath = GraphIdentity.NormalizePath(
-                Path.GetRelativePath(project.RootPath, fullPath));
-            _pendingFiles
-                .GetOrAdd(projectId, _ => new ConcurrentDictionary<string, byte>(
-                    StringComparer.OrdinalIgnoreCase))[relativePath] = 0;
+            var relativePath = NormalizePath(Path.GetRelativePath(project.RootPath, fullPath));
+            _pendingFiles.GetOrAdd(
+                projectId,
+                _ => new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase))[relativePath] = 0;
         }
+
         if (project.IndexStatus != ProjectIndexStatus.Indexing)
+        {
             project.IndexStatus = ProjectIndexStatus.PendingChanges;
+        }
         project.PendingFileCount = PendingFiles(projectId).Count;
         project.IndexError = null;
         await _projects.SaveAsync(project, cancellationToken);
     }
 
-    /// <summary>取得 SQLite manifest、最新 attempt 與 watcher pending files。</summary>
+    /// <summary>取得 manifest 與尚未處理的檔案清單。</summary>
     public async Task<ProjectIndexDiagnostics> GetDiagnosticsAsync(
         string projectId,
         CancellationToken cancellationToken = default)
     {
-        await ReconcileManifestAsync(projectId, cancellationToken);
         var project = await _projects.GetAsync(projectId, cancellationToken);
         var current = await _manifests.GetCurrentAsync(projectId, cancellationToken);
         var latest = await _manifests.GetLatestAttemptAsync(projectId, cancellationToken);
@@ -225,12 +194,12 @@ public sealed class GraphIndexingService
             latest,
             pending,
             pending.Count > 0 ||
-            project?.IndexStatus == ProjectIndexStatus.PendingChanges ||
+            project?.IndexStatus is ProjectIndexStatus.PendingChanges or ProjectIndexStatus.Stale or ProjectIndexStatus.Failed ||
             latest is { Status: IndexManifestStatus.Failed or IndexManifestStatus.Stale });
     }
 
     /// <summary>
-    /// 以 raw byte hash 補捉 watcher 漏失事件。mtime 只作顯示，不作內容相同證據。
+    /// 以內容雜湊補捉 watcher 遺漏的變更；發現差異只標記 pending，不在此方法重建 Graph。
     /// </summary>
     public async Task<bool> CatchUpAsync(
         string projectId,
@@ -238,29 +207,28 @@ public sealed class GraphIndexingService
     {
         var project = await RequiredProjectAsync(projectId, cancellationToken);
         var current = await _manifests.GetCurrentAsync(projectId, cancellationToken);
-        if (current is null) return false;
-        var files = EnumerateSourceFiles(project.RootPath);
-        var live = await HashFilesAsync(
-            project.RootPath, files, current.Files, cancellationToken);
-        var currentByPath = current.Files.ToDictionary(
-            item => item.RelativePath, StringComparer.OrdinalIgnoreCase);
-        var liveByPath = live.ToDictionary(
-            item => item.RelativePath, StringComparer.OrdinalIgnoreCase);
-        var changed = live
-            .Where(item => !currentByPath.TryGetValue(item.RelativePath, out var old) ||
-                           !string.Equals(item.ContentHash, old.ContentHash, StringComparison.Ordinal))
-            .Select(item => item.RelativePath)
-            .Concat(currentByPath.Keys.Except(
-                liveByPath.Keys, StringComparer.OrdinalIgnoreCase))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        foreach (var path in changed)
-            await MarkPendingChangesAsync(
-                projectId, Path.Combine(project.RootPath, path), cancellationToken);
-        return changed.Count > 0;
+        if (current is null)
+        {
+            return false;
+        }
+
+        var files = EnumerateFiles(project.RootPath);
+        var live = await HashFilesAsync(project.RootPath, files, cancellationToken);
+        var currentHashes = current.Files.ToDictionary(
+            file => file.RelativePath,
+            file => file.ContentHash,
+            StringComparer.OrdinalIgnoreCase);
+        var changed = live.Count != currentHashes.Count || live.Any(file =>
+            !currentHashes.TryGetValue(file.RelativePath, out var hash) ||
+            !string.Equals(hash, file.ContentHash, StringComparison.Ordinal));
+        if (changed)
+        {
+            await MarkPendingChangesAsync(projectId, cancellationToken: cancellationToken);
+        }
+        return changed;
     }
 
-    /// <summary>執行 full/no-op 決策與安全發布。</summary>
+    /// <summary>執行完整 FBL 權威索引；成功前不會改變既有 active Graph。</summary>
     public async Task<ProjectEntity> IndexProjectAsync(
         string projectId,
         CancellationToken cancellationToken = default)
@@ -274,871 +242,414 @@ public sealed class GraphIndexingService
         finally
         {
             gate.Release();
+            ReleaseTransientIndexMemory();
         }
     }
 
     /// <summary>
-    /// Watcher 與設定異動共用的增量入口。只有專案未被標記為 PendingChanges，
-    /// 且原始碼內容也完全相同時才回傳 null；資料庫設定異動即使沒有檔案 hash
-    /// 變更，仍必須進入完整 fingerprint 決策，避免誤把 source-only graph 當成最新版本。
+    /// FBL 冷索引會暫時建立大量 Roslyn 語法樹；索引方法結束後這些物件已不再使用，
+    /// 但桌面常駐服務可能很久都不觸發完整壓縮。只有工作集超過 1 GiB 時才主動回收，
+    /// 避免一般問答與 no-op 索引承受不必要的 full GC。
     /// </summary>
-    /// <param name="projectId">需要檢查並視情況重建的專案 ID。</param>
-    /// <param name="cancellationToken">取消檔案掃描、資料庫 fingerprint 或索引工作的權杖。</param>
-    /// <returns>執行索引時回傳最新專案；確定所有輸入皆未改變時回傳 null。</returns>
-    public async Task<ProjectEntity?> IncrementalIndexAsync(
-        string projectId,
-        CancellationToken cancellationToken = default)
+    private void ReleaseTransientIndexMemory()
     {
-        var project = await RequiredProjectAsync(projectId, cancellationToken);
-        var current = await _manifests.GetCurrentAsync(projectId, cancellationToken);
-        // PendingChanges 與 Stale 都是持久化失效訊號，可能來自資料庫設定或先前
-        // 連線失敗，而非檔案 watcher。CatchUpAsync 只比對 source hash，不能據此清除。
-        var requiresFingerprintRefresh =
-            project.IndexStatus is
-                ProjectIndexStatus.PendingChanges or
-                ProjectIndexStatus.Stale;
-        var sourceChanged = current is not null &&
-                            await CatchUpAsync(projectId, cancellationToken);
-        if (current is not null &&
-            !requiresFingerprintRefresh &&
-            !sourceChanged)
-        {
-            _pendingFiles.TryRemove(projectId, out _);
-            project.PendingFileCount = 0;
-            project.IndexStatus = current.Status == IndexManifestStatus.Partial
-                ? ProjectIndexStatus.Partial
-                : ProjectIndexStatus.Indexed;
-            await _projects.SaveAsync(project, cancellationToken);
-            return null;
-        }
-        return await IndexProjectAsync(projectId, cancellationToken);
-    }
-
-    private async Task<ProjectEntity> IndexCoreAsync(
-        string projectId,
-        CancellationToken cancellationToken)
-    {
-        var project = await RequiredProjectAsync(projectId, cancellationToken);
-        var runId = Guid.NewGuid().ToString("N");
-        var startedAt = DateTimeOffset.UtcNow;
-        var stopwatch = Stopwatch.StartNew();
-        var stages = new Dictionary<string, long>(StringComparer.Ordinal);
-        var mode = "full";
-        ProjectIndexManifest? attempt = null;
-        var previousState = CaptureProjectState(project);
-        try
-        {
-            if (!await _neo4jRuntime.EnsureAvailableAsync(
-                    null, cancellationToken))
-                throw new InvalidOperationException(
-                    _neo4jRuntime.LastError ??
-                    "Neo4j V3 runtime 不可用，已保留上一個成功圖譜。");
-            await ReconcileManifestAsync(projectId, cancellationToken);
-            project.IndexStatus = ProjectIndexStatus.Indexing;
-            project.IndexError = null;
-            await _projects.SaveAsync(project, cancellationToken);
-            Progress(projectId, runId, mode, "scan", "正在計算原始檔案與資料庫指紋。", 5, stopwatch);
-
-            var stage = Stopwatch.StartNew();
-            var files = EnumerateSourceFiles(project.RootPath);
-            var current = await _manifests.GetCurrentAsync(
-                projectId, cancellationToken);
-            var fileManifests = await HashFilesAsync(
-                project.RootPath, files, current?.Files, cancellationToken);
-            var databaseSource = await _databaseSources.GetAsync(
-                project, cancellationToken);
-            string? databaseFingerprint;
-            if (databaseSource is null)
-            {
-                databaseFingerprint = "none";
-            }
-            else
-            {
-                // 明確的唯讀連線前置檢查可把帳密、網路或資料庫不存在等問題
-                // 在抽取前回報，避免使用者誤以為 source-only graph 已完整成功。
-                await _databaseExtractor.TestConnectionAsync(
-                    databaseSource, cancellationToken);
-                var metadataFingerprint =
-                    await _databaseExtractor.ComputeFingerprintAsync(
-                        databaseSource, cancellationToken);
-                databaseFingerprint = CombineDatabaseFingerprint(
-                    databaseSource.ConfigurationFingerprint,
-                    metadataFingerprint);
-            }
-            var workingFingerprint = WorkingFingerprint(
-                fileManifests, databaseFingerprint);
-            stages["scan"] = stage.ElapsedMilliseconds;
-
-            var neo4jManifest = await _graphStore.GetActiveManifestAsync(
-                projectId, cancellationToken);
-            if (CanNoOp(
-                    current, neo4jManifest, workingFingerprint, databaseSource,
-                    databaseFingerprint))
-            {
-                mode = "no-op";
-                _pendingFiles.TryRemove(projectId, out _);
-                project.PendingFileCount = 0;
-                project.IndexStatus = current!.Status == IndexManifestStatus.Partial
-                    ? ProjectIndexStatus.Partial
-                    : ProjectIndexStatus.Indexed;
-                project.IndexError = current.Error;
-                await _projects.SaveAsync(project, cancellationToken);
-                stopwatch.Stop();
-                Progress(projectId, runId, mode, "complete", "內容完全相同，已安全略過重建。", 100, stopwatch);
-                var noOpRun = new GraphIndexRun(
-                    projectId, runId, mode, "succeeded", startedAt, DateTimeOffset.UtcNow,
-                    stopwatch.ElapsedMilliseconds, project.NodeCount, project.EdgeCount,
-                    project.IndexManifestVersion, current.AnalysisSnapshotHash,
-                    stages);
-                _runs[projectId] = noOpRun;
-                return project;
-            }
-
-            var activeSnapshot = _activeSnapshots.TryGetValue(projectId, out var memorySnapshot)
-                ? memorySnapshot
-                : null;
-            var bodyDeltaPlan = TryPlanBodyDelta(
-                current,
-                neo4jManifest,
-                fileManifests,
-                databaseSource,
-                databaseFingerprint,
-                activeSnapshot);
-            var csharpDeltaExtractor = _extractors.FirstOrDefault(extractor =>
-                string.Equals(extractor.Id, "csharp-roslyn-v3", StringComparison.Ordinal));
-            // Body-delta 重建依賴正式 C# extractor。測試替身或自訂 extractor
-            // 不具備相同語意時必須安全退回完整抽取，不能假設特定 ID 一定存在。
-            var bodyDelta = bodyDeltaPlan is not null && csharpDeltaExtractor is not null;
-            mode = bodyDelta ? "body-delta" : "full";
-            var manifestVersion = Guid.NewGuid().ToString("N");
-            attempt = new ProjectIndexManifest(
-                projectId,
-                manifestVersion,
-                project.RootPath,
-                HeadCommit(project.RootPath),
-                workingFingerprint,
-                [],
-                fileManifests,
-                PendingFiles(projectId),
-                CurrentIndexerVersion,
-                startedAt,
-                null,
-                IndexManifestStatus.Indexing,
-                GraphSchemaVersion: GraphAssembler.SchemaVersion,
-                IndexMode: mode);
-            await _manifests.SaveAttemptAsync(attempt, cancellationToken);
-
-            stage.Restart();
-            Progress(
-                projectId,
-                runId,
-                mode,
-                "extract",
-                bodyDelta
-                    ? "已確認只有 C# method body 變更，正在重算完整 C# type graph。"
-                    : "正在抽取 C#、Java、前端、SQL 與動態業務關係。",
-                25,
-                stopwatch);
-            List<GraphFragment> fragments;
-            if (bodyDelta)
-            {
-                fragments =
-                [
-                    CreateNonCSharpBaseFragment(
-                        activeSnapshot!,
-                        bodyDeltaPlan!.ChangedPaths),
-                    await csharpDeltaExtractor!.ExtractAsync(
-                        project.RootPath, files, cancellationToken),
-                ];
-                if (_extractors.Any(extractor => string.Equals(
-                        extractor.Id, _sqlExtractor.Id, StringComparison.Ordinal)))
-                {
-                    var changedFiles = bodyDeltaPlan.ChangedPaths
-                        .Select(path => Path.GetFullPath(
-                            Path.Combine(project.RootPath, path)))
-                        .ToList();
-                    fragments.Add(await _sqlExtractor.ExtractAsync(
-                        project.RootPath, changedFiles, cancellationToken));
-                }
-            }
-            else
-            {
-                var extractionTasks = _extractors.Select(async extractor =>
-                {
-                    var extractorClock = Stopwatch.StartNew();
-                    var fragment = await extractor.ExtractAsync(
-                        project.RootPath, files, cancellationToken);
-                    extractorClock.Stop();
-                    return (extractor.Id, Fragment: fragment, extractorClock.ElapsedMilliseconds);
-                });
-                var extractionResults = await Task.WhenAll(extractionTasks);
-                fragments = extractionResults.Select(result => result.Fragment).ToList();
-                foreach (var result in extractionResults)
-                    stages[$"extract:{result.Id}"] = result.ElapsedMilliseconds;
-            }
-            if (!bodyDelta && databaseSource is not null)
-            {
-                var databaseClock = Stopwatch.StartNew();
-                fragments.Add(await _databaseExtractor.ExtractAsync(
-                    databaseSource, cancellationToken));
-                databaseClock.Stop();
-                stages["extract:sqlserver-live-database-v3"] =
-                    databaseClock.ElapsedMilliseconds;
-            }
-            AddConfiguredDatabaseHealthDiagnostic(fragments, databaseSource);
-            stages["extract"] = stage.ElapsedMilliseconds;
-
-            stage.Restart();
-            Progress(projectId, runId, mode, "assemble", "正在合併證據並執行 V3 品質閘門。", 60, stopwatch);
-            var artifacts = fileManifests.Select(item => new GraphArtifact(
-                    $"file:{item.RelativePath}",
-                    item.RelativePath,
-                    item.Language,
-                    item.Length,
-                    item.ContentHash,
-                    item.Status.ToLowerInvariant(),
-                    item.Reason))
-                .ToList();
-            if (databaseSource is not null)
-                artifacts.Add(new GraphArtifact(
-                    $"db:{GraphIdentity.NormalizeRequiredToken(databaseSource.DatabaseName, "databaseName")}",
-                    $"db:{GraphIdentity.NormalizeRequiredToken(databaseSource.DatabaseName, "databaseName")}",
-                    "database",
-                    0,
-                    databaseFingerprint ?? "unavailable",
-                    databaseFingerprint is null ? "failed" : "indexed",
-                    databaseFingerprint is null ? "資料庫 fingerprint 暫時不可用" : null));
-            var descriptor = new GraphIndexerDescriptor(
-                CurrentIndexerVersion,
-                _extractors.ToDictionary(
-                    extractor => extractor.Id,
-                    extractor => extractor.Version,
-                    StringComparer.Ordinal));
-            var snapshot = GraphAssembler.Assemble(
-                projectId,
-                manifestVersion,
-                DateTimeOffset.UtcNow,
-                descriptor,
-                workingFingerprint,
-                mode,
-                artifacts,
-                fragments);
-            stages["assemble"] = stage.ElapsedMilliseconds;
-
-            var partial = snapshot.CapabilityGaps.Count > 0 ||
-                          snapshot.Diagnostics.Any(item =>
-                              item.Severity == GraphDiagnosticSeverity.Warning);
-            var databaseHealthWarning = snapshot.Diagnostics
-                .FirstOrDefault(item => string.Equals(
-                    item.Code,
-                    "DATABASE_FEATURES_MISSING",
-                    StringComparison.Ordinal))
-                ?.Message;
-            var ready = attempt with
-            {
-                CompletedAt = DateTimeOffset.UtcNow,
-                Status = partial ? IndexManifestStatus.Partial : IndexManifestStatus.Fresh,
-                NodeCount = snapshot.Nodes.Count,
-                EdgeCount = snapshot.Edges.Count,
-                GraphSchemaVersion = snapshot.SchemaVersion,
-                AnalysisSnapshotHash = snapshot.CanonicalDigest,
-                IndexMode = mode,
-                RequiresRetry = partial,
-                Error = databaseHealthWarning,
-            };
-            await _manifests.SaveAttemptAsync(ready, cancellationToken);
-
-            stage.Restart();
-            Progress(projectId, runId, mode, "publish", "正在 staging、驗證並原子切換 Neo4j active graph。", 80, stopwatch);
-            // 在切換 active manifest 前讀取上一版 AI community cache；新報告只有在
-            // member evidence＋prompt version 的 CacheKey 完全相同時才可沿用摘要。
-            var cachedCommunityReports = await _graphStore.ListCommunityReportsAsync(
-                projectId,
-                cancellationToken);
-            await _graphStore.PublishAsync(snapshot, cancellationToken);
-            await _manifests.PromoteAsync(ready, cancellationToken);
-            var primaryReports =
-                GraphCommunityBuilder.BuildPrimaryReportsValidated(snapshot);
-            var leidenGroups = await _graphStore.TryDetectLeidenCommunitiesAsync(
-                projectId,
-                cancellationToken);
-            var secondaryReports = leidenGroups is null
-                ? GraphCommunityBuilder.BuildSecondaryReportsValidated(snapshot)
-                : GraphCommunityBuilder.BuildSecondaryReportsFromGroupsValidated(
-                    snapshot,
-                    leidenGroups,
-                    "leiden");
-            var reports = primaryReports
-                .Concat(secondaryReports)
-                .OrderBy(report => report.Kind, StringComparer.Ordinal)
-                .ThenBy(report => report.CommunityId, StringComparer.Ordinal)
-                .ToList();
-            var cachedByKey = cachedCommunityReports
-                .Where(report =>
-                    report.AiEnriched &&
-                    !string.IsNullOrWhiteSpace(report.CacheKey))
-                .GroupBy(report => report.CacheKey!, StringComparer.Ordinal)
-                .ToDictionary(
-                    group => group.Key,
-                    group => group
-                        .OrderBy(report => report.CommunityId, StringComparer.Ordinal)
-                        .First(),
-                    StringComparer.Ordinal);
-            reports = reports.Select(report =>
-                cachedByKey.TryGetValue(report.CacheKey ?? string.Empty, out var cached)
-                    ? report with
-                    {
-                        Summary = cached.Summary,
-                        AiEnriched = true,
-                    }
-                    : report)
-                .ToList();
-            await _graphStore.SaveCommunityReportsAsync(
-                projectId, manifestVersion, reports, cancellationToken);
-            stages["publish"] = stage.ElapsedMilliseconds;
-
-            _activeSnapshots[projectId] = snapshot;
-            _pendingFiles.TryRemove(projectId, out _);
-            project.IndexManifestVersion = manifestVersion;
-            project.IndexedAt = DateTimeOffset.UtcNow;
-            project.NodeCount = snapshot.Nodes.Count;
-            project.EdgeCount = snapshot.Edges.Count;
-            project.PendingFileCount = 0;
-            project.IndexError = databaseHealthWarning;
-            project.IndexStatus = partial
-                ? ProjectIndexStatus.Partial
-                : ProjectIndexStatus.Indexed;
-            project.Languages = DetectLanguages(fileManifests);
-            await _projects.SaveAsync(project, cancellationToken);
-
-            stopwatch.Stop();
-            Progress(
-                projectId, runId, mode, "complete",
-                partial ? "V3 圖譜已發布，但部分外部能力降級。" : "V3 圖譜已完成並原子發布。",
-                100, stopwatch);
-            _runs[projectId] = new GraphIndexRun(
-                projectId, runId, mode, partial ? "partial" : "succeeded",
-                startedAt, DateTimeOffset.UtcNow, stopwatch.ElapsedMilliseconds,
-                snapshot.Nodes.Count, snapshot.Edges.Count, manifestVersion,
-                snapshot.CanonicalDigest, stages);
-            return project;
-        }
-        catch (OperationCanceledException)
-        {
-            await RecordFailureAsync(
-                project, previousState, attempt, "索引已取消，上一個成功圖譜保持不變。",
-                cancellationToken: CancellationToken.None);
-            throw;
-        }
-        catch (Exception exception)
-        {
-            var safeError = SafeError(exception);
-            var requiresReconciliation = await RecordFailureAsync(
-                project, previousState, attempt, safeError,
-                cancellationToken: CancellationToken.None);
-            stopwatch.Stop();
-            Progress(projectId, runId, mode, "failed", safeError, 100, stopwatch);
-            _runs[projectId] = new GraphIndexRun(
-                projectId, runId, mode, "failed", startedAt, DateTimeOffset.UtcNow,
-                stopwatch.ElapsedMilliseconds, previousState.NodeCount,
-                previousState.EdgeCount, previousState.ManifestVersion, null,
-                stages, safeError);
-            _logger.LogError(
-                requiresReconciliation
-                    ? "GraphRAG V3 Neo4j 已發布，但 SQLite promote 失敗；等待自動對帳。Project={ProjectId}, ExceptionType={ExceptionType}"
-                    : "GraphRAG V3 索引失敗；已保留上一個 active graph。Project={ProjectId}, ExceptionType={ExceptionType}",
-                projectId,
-                exception.GetType().Name);
-            throw;
-        }
-    }
-
-    private async Task<bool> RecordFailureAsync(
-        ProjectEntity project,
-        ProjectState previous,
-        ProjectIndexManifest? attempt,
-        string error,
-        CancellationToken cancellationToken)
-    {
-        var publishedAttemptRequiresReconciliation = false;
-        if (attempt is not null)
-        {
-            try
-            {
-                // Neo4j promote 與 SQLite promote 無法共用跨資料庫 transaction。
-                // 若 Neo4j 已原子切換成功，保留先前寫入的 Fresh/Partial attempt，
-                // 讓下次 diagnostics 依 active anchor 冪等修復 SQLite；不可把它覆寫成
-                // Failed，否則 reconcile 永遠找不到可 promote 的 manifest。
-                var active = await _graphStore.GetActiveManifestAsync(
-                    project.Id, CancellationToken.None);
-                publishedAttemptRequiresReconciliation = string.Equals(
-                    active, attempt.Version, StringComparison.Ordinal);
-            }
-            catch (Exception exception)
-            {
-                _logger.LogWarning(
-                    "GraphRAG V3 失敗處理無法確認 Neo4j active manifest；採保守 failed 狀態。Project={ProjectId}, ExceptionType={ExceptionType}",
-                    project.Id,
-                    exception.GetType().Name);
-            }
-
-            if (!publishedAttemptRequiresReconciliation)
-            {
-                await _manifests.SaveAttemptAsync(attempt with
-                {
-                    CompletedAt = DateTimeOffset.UtcNow,
-                    Status = IndexManifestStatus.Failed,
-                    Error = error,
-                    RequiresRetry = true,
-                }, cancellationToken);
-            }
-        }
-        project.IndexStatus = previous.ManifestVersion is null
-            ? ProjectIndexStatus.Failed
-            : ProjectIndexStatus.Stale;
-        project.IndexError = error;
-        project.IndexManifestVersion = previous.ManifestVersion;
-        project.NodeCount = previous.NodeCount;
-        project.EdgeCount = previous.EdgeCount;
-        project.IndexedAt = previous.IndexedAt;
-        project.IndexError = publishedAttemptRequiresReconciliation
-            ? "Neo4j 已完成原子發布；SQLite manifest 將於下次診斷自動對帳。"
-            : error;
-        await _projects.SaveAsync(project, cancellationToken);
-        return publishedAttemptRequiresReconciliation;
-    }
-
-    private async Task ReconcileManifestAsync(
-        string projectId,
-        CancellationToken cancellationToken)
-    {
-        var active = await _graphStore.GetActiveManifestAsync(
-            projectId, cancellationToken);
-        if (active is null) return;
-        var current = await _manifests.GetCurrentAsync(projectId, cancellationToken);
-        if (string.Equals(current?.Version, active, StringComparison.Ordinal)) return;
-        var neo4jVersion = await _manifests.GetByVersionAsync(
-            projectId, active, cancellationToken);
-        if (neo4jVersion is { Status: IndexManifestStatus.Fresh or IndexManifestStatus.Partial })
-        {
-            await _manifests.PromoteAsync(neo4jVersion, cancellationToken);
-            var project = await _projects.GetAsync(projectId, cancellationToken);
-            if (project is null) return;
-            project.IndexManifestVersion = neo4jVersion.Version;
-            project.IndexedAt = neo4jVersion.CompletedAt;
-            project.NodeCount = neo4jVersion.NodeCount;
-            project.EdgeCount = neo4jVersion.EdgeCount;
-            project.IndexError = neo4jVersion.Error;
-            project.IndexStatus = neo4jVersion.Status == IndexManifestStatus.Partial
-                ? ProjectIndexStatus.Partial
-                : ProjectIndexStatus.Indexed;
-            await _projects.SaveAsync(project, cancellationToken);
-        }
-    }
-
-    private bool CanNoOp(
-        ProjectIndexManifest? current,
-        string? neo4jManifest,
-        string workingFingerprint,
-        GraphDatabaseSource? databaseSource,
-        string? databaseFingerprint) =>
-        _options.EnableNoOpFastPath &&
-        !_options.ForceFullIndex &&
-        current is { Status: IndexManifestStatus.Fresh or IndexManifestStatus.Partial } &&
-        string.Equals(current.Version, neo4jManifest, StringComparison.Ordinal) &&
-        string.Equals(current.WorkingTreeFingerprint, workingFingerprint, StringComparison.Ordinal) &&
-        string.Equals(
-            current.IndexerVersion,
-            CurrentIndexerVersion,
-            StringComparison.Ordinal) &&
-        string.Equals(current.GraphSchemaVersion, GraphAssembler.SchemaVersion, StringComparison.Ordinal) &&
-        (databaseSource is null || databaseFingerprint is not null);
-
-    /// <summary>
-    /// 僅在既有 C# 檔案的 raw bytes 改變、宣告 surface 完全相同且上一張 canonical snapshot
-    /// 仍在本 process 中時允許 body-delta。新增、刪除、rename、route／attribute／signature、
-    /// 非 C#、DB fingerprint、extractor 或 schema 任一改變都保守退回 full。
-    /// </summary>
-    private BodyDeltaPlan? TryPlanBodyDelta(
-        ProjectIndexManifest? current,
-        string? neo4jManifest,
-        IReadOnlyList<IndexedFileManifest> liveFiles,
-        GraphDatabaseSource? databaseSource,
-        string? databaseFingerprint,
-        GraphSnapshot? activeSnapshot)
-    {
-        if (_options.ForceFullIndex ||
-            current is not { Status: IndexManifestStatus.Fresh or IndexManifestStatus.Partial } ||
-            activeSnapshot is null ||
-            !string.Equals(current.Version, neo4jManifest, StringComparison.Ordinal) ||
-            !string.Equals(activeSnapshot.ManifestVersion, current.Version, StringComparison.Ordinal) ||
-            !string.Equals(
-                current.IndexerVersion,
-                CurrentIndexerVersion,
-                StringComparison.Ordinal) ||
-            !string.Equals(current.GraphSchemaVersion, GraphAssembler.SchemaVersion, StringComparison.Ordinal) ||
-            !DescriptorMatchesCurrentExtractors(activeSnapshot.Indexer) ||
-            !DatabaseFingerprintMatches(
-                activeSnapshot, databaseSource, databaseFingerprint))
-            return null;
-
-        var oldByPath = current.Files.ToDictionary(
-            file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
-        var liveByPath = liveFiles.ToDictionary(
-            file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
-        if (oldByPath.Count != liveByPath.Count ||
-            oldByPath.Keys.Except(liveByPath.Keys, StringComparer.OrdinalIgnoreCase).Any())
-            return null;
-
-        var changed = liveFiles.Where(file =>
-                !string.Equals(
-                    oldByPath[file.RelativePath].ContentHash,
-                    file.ContentHash,
-                    StringComparison.Ordinal))
-            .ToList();
-        if (changed.Count == 0 ||
-            changed.Any(file =>
-            {
-                var old = oldByPath[file.RelativePath];
-                return !string.Equals(file.Language, "csharp", StringComparison.Ordinal) ||
-                       string.IsNullOrWhiteSpace(file.DeclarationHash) ||
-                       !string.Equals(
-                           file.DeclarationHash,
-                           old.DeclarationHash,
-                           StringComparison.Ordinal);
-            }))
-            return null;
-        return new BodyDeltaPlan(
-            changed.Select(file => file.RelativePath)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase));
-    }
-
-    private bool DescriptorMatchesCurrentExtractors(GraphIndexerDescriptor descriptor) =>
-        string.Equals(
-            descriptor.IndexerVersion,
-            CurrentIndexerVersion,
-            StringComparison.Ordinal) &&
-        descriptor.Extractors.Count == _extractors.Count &&
-        _extractors.All(extractor =>
-            descriptor.Extractors.TryGetValue(extractor.Id, out var version) &&
-            string.Equals(version, extractor.Version, StringComparison.Ordinal));
-
-    private static bool DatabaseFingerprintMatches(
-        GraphSnapshot snapshot,
-        GraphDatabaseSource? databaseSource,
-        string? databaseFingerprint)
-    {
-        var databaseArtifacts = snapshot.Artifacts
-            .Where(artifact => string.Equals(
-                artifact.Kind, "database", StringComparison.Ordinal))
-            .ToList();
-        if (databaseSource is null)
-            return databaseArtifacts.Count == 0;
-        return databaseFingerprint is not null &&
-               databaseArtifacts.Count == 1 &&
-               string.Equals(
-                   databaseArtifacts[0].ContentHash,
-                   databaseFingerprint,
-                   StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// 將上一張 snapshot 轉回不含 C# compiler 觀察的 base fragment。
-    /// DB 產生的 unresolved plugin Code 會保留；只有 artifact 為 .cs 的 Compiler／AST／Framework
-    /// evidence 被移除，再與本次完整 C# fragment 合併，因此 body-delta 與 clean full 具有相同 domain graph。
-    /// </summary>
-    private static GraphFragment CreateNonCSharpBaseFragment(
-        GraphSnapshot snapshot,
-        IReadOnlySet<string> changedPaths)
-    {
-        var fragment = new GraphFragment();
-        foreach (var node in snapshot.Nodes)
-        {
-            var evidence = node.Evidence.Where(item =>
-                    !IsCSharpExtractorEvidence(item) &&
-                    !changedPaths.Contains(
-                        GraphIdentity.NormalizePath(item.Artifact)))
-                .ToList();
-            if (evidence.Count > 0)
-                fragment.Nodes.Add(node with { Evidence = evidence });
-        }
-        foreach (var edge in snapshot.Edges)
-        {
-            var evidence = edge.Evidence.Where(item =>
-                    !IsCSharpExtractorEvidence(item) &&
-                    !changedPaths.Contains(
-                        GraphIdentity.NormalizePath(item.Artifact)))
-                .ToList();
-            if (evidence.Count > 0)
-                fragment.Edges.Add(edge with { Evidence = evidence });
-        }
-        fragment.Diagnostics.AddRange(snapshot.Diagnostics.Where(diagnostic =>
-            !(diagnostic.Code.StartsWith("CSHARP_", StringComparison.Ordinal) ||
-              changedPaths.Contains(
-                  GraphIdentity.NormalizePath(diagnostic.Artifact)))));
-        fragment.CapabilityGaps.AddRange(snapshot.CapabilityGaps);
-        return fragment;
-    }
-
-    private static bool IsCSharpExtractorEvidence(GraphEvidence evidence) =>
-        evidence.Artifact.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) &&
-        (evidence.Source == GraphEvidenceSource.Compiler ||
-         evidence.Source == GraphEvidenceSource.Framework &&
-         evidence.Reason.Contains("Controller", StringComparison.Ordinal));
-
-    private static async Task<IReadOnlyList<IndexedFileManifest>> HashFilesAsync(
-        string root,
-        IReadOnlyList<string> files,
-        IReadOnlyList<IndexedFileManifest>? previousFiles,
-        CancellationToken cancellationToken)
-    {
-        var results = new ConcurrentBag<IndexedFileManifest>();
-        var boundedCSharpDeclarations = files.Count(file =>
-            string.Equals(
-                Path.GetExtension(file), ".cs", StringComparison.OrdinalIgnoreCase)) > 2_000;
-        var previousByPath = previousFiles?.ToDictionary(
-            file => file.RelativePath,
-            StringComparer.OrdinalIgnoreCase) ??
-            new Dictionary<string, IndexedFileManifest>(
-                StringComparer.OrdinalIgnoreCase);
-        await Parallel.ForEachAsync(
-            files,
-            new ParallelOptions
-            {
-                CancellationToken = cancellationToken,
-                MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 2, 8),
-            },
-            async (file, token) =>
-            {
-                await using var stream = new FileStream(
-                    file,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete,
-                    128 * 1024,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-                var hash = Convert.ToHexString(
-                        await SHA256.HashDataAsync(stream, token))
-                    .ToLowerInvariant();
-                var info = new FileInfo(file);
-                var relativePath = GraphIdentity.NormalizePath(
-                    Path.GetRelativePath(root, file));
-                previousByPath.TryGetValue(relativePath, out var previous);
-                var isCSharp = string.Equals(
-                    Path.GetExtension(file), ".cs", StringComparison.OrdinalIgnoreCase);
-                var declarationHash =
-                    isCSharp &&
-                    (!boundedCSharpDeclarations ||
-                     CSharpGraphExtractor.IsLargeRepositoryCallPathFile(root, file))
-                        ? previous is not null &&
-                          string.Equals(
-                              previous.ContentHash, hash, StringComparison.Ordinal) &&
-                          !string.IsNullOrWhiteSpace(previous.DeclarationHash)
-                            ? previous.DeclarationHash
-                            : await ComputeCSharpDeclarationHashAsync(file, token)
-                        : null;
-                results.Add(new IndexedFileManifest(
-                    relativePath,
-                    LanguageForExtension(Path.GetExtension(file)),
-                    info.Length,
-                    hash,
-                    LastWriteAt: info.LastWriteTimeUtc,
-                    DeclarationHash: declarationHash));
-            });
-        return results.OrderBy(item => item.RelativePath, StringComparer.Ordinal).ToList();
-    }
-
-    /// <summary>
-    /// 將 C# method／constructor／accessor body 移除後再正規化雜訊並雜湊。
-    /// attribute、route、modifier、base type、interface、parameter、return type 與 member 宣告仍保留；
-    /// 因此只有不改變圖譜 identity／entry surface 的實作內容才可能通過 body-delta。
-    /// </summary>
-    private static async Task<string> ComputeCSharpDeclarationHashAsync(
-        string file,
-        CancellationToken cancellationToken)
-    {
-        var source = await File.ReadAllTextAsync(file, cancellationToken);
-        var tree = CSharpSyntaxTree.ParseText(
-            source,
-            CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Preview),
-            cancellationToken: cancellationToken);
-        var root = await tree.GetRootAsync(cancellationToken);
-        var declarationOnly = new CSharpDeclarationSurfaceRewriter()
-            .Visit(root)!;
-        // NormalizeWhitespace 會重新建構整份近萬檔 trunk 的文字，成本高且 hash
-        // 實際只需要語法 token。RawKind＋ValueText 保留 identifier、attribute、
-        // signature 與 literal 的語意，同時自然忽略註解/空白；method body 已由
-        // rewriter 移除，因此單純 implementation change 仍得到相同 declaration hash。
-        var declarationTokens = new StringBuilder();
-        foreach (var token in declarationOnly.DescendantTokens())
-            declarationTokens.Append(token.RawKind)
-                .Append(':')
-                .Append(token.ValueText.Length)
-                .Append(':')
-                .Append(token.ValueText)
-                .Append('\0');
-        return GraphIdentity.Sha256(declarationTokens.ToString());
-    }
-
-    private IReadOnlyList<string> EnumerateSourceFiles(string root)
-    {
-        var normalizedRoot = Path.GetFullPath(root);
-        if (!Directory.Exists(normalizedRoot))
-            throw new DirectoryNotFoundException($"專案根目錄不存在：{normalizedRoot}");
-        var result = new List<string>();
-        var pending = new Stack<string>();
-        pending.Push(normalizedRoot);
-        while (pending.Count > 0)
-        {
-            var directory = pending.Pop();
-            IEnumerable<string> childDirectories;
-            IEnumerable<string> childFiles;
-            try
-            {
-                childDirectories = Directory.EnumerateDirectories(directory);
-                childFiles = Directory.EnumerateFiles(directory);
-            }
-            catch (UnauthorizedAccessException)
-            {
-                continue;
-            }
-            catch (IOException)
-            {
-                continue;
-            }
-            foreach (var child in childDirectories)
-            {
-                var info = new DirectoryInfo(child);
-                if (ExcludedDirectories.Contains(info.Name) ||
-                    info.Attributes.HasFlag(FileAttributes.ReparsePoint))
-                    continue;
-                pending.Push(child);
-            }
-            foreach (var file in childFiles)
-            {
-                if (!SupportedExtensions.Contains(Path.GetExtension(file)) ||
-                    IsTestArtifact(normalizedRoot, file))
-                    continue;
-                result.Add(file);
-                if (result.Count > _options.MaximumFiles)
-                    throw new InvalidOperationException(
-                        $"專案可索引檔案超過安全上限 {_options.MaximumFiles}；請確認 RootPath 是否正確。");
-            }
-        }
-        return result.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToList();
-    }
-
-    private static bool IsTestArtifact(string root, string path)
-    {
-        var relative = Path.GetRelativePath(root, path).Replace('\\', '/');
-        var segments = relative.Split('/');
-        var fileName = Path.GetFileName(relative);
-        return segments.Any(segment =>
-                   segment.Equals("test", StringComparison.OrdinalIgnoreCase) ||
-                   segment.Equals("tests", StringComparison.OrdinalIgnoreCase) ||
-                   segment.Equals("__tests__", StringComparison.OrdinalIgnoreCase)) ||
-               fileName.EndsWith("Tests.cs", StringComparison.OrdinalIgnoreCase) ||
-               fileName.EndsWith("Test.cs", StringComparison.OrdinalIgnoreCase) ||
-               fileName.EndsWith(".spec.js", StringComparison.OrdinalIgnoreCase) ||
-               fileName.EndsWith(".spec.ts", StringComparison.OrdinalIgnoreCase) ||
-               fileName.EndsWith(".test.js", StringComparison.OrdinalIgnoreCase) ||
-               fileName.EndsWith(".test.ts", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string WorkingFingerprint(
-        IReadOnlyList<IndexedFileManifest> files,
-        string? databaseFingerprint)
-    {
-        var builder = new StringBuilder();
-        foreach (var file in files.OrderBy(item => item.RelativePath, StringComparer.Ordinal))
-            builder.Append(file.RelativePath).Append('\0')
-                .Append(file.Length).Append('\0')
-                .Append(file.ContentHash).Append('\n');
-        builder.Append("db\0").Append(databaseFingerprint ?? "unavailable");
-        return GraphIdentity.Sha256(builder.ToString());
-    }
-
-    /// <summary>
-    /// 將非機密設定指紋與資料庫 metadata 指紋合併成索引指紋。
-    /// 任一部分缺失即回傳 null 並禁止 no-op；原始設定材料與連線字串不會進入
-    /// Manifest、Graph artifact 或 log。
-    /// </summary>
-    /// <param name="configurationFingerprint">資料庫來源提供的非機密設定版本雜湊。</param>
-    /// <param name="metadataFingerprint">唯讀查詢資料庫系統目錄得到的 schema 雜湊。</param>
-    /// <returns>可安全持久化的組合 SHA-256；資料不足時為 null。</returns>
-    private static string? CombineDatabaseFingerprint(
-        string configurationFingerprint,
-        string? metadataFingerprint) =>
-        string.IsNullOrWhiteSpace(configurationFingerprint) ||
-        string.IsNullOrWhiteSpace(metadataFingerprint)
-            ? null
-            : GraphIdentity.Sha256(
-                $"configuration\0{configurationFingerprint}\nmetadata\0{metadataFingerprint}");
-
-    /// <summary>
-    /// 資料庫已設定且抽取成功，卻沒有任何 Feature 時加入可行動的降級診斷。
-    /// 此結果是 deterministic 索引健康事實，不推測缺少哪一張 Menu table；
-    /// 使用者可依訊息檢查資料庫權限、Menu metadata 或 extractor 支援範圍。
-    /// </summary>
-    /// <param name="fragments">本次尚未 canonical merge 的所有抽取片段。</param>
-    /// <param name="databaseSource">已通過連線前置檢查的資料庫來源；未設定時為 null。</param>
-    private static void AddConfiguredDatabaseHealthDiagnostic(
-        ICollection<GraphFragment> fragments,
-        GraphDatabaseSource? databaseSource)
-    {
-        if (databaseSource is null ||
-            fragments.SelectMany(fragment => fragment.Nodes)
-                .Any(node => node.Kind == GraphNodeKind.Feature))
+        var before = Environment.WorkingSet;
+        if (before < TransientIndexMemoryCollectionThresholdBytes)
         {
             return;
         }
 
-        var artifact =
-            $"db:{GraphIdentity.NormalizeRequiredToken(databaseSource.DatabaseName, "databaseName")}";
-        var health = new GraphFragment();
-        health.Diagnostics.Add(new GraphDiagnostic(
-            "DATABASE_FEATURES_MISSING",
-            GraphDiagnosticSeverity.Warning,
-            artifact,
-            "資料庫已成功連線並完成結構抽取，但沒有產生任何 Business Feature；" +
-            "請確認索引帳號可讀取 Menu／功能 metadata，或目前資料庫命名是否受 extractor 支援。",
-            Retryable: true));
-        fragments.Add(health);
+        GC.Collect(
+            GC.MaxGeneration,
+            GCCollectionMode.Aggressive,
+            blocking: true,
+            compacting: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(
+            GC.MaxGeneration,
+            GCCollectionMode.Aggressive,
+            blocking: true,
+            compacting: true);
+        _logger.LogInformation(
+            "FBL 索引暫存記憶體已回收。BeforeMiB={BeforeMiB}, AfterMiB={AfterMiB}",
+            before / (1024 * 1024),
+            Environment.WorkingSet / (1024 * 1024));
     }
 
-    private static string DetectLanguages(IReadOnlyList<IndexedFileManifest> files) =>
-        string.Join(',', files.Select(item => item.Language)
-            .Where(value => value is "csharp" or "java" or "frontend" or "sql")
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(value => value, StringComparer.Ordinal));
-
-    private static string LanguageForExtension(string extension) =>
-        extension.ToLowerInvariant() switch
+    /// <summary>有 pending 或內容差異時執行完整 authority rebuild；沒有變更時回傳 null。</summary>
+    public async Task<ProjectEntity?> IncrementalIndexAsync(
+        string projectId,
+        CancellationToken cancellationToken = default)
+    {
+        var project = await _projects.GetAsync(projectId, cancellationToken);
+        if (project is null)
         {
-            ".cs" => "csharp",
-            ".java" => "java",
-            ".js" or ".jsx" or ".ts" or ".tsx" => "frontend",
-            ".sql" => "sql",
-            _ => "unknown",
-        };
+            return null;
+        }
+        var mustIndex = project.IndexStatus is
+            ProjectIndexStatus.NotIndexed or
+            ProjectIndexStatus.PendingChanges or
+            ProjectIndexStatus.Stale or
+            ProjectIndexStatus.Failed ||
+            await CatchUpAsync(projectId, cancellationToken);
+        return mustIndex ? await IndexProjectAsync(projectId, cancellationToken) : null;
+    }
 
-    private static string? HeadCommit(string root)
+    /// <summary>索引主流程，所有例外都保存去敏感診斷並保留上一版 active graph。</summary>
+    private async Task<ProjectEntity> IndexCoreAsync(
+        string projectId,
+        CancellationToken cancellationToken)
+    {
+        var startedAt = DateTimeOffset.UtcNow;
+        var runId = Guid.NewGuid().ToString("N");
+        var stopwatch = Stopwatch.StartNew();
+        var stageDurations = new Dictionary<string, long>(StringComparer.Ordinal);
+        var project = await RequiredProjectAsync(projectId, cancellationToken);
+        var previousVersion = project.IndexManifestVersion;
+        var previousNodeCount = project.NodeCount;
+        var previousEdgeCount = project.EdgeCount;
+
+        try
+        {
+            SetProgress(projectId, "scan", "正在計算 FBL 原始碼指紋…", 5, runId, "full", stopwatch);
+            project.IndexStatus = ProjectIndexStatus.Indexing;
+            project.IndexError = null;
+            await _projects.SaveAsync(project, cancellationToken);
+
+            var scanWatch = Stopwatch.StartNew();
+            var files = EnumerateFiles(project.RootPath);
+            var fileManifests = await HashFilesAsync(project.RootPath, files, cancellationToken);
+            var databaseSource = await RequiredFblDatabaseAsync(project, cancellationToken);
+            var fingerprint = ComputeInputFingerprint(fileManifests, databaseSource.ConfigurationFingerprint);
+            scanWatch.Stop();
+            stageDurations["scan"] = scanWatch.ElapsedMilliseconds;
+
+            var current = await _manifests.GetCurrentAsync(projectId, cancellationToken);
+            var activeVersion = await SafeActiveVersionAsync(projectId, cancellationToken);
+            var noOp = !_options.ForceFullIndex && _options.EnableNoOpFastPath &&
+                       project.IndexStatus == ProjectIndexStatus.Indexing &&
+                       PendingFiles(projectId).Count == 0 &&
+                       current is not null &&
+                       current.IndexerVersion == IndexerVersion &&
+                       current.WorkingTreeFingerprint == fingerprint &&
+                       current.AnalysisSnapshotHash == databaseSource.ConfigurationFingerprint &&
+                       current.Version == activeVersion;
+            if (noOp)
+            {
+                project.IndexStatus = ProjectIndexStatus.Indexed;
+                project.PendingFileCount = 0;
+                project.IndexError = null;
+                await _projects.SaveAsync(project, cancellationToken);
+                var run = CompleteRun(
+                    project, runId, "no-op", startedAt, stopwatch,
+                    current!.Version, current.WorkingTreeFingerprint, stageDurations);
+                RecordRun(run);
+                SetProgress(projectId, "complete", "FBL 索引內容未變更。", 100, runId, "no-op", stopwatch);
+                return project;
+            }
+
+            var version = Guid.NewGuid().ToString("N");
+            var attempt = CreateManifest(
+                project,
+                version,
+                fingerprint,
+                databaseSource.ConfigurationFingerprint,
+                fileManifests,
+                startedAt,
+                IndexManifestStatus.Indexing);
+            await _manifests.SaveAttemptAsync(attempt, cancellationToken);
+
+            if (!await _neo4jRuntime.EnsureAvailableAsync(null, cancellationToken))
+            {
+                throw new InvalidOperationException(
+                    _neo4jRuntime.LastError ?? "Neo4j 圖譜資料庫目前無法使用。");
+            }
+
+            SetProgress(projectId, "extract", "正在解析 696 個 FBL 菜單與程式、報表、資料鏈…", 20, runId, "full", stopwatch);
+            var extractWatch = Stopwatch.StartNew();
+            var authoritySource = new FblSqlServerAuthoritySource(databaseSource.ConnectionString);
+            var result = await _builder.BuildAsync(
+                new FblAuthorityBuildRequest(
+                    project.RootPath,
+                    authoritySource,
+                    ExpectedMenuCount: 696,
+                    SourceCommit: null,
+                    DatabaseSnapshotId: databaseSource.ConfigurationFingerprint),
+                cancellationToken);
+            extractWatch.Stop();
+            stageDurations["extract"] = extractWatch.ElapsedMilliseconds;
+            if (result.Diagnostics.HasBlockingErrors)
+            {
+                throw new InvalidOperationException(BuildPreflightError(result.Diagnostics));
+            }
+
+            SetProgress(projectId, "publish", "結構驗證完成，正在原子發布 Neo4j 圖譜…", 80, runId, "full", stopwatch);
+            var publishWatch = Stopwatch.StartNew();
+            var communities = FblAuthorityCommunityBuilder.Build(result.Document);
+            var digest = ComputeDocumentDigest(result.Document, fingerprint);
+            await _graphStore.EnsureSchemaAsync(cancellationToken);
+            await _graphStore.PublishAsync(
+                new FblGraphSnapshot(projectId, version, digest, result.Document, communities),
+                cancellationToken);
+            publishWatch.Stop();
+            stageDurations["publish"] = publishWatch.ElapsedMilliseconds;
+
+            var completedAt = DateTimeOffset.UtcNow;
+            var promoted = attempt with
+            {
+                CompletedAt = completedAt,
+                Status = IndexManifestStatus.Fresh,
+                NodeCount = result.Document.Nodes.Count,
+                EdgeCount = result.Document.Relationships.Count,
+                GraphSchemaVersion = "fbl-authority-14x35",
+                IndexMode = "full",
+                RequiresRetry = false,
+            };
+            await _manifests.PromoteAsync(promoted, cancellationToken);
+
+            project.Languages = "csharp,javascript,typescript,aspx,sql";
+            project.IndexStatus = ProjectIndexStatus.Indexed;
+            project.IndexedAt = completedAt;
+            project.IndexError = null;
+            project.NodeCount = result.Document.Nodes.Count;
+            project.EdgeCount = result.Document.Relationships.Count;
+            project.IndexManifestVersion = version;
+            project.PendingFileCount = 0;
+            _pendingFiles.TryRemove(projectId, out _);
+            await _projects.SaveAsync(project, cancellationToken);
+
+            // 只排入三個 C0；本方法不等待模型，失敗也不得回滾已發布結構。
+            try
+            {
+                await _communityAi.PrewarmC0Async(projectId, version, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(
+                    "FBL Community 背景預熱排程失敗，結構圖仍可使用。Project={ProjectId}, ExceptionType={ExceptionType}",
+                    projectId,
+                    exception.GetType().Name);
+            }
+
+            var completedRun = CompleteRun(
+                project, runId, "full", startedAt, stopwatch, version, digest, stageDurations);
+            RecordRun(completedRun);
+            SetProgress(projectId, "complete", "FBL 權威圖索引完成；Community AI Summary 將在背景補齊。", 100, runId, "full", stopwatch);
+            return project;
+        }
+        catch (Exception exception)
+        {
+            project.IndexStatus = ProjectIndexStatus.Failed;
+            project.IndexError = SafeError(exception);
+            project.IndexManifestVersion = previousVersion;
+            project.NodeCount = previousNodeCount;
+            project.EdgeCount = previousEdgeCount;
+            await _projects.SaveAsync(project, CancellationToken.None);
+            var failedManifest = new ProjectIndexManifest(
+                projectId,
+                runId,
+                project.RootPath,
+                null,
+                string.Empty,
+                [],
+                [],
+                PendingFiles(projectId),
+                IndexerVersion,
+                startedAt,
+                DateTimeOffset.UtcNow,
+                IndexManifestStatus.Failed,
+                previousNodeCount,
+                previousEdgeCount,
+                SafeError(exception),
+                "fbl-authority-14x35",
+                null,
+                "full",
+                true);
+            await _manifests.SaveAttemptAsync(failedManifest, CancellationToken.None);
+            stopwatch.Stop();
+            var failedRun = new GraphIndexRun(
+                projectId,
+                runId,
+                "full",
+                "failed",
+                startedAt,
+                DateTimeOffset.UtcNow,
+                stopwatch.ElapsedMilliseconds,
+                previousNodeCount,
+                previousEdgeCount,
+                previousVersion,
+                null,
+                stageDurations,
+                SafeError(exception),
+                PeakWorkingSetBytes: Environment.WorkingSet);
+            RecordRun(failedRun);
+            SetProgress(projectId, "failed", SafeError(exception), 100, runId, "full", stopwatch);
+            throw;
+        }
+    }
+
+    /// <summary>取得且驗證專案的 SQL Server FBL_SPV_SIT 唯讀資料來源。</summary>
+    private async Task<GraphDatabaseSource> RequiredFblDatabaseAsync(
+        ProjectEntity project,
+        CancellationToken cancellationToken)
+    {
+        var source = await _databaseSources.GetAsync(project, cancellationToken);
+        if (source is null)
+        {
+            throw new InvalidOperationException("FBL 專案解析需要先設定 FBL_SPV_SIT 的唯讀 SQL Server 連線。");
+        }
+        if (source.Provider != ProjectDatabaseProvider.SqlServer ||
+            !string.Equals(source.DatabaseName, RequiredDatabaseName, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("GraphRAG 僅支援 FBL 投資系統的 FBL_SPV_SIT SQL Server 資料來源。");
+        }
+        return source;
+    }
+
+    /// <summary>建立成功或進入中的 immutable manifest。</summary>
+    private static ProjectIndexManifest CreateManifest(
+        ProjectEntity project,
+        string version,
+        string fingerprint,
+        string databaseFingerprint,
+        IReadOnlyList<IndexedFileManifest> files,
+        DateTimeOffset startedAt,
+        IndexManifestStatus status) =>
+        new(
+            project.Id,
+            version,
+            project.RootPath,
+            null,
+            fingerprint,
+            [],
+            files,
+            [],
+            IndexerVersion,
+            startedAt,
+            null,
+            status,
+            GraphSchemaVersion: "fbl-authority-14x35",
+            AnalysisSnapshotHash: databaseFingerprint,
+            IndexMode: "full",
+            RequiresRetry: false);
+
+    /// <summary>列舉 FBL 權威解析會讀取的檔案，並排除建置與套件目錄。</summary>
+    private IReadOnlyList<string> EnumerateFiles(string rootPath)
+    {
+        var result = new List<string>();
+        var pending = new Stack<string>();
+        pending.Push(Path.GetFullPath(rootPath));
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+            foreach (var child in Directory.EnumerateDirectories(directory))
+            {
+                if (!ExcludedDirectories.Contains(Path.GetFileName(child)))
+                {
+                    pending.Push(child);
+                }
+            }
+            foreach (var file in Directory.EnumerateFiles(directory))
+            {
+                if (!SupportedExtensions.Contains(Path.GetExtension(file)))
+                {
+                    continue;
+                }
+                result.Add(file);
+                if (result.Count > _options.MaximumFiles)
+                {
+                    throw new InvalidOperationException($"FBL 可索引檔案超過安全上限 {_options.MaximumFiles}。");
+                }
+            }
+        }
+        return result.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    /// <summary>一次串流讀檔產生 SHA-256，避免將大型來源全部載入記憶體。</summary>
+    private static async Task<IReadOnlyList<IndexedFileManifest>> HashFilesAsync(
+        string rootPath,
+        IReadOnlyList<string> files,
+        CancellationToken cancellationToken)
+    {
+        var result = new List<IndexedFileManifest>(files.Count);
+        foreach (var file in files)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await using var stream = new FileStream(
+                file,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            var hash = await SHA256.HashDataAsync(stream, cancellationToken);
+            var info = new FileInfo(file);
+            result.Add(new IndexedFileManifest(
+                NormalizePath(Path.GetRelativePath(rootPath, file)),
+                LanguageForExtension(info.Extension),
+                info.Length,
+                Convert.ToHexString(hash).ToLowerInvariant(),
+                LastWriteAt: info.LastWriteTimeUtc));
+        }
+        return result;
+    }
+
+    /// <summary>以穩定排序的檔案 hash、DB 設定版本與索引器版本產生輸入指紋。</summary>
+    private static string ComputeInputFingerprint(
+        IReadOnlyList<IndexedFileManifest> files,
+        string databaseFingerprint)
+    {
+        var material = new StringBuilder(IndexerVersion)
+            .Append('\n')
+            .Append(databaseFingerprint)
+            .Append('\n');
+        foreach (var file in files.OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase))
+        {
+            material.Append(file.RelativePath).Append('|').Append(file.ContentHash).Append('\n');
+        }
+        return Sha256(material.ToString());
+    }
+
+    /// <summary>圖內容摘要只使用穩定 key、enum 關係與輸入指紋，不包含時間或密碼。</summary>
+    private static string ComputeDocumentDigest(GraphDocument document, string inputFingerprint)
+    {
+        var material = new StringBuilder(inputFingerprint).Append('\n');
+        foreach (var node in document.Nodes.OrderBy(node => node.Key, StringComparer.Ordinal))
+        {
+            material.Append(node.Kind).Append('|').Append(node.Key).Append('\n');
+        }
+        foreach (var relationship in document.Relationships.OrderBy(item => item.Id, StringComparer.Ordinal))
+        {
+            material.Append(relationship.SourceKey).Append('|')
+                .Append(GraphSchema.GetRelationshipType(relationship.Kind)).Append('|')
+                .Append(relationship.TargetKey).Append('\n');
+        }
+        return Sha256(material.ToString());
+    }
+
+    /// <summary>把 Preflight 錯誤壓縮成不含密碼且可人工追查的訊息。</summary>
+    private static string BuildPreflightError(PreflightResult diagnostics)
+    {
+        var samples = diagnostics.Issues
+            .Where(issue => issue.Severity == PreflightSeverity.Error)
+            .Take(10)
+            .Select(issue => $"{issue.ReasonCode}: {issue.Message}");
+        return $"FBL Graph Preflight 未通過，共 {diagnostics.ErrorCount} 個錯誤。" +
+               string.Join(" | ", samples);
+    }
+
+    /// <summary>取得 active 版本；Neo4j 尚未啟動時不阻擋第一次完整建置。</summary>
+    private async Task<string?> SafeActiveVersionAsync(
+        string projectId,
+        CancellationToken cancellationToken)
     {
         try
         {
-            var startInfo = new ProcessStartInfo("git", "-C . rev-parse HEAD")
-            {
-                WorkingDirectory = root,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            using var process = Process.Start(startInfo);
-            if (process is null) return null;
-            if (!process.WaitForExit(2_000) || process.ExitCode != 0) return null;
-            var value = process.StandardOutput.ReadToEnd().Trim();
-            return value.Length == 40 ? value : null;
+            return await _graphStore.GetActiveManifestAsync(projectId, cancellationToken);
         }
         catch
         {
@@ -1146,50 +657,51 @@ public sealed class GraphIndexingService
         }
     }
 
-    private static string SafeError(Exception exception) => exception switch
-    {
-        DirectoryNotFoundException => "專案根目錄不存在，上一個成功圖譜保持不變。",
-        UnauthorizedAccessException => "部分專案檔案無法讀取，索引已中止且上一個成功圖譜保持不變。",
-        Microsoft.Data.SqlClient.SqlException or Microsoft.Data.Sqlite.SqliteException =>
-            "專案資料庫唯讀連線失敗；請檢查伺服器、資料庫名稱、帳密、網路與 SELECT 權限。上一個成功圖譜保持不變。",
-        InvalidOperationException => "GraphRAG 品質閘門或發布驗證失敗，上一個成功圖譜保持不變。",
-        _ => "GraphRAG 索引失敗，上一個成功圖譜保持不變。",
-    };
-
-    private static bool IsInsideRoot(string root, string path)
-    {
-        var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(path));
-        return !Path.IsPathRooted(relative) &&
-               relative != ".." &&
-               !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
-               !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal);
-    }
-
-    private static ProjectState CaptureProjectState(ProjectEntity project) =>
-        new(
-            project.IndexManifestVersion,
-            project.NodeCount,
-            project.EdgeCount,
-            project.IndexedAt);
-
-    private IReadOnlyList<string> PendingFiles(string projectId) =>
-        _pendingFiles.TryGetValue(projectId, out var values)
-            ? values.Keys.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToList()
-            : [];
-
-    private async Task<ProjectEntity> RequiredProjectAsync(
-        string projectId,
-        CancellationToken cancellationToken) =>
-        await _projects.GetAsync(projectId, cancellationToken) ??
-        throw new InvalidOperationException($"專案不存在：{projectId}");
-
-    private void Progress(
-        string projectId,
+    /// <summary>將成功執行轉成固定統計。</summary>
+    private static GraphIndexRun CompleteRun(
+        ProjectEntity project,
         string runId,
         string mode,
+        DateTimeOffset startedAt,
+        Stopwatch stopwatch,
+        string version,
+        string digest,
+        IReadOnlyDictionary<string, long> stageDurations)
+    {
+        stopwatch.Stop();
+        return new GraphIndexRun(
+            project.Id,
+            runId,
+            mode,
+            "succeeded",
+            startedAt,
+            DateTimeOffset.UtcNow,
+            stopwatch.ElapsedMilliseconds,
+            project.NodeCount,
+            project.EdgeCount,
+            version,
+            digest,
+            stageDurations,
+            PeakWorkingSetBytes: Environment.WorkingSet);
+    }
+
+    /// <summary>保存全域與 per-mode 最近結果。</summary>
+    private void RecordRun(GraphIndexRun run)
+    {
+        _runs[run.ProjectId] = run;
+        _runsByMode.GetOrAdd(
+            run.ProjectId,
+            _ => new ConcurrentDictionary<string, GraphIndexRun>(StringComparer.Ordinal))[run.Mode] = run;
+    }
+
+    /// <summary>更新前端可讀的進度物件。</summary>
+    private void SetProgress(
+        string projectId,
         string phase,
         string message,
         int percent,
+        string runId,
+        string mode,
         Stopwatch stopwatch) =>
         _progress[projectId] = new GraphIndexProgress(
             projectId,
@@ -1200,151 +712,195 @@ public sealed class GraphIndexingService
             mode,
             stopwatch.ElapsedMilliseconds);
 
-    private static void ValidateOptions(GraphIndexingOptions options)
+    /// <summary>取得必須存在且根目錄有效的專案。</summary>
+    private async Task<ProjectEntity> RequiredProjectAsync(
+        string projectId,
+        CancellationToken cancellationToken)
     {
-        if (options.WatcherDebounceMilliseconds is < 100 or > 30_000)
-            throw new InvalidOperationException(
-                "GraphRAG WatcherDebounceMilliseconds 必須介於 100 到 30000。");
-        if (options.MaximumFiles is < 1_000 or > 1_000_000)
-            throw new InvalidOperationException(
-                "GraphRAG MaximumFiles 必須介於 1000 到 1000000。");
+        var project = await _projects.GetAsync(projectId, cancellationToken) ??
+                      throw new KeyNotFoundException($"找不到專案：{projectId}");
+        if (!Directory.Exists(project.RootPath))
+        {
+            throw new DirectoryNotFoundException($"專案根目錄不存在：{project.RootPath}");
+        }
+        return project;
     }
 
-    private sealed record ProjectState(
-        string? ManifestVersion,
-        int NodeCount,
-        int EdgeCount,
-        DateTimeOffset? IndexedAt);
+    /// <summary>取得穩定排序的 pending 檔案。</summary>
+    private IReadOnlyList<string> PendingFiles(string projectId) =>
+        _pendingFiles.TryGetValue(projectId, out var files)
+            ? files.Keys.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray()
+            : [];
 
-    private sealed record BodyDeltaPlan(
-        IReadOnlySet<string> ChangedPaths);
-
-    /// <summary>
-    /// 只移除可安全視為 implementation body 的語法；宣告、attribute 與所有 public surface 均保留。
-    /// 這個 rewriter 只用於 eligibility hash，不參與 graph extraction。
-    /// </summary>
-    private sealed class CSharpDeclarationSurfaceRewriter : CSharpSyntaxRewriter
+    /// <summary>確認 watcher 路徑沒有越過專案根目錄。</summary>
+    private static bool IsInsideRoot(string rootPath, string path)
     {
-        public override SyntaxNode? VisitMethodDeclaration(MethodDeclarationSyntax node) =>
-            base.VisitMethodDeclaration(node.WithBody(null).WithExpressionBody(null)
-                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)));
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
+        var candidate = Path.GetFullPath(path);
+        return candidate.Equals(root, StringComparison.OrdinalIgnoreCase) ||
+               candidate.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
 
-        public override SyntaxNode? VisitConstructorDeclaration(ConstructorDeclarationSyntax node) =>
-            base.VisitConstructorDeclaration(node.WithBody(null).WithExpressionBody(null)
-                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)));
+    /// <summary>依副檔名寫入 FBL 索引支援的顯示用語言。</summary>
+    private static string LanguageForExtension(string extension) => extension.ToLowerInvariant() switch
+    {
+        ".cs" or ".csproj" or ".sln" => "csharp",
+        ".js" or ".jsx" => "javascript",
+        ".ts" or ".tsx" => "typescript",
+        ".aspx" or ".ascx" or ".master" => "aspx",
+        ".sql" => "sql",
+        ".xml" or ".config" => "xml",
+        _ => "text",
+    };
 
-        public override SyntaxNode? VisitDestructorDeclaration(DestructorDeclarationSyntax node) =>
-            base.VisitDestructorDeclaration(node.WithBody(null).WithExpressionBody(null)
-                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)));
+    /// <summary>正規化 manifest 中的相對路徑。</summary>
+    private static string NormalizePath(string path) => path.Replace('\\', '/');
 
-        public override SyntaxNode? VisitOperatorDeclaration(OperatorDeclarationSyntax node) =>
-            base.VisitOperatorDeclaration(node.WithBody(null).WithExpressionBody(null)
-                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)));
+    /// <summary>計算小寫十六進位 SHA-256。</summary>
+    private static string Sha256(string value) => Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(value)))
+        .ToLowerInvariant();
 
-        public override SyntaxNode? VisitConversionOperatorDeclaration(
-            ConversionOperatorDeclarationSyntax node) =>
-            base.VisitConversionOperatorDeclaration(
-                node.WithBody(null).WithExpressionBody(null)
-                    .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)));
+    /// <summary>限制持久化錯誤長度並避免連線字串意外寫入。</summary>
+    private static string SafeError(Exception exception)
+    {
+        var message = exception.Message;
+        if (SensitiveValueDetector.ContainsSensitiveValue(message))
+        {
+            return $"索引失敗（{exception.GetType().Name}）；詳細訊息可能包含機敏設定，已隱藏。";
+        }
+        return message.Length <= 2_000 ? message : message[..2_000];
+    }
 
-        public override SyntaxNode? VisitAccessorDeclaration(AccessorDeclarationSyntax node) =>
-            base.VisitAccessorDeclaration(node.WithBody(null).WithExpressionBody(null)
-                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)));
-
-        public override SyntaxNode? VisitPropertyDeclaration(PropertyDeclarationSyntax node) =>
-            base.VisitPropertyDeclaration(node.WithExpressionBody(null)
-                .WithSemicolonToken(node.AccessorList is null
-                    ? SyntaxFactory.Token(SyntaxKind.SemicolonToken)
-                    : default));
-
-        public override SyntaxNode? VisitIndexerDeclaration(IndexerDeclarationSyntax node) =>
-            base.VisitIndexerDeclaration(node.WithExpressionBody(null)
-                .WithSemicolonToken(node.AccessorList is null
-                    ? SyntaxFactory.Token(SyntaxKind.SemicolonToken)
-                    : default));
+    /// <summary>驗證所有技術上限。</summary>
+    private static void ValidateOptions(GraphIndexingOptions options)
+    {
+        if (options.WatcherDebounceMilliseconds is < 100 or > 60_000 ||
+            options.MaximumFiles is < 1_000 or > 1_000_000)
+        {
+            throw new InvalidOperationException("GraphRAG 索引設定超出安全範圍。");
+        }
     }
 }
 
+/// <summary>供專案建立、匯入與刪除端點即時管理檔案監看。</summary>
+public interface IGraphIndexWatcherRegistry
+{
+    /// <summary>註冊或更新一個專案根目錄。</summary>
+    bool RegisterProject(ProjectEntity project);
+
+    /// <summary>解除專案監看與尚未執行的 debounce。</summary>
+    bool UnregisterProject(string projectId);
+}
+
 /// <summary>
-/// 監看已註冊專案的可索引檔案並觸發 V3 incremental 決策。
-/// Watcher 只標記 pending；真正的 hash、驗證與原子發布永遠由 <see cref="GraphIndexingService"/> 執行。
+/// 只監看 FBL 解析會使用的來源檔案。Host 啟動時讀取一次專案清單，
+/// 後續由 REST 端點即時註冊，不以固定週期查詢 SQLite。
 /// </summary>
 public sealed class GraphIndexWatcherService(
     IProjectRepository projects,
     GraphIndexingService indexing,
     IOptions<GraphIndexingOptions> options,
-    ILogger<GraphIndexWatcherService> logger) : BackgroundService
+    ILogger<GraphIndexWatcherService> logger) : BackgroundService, IGraphIndexWatcherRegistry
 {
-    private readonly ConcurrentDictionary<string, FileSystemWatcher> _watchers =
-        new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, CancellationTokenSource> _debounces =
-        new(StringComparer.Ordinal);
+    private static readonly IReadOnlySet<string> WatchedExtensions = new HashSet<string>(
+        [".cs", ".js", ".jsx", ".ts", ".tsx", ".aspx", ".ascx", ".master", ".sql", ".xml", ".config"],
+        StringComparer.OrdinalIgnoreCase);
+    private readonly object _watcherGate = new();
+    private readonly ConcurrentDictionary<string, FileSystemWatcher> _watchers = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _debounces = new(StringComparer.Ordinal);
+    private CancellationToken _stoppingToken;
 
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _stoppingToken = stoppingToken;
         try
         {
-            while (!stoppingToken.IsCancellationRequested)
+            foreach (var project in await projects.ListAsync(stoppingToken))
             {
-                var allProjects = await projects.ListAsync(stoppingToken);
-                var activeIds = allProjects.Select(project => project.Id)
-                    .ToHashSet(StringComparer.Ordinal);
-                foreach (var project in allProjects)
-                {
-                    if (_watchers.ContainsKey(project.Id) ||
-                        !Directory.Exists(project.RootPath))
-                        continue;
-                    var watcher = new FileSystemWatcher(project.RootPath)
-                    {
-                        IncludeSubdirectories = true,
-                        NotifyFilter = NotifyFilters.FileName |
-                                       NotifyFilters.DirectoryName |
-                                       NotifyFilters.LastWrite |
-                                       NotifyFilters.Size,
-                        EnableRaisingEvents = true,
-                    };
-                    watcher.Changed += (_, args) =>
-                        Schedule(project.Id, args.FullPath, stoppingToken);
-                    watcher.Created += (_, args) =>
-                        Schedule(project.Id, args.FullPath, stoppingToken);
-                    watcher.Deleted += (_, args) =>
-                        Schedule(project.Id, args.FullPath, stoppingToken);
-                    watcher.Renamed += (_, args) =>
-                        Schedule(project.Id, args.FullPath, stoppingToken);
-                    if (!_watchers.TryAdd(project.Id, watcher))
-                        watcher.Dispose();
-                }
-                foreach (var stale in _watchers.Keys
-                             .Where(id => !activeIds.Contains(id))
-                             .ToList())
-                {
-                    if (_watchers.TryRemove(stale, out var watcher))
-                        watcher.Dispose();
-                }
-                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                RegisterProject(project);
             }
+            await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            // 正常 Host 關機不應被 BackgroundService 視為未處理例外。
         }
     }
 
-    private void Schedule(
-        string projectId,
-        string path,
-        CancellationToken stoppingToken)
+    /// <inheritdoc />
+    public bool RegisterProject(ProjectEntity project)
     {
-        var extension = Path.GetExtension(path).ToLowerInvariant();
-        if (extension is not (".cs" or ".java" or ".js" or ".jsx" or ".ts" or ".tsx" or ".sql"))
-            return;
-        if (_debounces.TryRemove(projectId, out var prior))
+        ArgumentNullException.ThrowIfNull(project);
+        if (string.IsNullOrWhiteSpace(project.Id) || !Directory.Exists(project.RootPath))
         {
-            prior.Cancel();
-            prior.Dispose();
+            return false;
         }
-        var debounce = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(project.RootPath));
+        lock (_watcherGate)
+        {
+            if (_watchers.TryGetValue(project.Id, out var current))
+            {
+                if (Path.TrimEndingDirectorySeparator(current.Path)
+                    .Equals(root, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+                _watchers.TryRemove(project.Id, out _);
+                current.Dispose();
+            }
+            var watcher = new FileSystemWatcher(root)
+            {
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName |
+                               NotifyFilters.LastWrite | NotifyFilters.Size,
+                EnableRaisingEvents = true,
+            };
+            watcher.Changed += (_, args) => Schedule(project.Id, args.FullPath);
+            watcher.Created += (_, args) => Schedule(project.Id, args.FullPath);
+            watcher.Deleted += (_, args) => Schedule(project.Id, args.FullPath);
+            watcher.Renamed += (_, args) => Schedule(project.Id, args.FullPath);
+            _watchers[project.Id] = watcher;
+            return true;
+        }
+    }
+
+    /// <inheritdoc />
+    public bool UnregisterProject(string projectId)
+    {
+        if (string.IsNullOrWhiteSpace(projectId))
+        {
+            return false;
+        }
+        lock (_watcherGate)
+        {
+            if (!_watchers.TryRemove(projectId, out var watcher))
+            {
+                return false;
+            }
+            watcher.Dispose();
+            if (_debounces.TryRemove(projectId, out var debounce))
+            {
+                debounce.Cancel();
+                debounce.Dispose();
+            }
+            return true;
+        }
+    }
+
+    /// <summary>合併短時間異動並觸發一次完整 authority rebuild。</summary>
+    private void Schedule(string projectId, string path)
+    {
+        if (!WatchedExtensions.Contains(Path.GetExtension(path)))
+        {
+            return;
+        }
+        if (_debounces.TryRemove(projectId, out var previous))
+        {
+            previous.Cancel();
+            previous.Dispose();
+        }
+        var debounce = CancellationTokenSource.CreateLinkedTokenSource(_stoppingToken);
         _debounces[projectId] = debounce;
         _ = Task.Run(async () =>
         {
@@ -1360,14 +916,16 @@ public sealed class GraphIndexWatcherService(
             catch (Exception exception)
             {
                 logger.LogWarning(
-                    "GraphRAG watcher 增量索引失敗。Project={ProjectId}, ExceptionType={ExceptionType}",
-                    projectId, exception.GetType().Name);
+                    "FBL Graph watcher 索引失敗。Project={ProjectId}, ExceptionType={ExceptionType}",
+                    projectId,
+                    exception.GetType().Name);
             }
             finally
             {
-                if (_debounces.TryGetValue(projectId, out var current) &&
-                    ReferenceEquals(current, debounce))
+                if (_debounces.TryGetValue(projectId, out var current) && ReferenceEquals(current, debounce))
+                {
                     _debounces.TryRemove(projectId, out _);
+                }
                 debounce.Dispose();
             }
         }, CancellationToken.None);
@@ -1376,7 +934,14 @@ public sealed class GraphIndexWatcherService(
     /// <inheritdoc />
     public override void Dispose()
     {
-        foreach (var watcher in _watchers.Values) watcher.Dispose();
+        lock (_watcherGate)
+        {
+            foreach (var watcher in _watchers.Values)
+            {
+                watcher.Dispose();
+            }
+            _watchers.Clear();
+        }
         foreach (var debounce in _debounces.Values)
         {
             debounce.Cancel();

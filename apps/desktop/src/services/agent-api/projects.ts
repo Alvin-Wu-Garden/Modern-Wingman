@@ -23,7 +23,7 @@ export interface ProjectInfo {
 
 /**
  * 索引階段是前後端共用契約；列成 union 可讓不存在的 done 等字串在編譯期被攔下。
- * starting／summaries 是前端銜接狀態，其餘值由 Agent Service 回傳。
+ * starting 是前端銜接狀態，其餘值由 Agent Service 回傳。
  */
 export type IndexProgressPhase =
   | 'idle'
@@ -34,7 +34,6 @@ export type IndexProgressPhase =
   | 'publish'
   | 'complete'
   | 'failed'
-  | 'summaries'
 
 export interface IndexProgress {
   projectId?: string
@@ -45,12 +44,14 @@ export interface IndexProgress {
 
 export interface AiEnrichmentProgress {
   projectId: string
-  targetManifestVersion?: string | null
-  state: 'NotRequested' | 'Detecting' | 'Summarizing' | 'Ready' | 'Degraded' | 'Superseded' | 'Canceled'
-  completedCommunities: number
-  totalCommunities: number
+  total: number
+  queued: number
+  running: number
+  completed: number
+  failed: number
+  percent: number
+  structuralIndexAvailable: boolean
   message?: string | null
-  error?: string | null
 }
 
 export interface ProjectDatabaseConfiguration {
@@ -144,7 +145,14 @@ async function errorMessage(response: Response, fallback: string): Promise<strin
 }
 
 export async function listProjects(): Promise<ProjectInfo[]> {
-  const response = await fetch(`${AGENT_API_BASE_URL}/api/projects`)
+  let response: Response
+  try {
+    response = await fetch(`${AGENT_API_BASE_URL}/api/projects`)
+  } catch {
+    throw new Error(
+      `無法連線到 Agent Service（${AGENT_API_BASE_URL}）。請確認後端服務已啟動。`,
+    )
+  }
   if (!response.ok) throw new Error(`讀取專案失敗 (${response.status})`)
   return response.json()
 }
@@ -195,13 +203,6 @@ export async function getIndexProgress(projectId: string): Promise<IndexProgress
   const response = await fetch(`${AGENT_API_BASE_URL}/api/projects/${projectId}/index/progress`)
   if (!response.ok) throw new Error(`讀取索引進度失敗 (${response.status})`)
   return response.json()
-}
-
-export async function buildSummaries(projectId: string): Promise<void> {
-  const response = await fetch(`${AGENT_API_BASE_URL}/api/projects/${projectId}/summaries`, {
-    method: 'POST',
-  })
-  if (!response.ok) throw new Error(`啟動業務摘要失敗 (${response.status})`)
 }
 
 export async function getSummaryProgress(projectId: string): Promise<AiEnrichmentProgress> {
@@ -281,18 +282,38 @@ export async function listProjectSqlServerDatabases(
 
 // 內建 Neo4j 第一次啟動可能需要下載與初始化，因此保留有限的 120 秒 UI 逾時。
 const GRAPH_REQUEST_TIMEOUT_MS = 120_000
+const GRAPH_RETRY_DELAYS_MS = [1_000, 2_000]
+
+/**
+ * 圖譜 API 在 Neo4j 剛啟動時可能暫時回傳 503；短暫重試可吸收啟動競態，
+ * 但不會把真正的 4xx/5xx 錯誤吞掉，最後仍會保留後端提供的詳細訊息。
+ */
+const wait = (milliseconds: number) =>
+  new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds))
 
 async function fetchGraphApi(url: string, init?: RequestInit): Promise<Response> {
-  const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), GRAPH_REQUEST_TIMEOUT_MS)
-  try {
-    return await fetch(url, { ...init, signal: controller.signal })
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError')
-      throw new Error('圖譜服務在 120 秒內沒有回應，請確認 Neo4j 狀態後重試。')
-    throw error
-  } finally {
-    window.clearTimeout(timer)
+  for (let attempt = 0; ; attempt += 1) {
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), GRAPH_REQUEST_TIMEOUT_MS)
+    try {
+      const response = await fetch(url, { ...init, signal: controller.signal })
+      if (response.status !== 503 || attempt >= GRAPH_RETRY_DELAYS_MS.length)
+        return response
+
+      await wait(GRAPH_RETRY_DELAYS_MS[attempt])
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError')
+        throw new Error('圖譜服務在 120 秒內沒有回應，請確認 Neo4j 狀態後重試。')
+
+      if (attempt >= GRAPH_RETRY_DELAYS_MS.length) {
+        throw new Error(
+          `無法連線到圖譜服務（${AGENT_API_BASE_URL}）。請確認 Agent Service 與 Neo4j 已啟動。`,
+        )
+      }
+      await wait(GRAPH_RETRY_DELAYS_MS[attempt])
+    } finally {
+      window.clearTimeout(timer)
+    }
   }
 }
 

@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { MarkdownRenderer } from '@/components/ui/markdown-renderer'
 import { cn } from '@/lib/utils'
 import { useChatStore } from '../store/useChatStore'
+import { ActivityTimeline } from './ActivityTimeline'
 import { MessageComposer } from './MessageComposer'
 
 interface ConversationPaneProps {
@@ -108,7 +109,13 @@ export function ConversationPane({
               )}
             >
               {message.role === 'assistant'
-                ? <MarkdownRenderer content={message.content} streaming={message.streaming} />
+                ? <>
+                    <ActivityTimeline
+                      activities={message.activities ?? []}
+                      streaming={message.streaming ?? false}
+                    />
+                    <MarkdownRenderer content={message.content} streaming={message.streaming} />
+                  </>
                 : <p className="whitespace-pre-wrap">{message.content}</p>}
               <p
                 className={cn(

@@ -33,6 +33,23 @@ export interface AttachmentReference {
   mediaType: string | null
 }
 
+/**
+ * Agent 單次執行期間的安全進度事件。
+ * 事件只描述階段與工具摘要，不包含模型私有推理或完整工具輸出。
+ */
+export interface AgentActivityEvent {
+  type: string
+  runId: string
+  activityId: string
+  status: 'started' | 'completed' | 'failed' | 'status' | string
+  label: string
+  tool: string | null
+  detail: string | null
+  elapsedMs: number | null
+  sequence: number
+  timestamp: string
+}
+
 export interface ProviderInfo {
   id: string
   displayName: string
@@ -125,37 +142,38 @@ export async function sendMessage(
     onToken: (token: string) => void
     onDone: () => void
     onError: (error: string) => void
+    onActivity?: (activity: AgentActivityEvent) => void
   },
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(
-    `${AGENT_API_BASE_URL}/api/conversations/${conversationId}/messages`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userMessage,
-        providerProfileId,
-        modelId,
-        attachments,
-      }),
-      signal,
-    },
-  )
-  if (!response.ok) {
-    const body = await response.json().catch(() => null) as { error?: string } | null
-    handlers.onError(body?.error ?? `HTTP ${response.status}`)
-    return
-  }
-  if (!response.body) {
-    handlers.onError('服務未回傳串流內容。')
-    return
-  }
-
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
   try {
+    const response = await fetch(
+      `${AGENT_API_BASE_URL}/api/conversations/${conversationId}/messages`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userMessage,
+          providerProfileId,
+          modelId,
+          attachments,
+        }),
+        signal,
+      },
+    )
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { error?: string } | null
+      handlers.onError(body?.error ?? `HTTP ${response.status}`)
+      return
+    }
+    if (!response.body) {
+      handlers.onError('服務未回傳串流內容。')
+      return
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
@@ -171,10 +189,12 @@ export async function sendMessage(
             token?: string
             done?: boolean
             error?: string
+            activity?: AgentActivityEvent
           }
+          if (event.activity) handlers.onActivity?.(event.activity)
           if (typeof event.token === 'string') handlers.onToken(event.token)
-          else if (event.done) handlers.onDone()
-          else if (event.error) handlers.onError(event.error)
+          if (event.done) handlers.onDone()
+          if (event.error) handlers.onError(event.error)
         } catch {
           // 忽略單一格式錯誤事件，後續 SSE 仍可繼續處理。
         }

@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $service = Join-Path $root 'apps\agent-service'
 $project = Join-Path $service 'AgentService.csproj'
-$tests = Join-Path $service 'tests\UnitTests\AgentService.UnitTests.csproj'
+$tests = Join-Path $root 'apps\UnitTests\AgentService.UnitTests.csproj'
 $publishDirectory = Join-Path $service 'publish-verification\agent-service-win-x64'
 
 function Assert-ResolvedPackage {

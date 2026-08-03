@@ -2,26 +2,53 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug AgentService",
+      "name": "_Modern Wingman：AgentService",
       "type": "coreclr",
       "request": "launch",
-      "preLaunchTask": "build-agent-service",
-      "program": "${workspaceFolder}/apps/agent-service/bin/Debug/net10.0/AgentService.dll",
-      "args": [],
+      "program": "${workspaceFolder}/apps/agent-service/bin/Debug/net10.0/AgentService.exe",
       "cwd": "${workspaceFolder}/apps/agent-service",
-      "stopAtEntry": false,
+      "console": "integratedTerminal",
       "justMyCode": true,
+      "stopAtEntry": false,
+      "postDebugTask": "modern-wingman: stop all",
       "env": {
-        "ASPNETCORE_ENVIRONMENT": "Development",
-        "ASPNETCORE_URLS": "http://localhost:5200"
+        "ASPNETCORE_ENVIRONMENT": "Development"
       },
-      "console": "integratedTerminal"
+      "presentation": {
+        "hidden": true
+      }
     },
     {
-      "name": "Attach to AgentService (已在執行)",
-      "type": "coreclr",
-      "request": "attach",
-      "processName": "AgentService"
+      "name": "_Modern Wingman：Tauri",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "D:/CargoTarget/modern-wingman/debug/modern-wingman-desktop.exe",
+      "cwd": "${workspaceFolder}/apps/desktop",
+      "externalConsole": false,
+      "environment": [
+        {
+          "name": "RUST_BACKTRACE",
+          "value": "1"
+        }
+      ],
+      "presentation": {
+        "hidden": true
+      }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Modern Wingman 全端 Debug",
+      "configurations": [
+        "_Modern Wingman：AgentService",
+        "_Modern Wingman：Tauri"
+      ],
+      "preLaunchTask": "modern-wingman: start all",
+      "stopAll": true,
+      "presentation": {
+        "group": "Modern Wingman",
+        "order": 1
+      }
     }
   ]
 }

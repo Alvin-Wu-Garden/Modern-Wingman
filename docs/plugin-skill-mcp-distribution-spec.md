@@ -162,13 +162,9 @@ apps/agent-service/
 │  └─ Host/
 │     ├─ DependencyInjection/MarketplaceRegistration.cs
 │     └─ RestEndpoints/MarketplaceEndpoints.cs
-└─ tests/
-   └─ UnitTests/
-      └─ Marketplace/
-         ├─ Domain/
-         ├─ Application/
-         └─ Integration/
 ```
+
+測試專案位於 `apps/UnitTests`，與 `apps/agent-service` 同層；僅供本機驗證，並由根目錄 `.gitignore` 排除，不納入版控。
 
 Dependency 規則：
 
@@ -178,7 +174,7 @@ Dependency 規則：
 - `AppDbContext` 是唯一 EF Core context/schema authority；Marketplace persistence adapter 透過 `IDbContextFactory<AppDbContext>` 實作 `IMarketplaceStore`。
 - 不建立第二顆 SQLite、第二個 Marketplace process 或 Rust-side Marketplace repository。
 - 因 `AgentService.csproj` 目前會遞迴編譯專案目錄內的 `.cs`，新增 module 時必須在 Host project 明確 `Compile Remove="modules\Marketplace\**\*.cs"`，再以 `ProjectReference` 引用 `Wingman.Marketplace.csproj`，避免相同 source 被編譯兩次。
-- 第一版沿用既有 `AgentService.UnitTests` project，在 `tests/UnitTests/Marketplace` 依層分資料夾；不為每一層再建立額外 test `.csproj`。
+- 第一版沿用既有 `AgentService.UnitTests` project，在 `apps/UnitTests/Marketplace` 依層分資料夾；不為每一層再建立額外 test `.csproj`。
 
 ### 5.2 Wingman Plugin 到 MAF 的 Adapter
 

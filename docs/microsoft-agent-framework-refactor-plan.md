@@ -98,7 +98,7 @@ The pre-change baseline is:
 - Keep Copilot CLI permissions separate from Wingman function policy: CLI shell/file
   permissions and application function approvals are different trust boundaries.
 
-#### `apps/agent-service/tests/UnitTests/WingmanToolAdapterTests.cs` (new)
+#### `apps/UnitTests/WingmanToolAdapterTests.cs` (new)
 
 - Assert one function per descriptor and no `call_wingman_tool` router.
 - Assert name, description, and schema preservation.
@@ -142,14 +142,14 @@ The pre-change baseline is:
 - Do not introduce an in-memory `StreamingRun` dependency.
 - Only adjust exception/terminal handling if required by the typed workflow result.
 
-#### `apps/agent-service/tests/UnitTests/WorkflowIntegrationTests.cs`
+#### `apps/UnitTests/WorkflowIntegrationTests.cs`
 
 - Preserve the plan-only no-mutation acceptance test.
 - Add verify-fail -> repair -> pass routing.
 - Add verify-fail-at-limit terminal behavior.
 - Assert a second run receives no state from the first.
 
-#### `apps/agent-service/tests/UnitTests/AgentFrameworkPackageContractTests.cs`
+#### `apps/UnitTests/AgentFrameworkPackageContractTests.cs`
 
 - Assert stable workflow APIs used by production code are present: `WorkflowBuilder`,
   `MessageHandlerAttribute`, `InProcessExecution`, and `WorkflowOutputEvent`.

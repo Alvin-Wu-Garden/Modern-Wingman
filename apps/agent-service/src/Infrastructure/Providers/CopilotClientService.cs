@@ -3,6 +3,9 @@ using AgentService.Application.Models;
 using GitHub.Copilot;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace AgentService.Infrastructure.Providers;
 
@@ -20,6 +23,7 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICo
 {
     private readonly AgentServiceOptions _options;
     private readonly IProviderSettingStore _settingStore;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<CopilotClientService> _logger;
     private CopilotClient? _client;
     private readonly CancellationTokenSource _lifetime = new();
@@ -32,10 +36,12 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICo
     public CopilotClientService(
         IOptions<AgentServiceOptions> options,
         IProviderSettingStore settingStore,
+        IHttpClientFactory httpClientFactory,
         ILogger<CopilotClientService> logger)
     {
         _options = options.Value;
         _settingStore = settingStore;
+        _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
 
@@ -85,7 +91,17 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICo
         if (!status.IsAuthenticated)
             throw new InvalidOperationException(status.Error ?? "GitHub PAT 無法使用 GitHub Copilot。");
 
-        _logger.LogInformation("Bundled Copilot runtime 已完成 PAT 驗證 (帳號: {Login})。", status.Login);
+        if (string.IsNullOrWhiteSpace(status.Login))
+        {
+            _logger.LogInformation(
+                "Bundled Copilot runtime 已完成 PAT 驗證，但 GitHub 未提供帳號名稱。");
+        }
+        else
+        {
+            _logger.LogInformation(
+                "Bundled Copilot runtime 已完成 PAT 驗證（帳號：{Login}）。",
+                status.Login);
+        }
     }
 
     /// <summary>
@@ -200,7 +216,7 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICo
         UseLoggedInUser = false,
     };
 
-    private static async Task<CopilotRuntimeStatus> BuildStatusAsync(
+    private async Task<CopilotRuntimeStatus> BuildStatusAsync(
         CopilotClient client,
         string githubToken,
         CancellationToken ct)
@@ -214,12 +230,88 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICo
         try { modelCount = (await client.ListModelsAsync(ct)).Count; }
         catch { /* 帳號已驗證時，模型清單失敗不應掩蓋認證成功。 */ }
 
-        return CopilotRuntimeStatus.Configured(
+        // 直接傳入 PAT 時，Copilot runtime 可能只回傳已驗證狀態而沒有 Login。
+        // 此時才使用同一支 PAT 查詢 GitHub authenticated-user API；SDK 已提供
+        // Login 時不發出額外網路請求。
+        using var identityClient = _httpClientFactory.CreateClient("key-validator");
+        var login = await ResolveGitHubLoginAsync(
+            identityClient,
             auth.Login,
+            githubToken,
+            ct);
+
+        return CopilotRuntimeStatus.Configured(
+            login,
             auth.AuthType?.ToString(),
             null,
             modelCount);
     }
+
+    /// <summary>
+    /// 解析 PAT 所代表的 GitHub Login。Copilot SDK 已提供名稱時直接沿用；只有名稱
+    /// 缺漏時才以唯讀 GET /user 補查。補查是顯示資訊，不是認證依據，因此 GitHub
+    /// API 暫時失敗、拒絕或回傳格式異常時只回傳 null，不得推翻已成功的 Copilot 認證。
+    /// </summary>
+    /// <param name="httpClient">由 IHttpClientFactory 建立、已套用逾時與 User-Agent 的 client。</param>
+    /// <param name="sdkLogin">Copilot SDK 回傳的 Login；有值時優先使用。</param>
+    /// <param name="githubToken">已通過 Copilot 驗證的 PAT，只放入 Authorization header。</param>
+    /// <param name="ct">呼叫端取消權杖；使用者取消時必須向上傳遞。</param>
+    /// <returns>GitHub Login；無法安全取得時回傳 null。</returns>
+    internal static async Task<string?> ResolveGitHubLoginAsync(
+        HttpClient httpClient,
+        string? sdkLogin,
+        string githubToken,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(httpClient);
+
+        if (!string.IsNullOrWhiteSpace(sdkLogin))
+            return sdkLogin.Trim();
+
+        try
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                "https://api.github.com/user");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", githubToken);
+            request.Headers.Accept.Add(
+                new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+
+            using var response = await httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                ct);
+            if (!response.IsSuccessStatusCode)
+                return null;
+
+            await using var stream = await response.Content.ReadAsStreamAsync(ct);
+            var user = await JsonSerializer.DeserializeAsync<GitHubUserResponse>(
+                stream,
+                cancellationToken: ct);
+            return string.IsNullOrWhiteSpace(user?.Login)
+                ? null
+                : user.Login.Trim();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (
+            ex is HttpRequestException or
+            OperationCanceledException or
+            JsonException or
+            InvalidOperationException)
+        {
+            // Login 只是非機敏顯示資訊。不要記錄例外內容，避免底層 HTTP 訊息
+            // 意外包含認證資訊，也不要讓補查失敗改變 Copilot 的成功狀態。
+            return null;
+        }
+    }
+
+    /// <summary>GitHub GET /user 僅需反序列化公開 Login，不擴大讀取其他個資。</summary>
+    private sealed record GitHubUserResponse(
+        [property: JsonPropertyName("login")] string? Login);
 
     private async Task StopClientInternalAsync()
     {

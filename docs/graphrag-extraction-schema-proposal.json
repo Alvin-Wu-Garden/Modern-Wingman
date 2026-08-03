@@ -1,0 +1,292 @@
+{
+  "$schema": "modern-wingman/graphrag-extraction-proposal/v1",
+  "說明": "GraphRAG V4 抽取提案：節點、邊、社群的完整 schema 與範例。基於 2026-07-29 對 FBL_SPV_SIT 資料庫與前次索引圖（16,962 節點/23,532 邊）的實測結果設計。",
+
+  "nodeSchema": {
+    "共通屬性": {
+      "id": "string，確定性 ID，格式 {kind}:{source}:{logicalKey}，跨索引執行必須穩定",
+      "kind": "enum: Feature | EntryPoint | Code | Data（維持 V3 四分類，不新增 kind）",
+      "role": "string，細分角色，白名單管制",
+      "name": "string，人類可讀短名稱",
+      "searchableText": "string，BM25 索引用去噪文字（名稱+別名+方法名+中文功能描述）",
+      "aliases": "string[]，業務別名（菜單編號、中文名、路由片段）",
+      "filePath": "string|null，相對路徑；DB 節點為 null",
+      "startLine": "int|null",
+      "endLine": "int|null",
+      "state": "enum: active | inactive | unresolved | shared",
+      "degreeHint": "int，索引時預計算的度數，供檢索排序，避免孤立節點浪費 BM25 名額",
+      "communityId": "string，primary 社群 ID（離線預算好，查詢 O(1) 讀取）"
+    },
+
+    "nodeTypes": [
+      {
+        "kind": "Feature",
+        "role": "menu-feature",
+        "抽取來源": "tblMenuMap（live DB）",
+        "抽取規則": "只抽 Released=1 AND ISNULL(LinkAddress,'')<>'' AND ID NOT LIKE '88%'（實測 1497→698 筆，消除 53% 孤立菜單）；保留 Parent 欄位供階層社群使用",
+        "範例": {
+          "id": "feature:menu:10006",
+          "kind": "Feature",
+          "role": "menu-feature",
+          "name": "10006-海外商品每日市價上傳",
+          "searchableText": "海外商品每日市價上傳 Position105U 市價 上傳",
+          "aliases": ["10006", "Position105U", "海外商品每日市價上傳"],
+          "attributes": {
+            "menuId": "10006",
+            "parentMenuId": "1",
+            "linkAddress": "/Position105U/Index/",
+            "released": "true"
+          },
+          "state": "active",
+          "degreeHint": 3,
+          "communityId": "community:menu:1"
+        }
+      },
+      {
+        "kind": "EntryPoint",
+        "role": "controller-action",
+        "抽取來源": "Roslyn（route attribute / MVC 慣例）",
+        "抽取規則": "維持現行；但只保留「被 Feature ROUTES_TO 或所屬 Controller 有 CALLS 出邊」的 action，其餘降級為 Controller 節點 attributes.actions 清單，減少 4,659 個 EntryPoint 中的殭屍節點",
+        "範例": {
+          "id": "entry:web:Position105U/Upload",
+          "kind": "EntryPoint",
+          "role": "controller-action",
+          "name": "Position105UController.Upload",
+          "searchableText": "Position105U Upload 海外商品 市價上傳",
+          "aliases": ["POST /Position105U/Upload"],
+          "attributes": {
+            "httpMethod": "POST",
+            "route": "/Position105U/Upload",
+            "controllerType": "RiskMaster_Web.Controllers.Position105UController"
+          },
+          "filePath": "RiskMaster_Web/Controllers/Position105UController.cs",
+          "startLine": 42,
+          "endLine": 88,
+          "state": "active",
+          "degreeHint": 4,
+          "communityId": "community:menu:1"
+        }
+      },
+      {
+        "kind": "Code",
+        "role": "type（controller|business-service|repository|data-model|module 等）",
+        "抽取來源": "Roslyn semantic model（兩階段策略）",
+        "抽取規則": "第一階段：全量 9,638 檔案做 syntax-only 抽 type 宣告與跨 type 呼叫（marker filter 補上 dal|query|provider|datacontainer|dbdefinition|repository）；第二階段：只對『從任一 EntryPoint 可達』的 type 做深度抽取。索引尾聲刪除度數為 0 的 Code:type（前次索引 5,096 個中有 3,600 個孤立，佔 71%，純雜訊）",
+        "範例": {
+          "id": "code:csharp:RMDAL.Position105",
+          "kind": "Code",
+          "role": "repository",
+          "name": "Position105",
+          "searchableText": "Position105 RMDAL GetMarketPrice SaveUploadBatch 海外商品市價",
+          "aliases": ["RMDAL.Position105"],
+          "attributes": {
+            "namespace": "RMDAL",
+            "methods": "GetMarketPrice | SaveUploadBatch | ValidatePrice",
+            "baseTypes": "DALBase",
+            "constructorDependencies": "IDbConnectionFactory"
+          },
+          "filePath": "RMDAL/Position105.cs",
+          "startLine": 12,
+          "endLine": 240,
+          "state": "active",
+          "degreeHint": 6,
+          "communityId": "community:menu:1"
+        }
+      },
+      {
+        "kind": "EntryPoint",
+        "role": "frontend-page（新增 AspxGraphExtractor）",
+        "抽取來源": ".aspx 檔案（638 個，現行完全未索引）＋ Roslyn 抽 return View(\"名稱\")",
+        "抽取規則": "鏈路中樞修復：(1) 新增 .aspx 到掃描副檔名，Views/{Controller}/{ViewName}.aspx 建 frontend-page 節點；(2) 解析 <script src=JSPath(...)> 取得該頁 include 的 js/tsx 清單，建 HANDLES 邊指向前端模組；(3) Roslyn 補抽 controller action 內 return View(\"x\")，建 action -DISPATCHES_TO-> frontend-page 邊（同名 View 依 MVC 慣例先找同 controller 資料夾）；(4) FrontendGraphExtractor 的 IsPage 判斷補上單數 'view' 資料夾（FBL 是 Scripts/View，現行只認複數 views 導致全圖僅 1 個 frontend-page）",
+        "範例": {
+          "id": "entry:page:riskmaster_web/views/alternativefund/frmalternativefund.aspx",
+          "kind": "EntryPoint",
+          "role": "frontend-page",
+          "name": "frmAlternativeFund",
+          "searchableText": "frmAlternativeFund AlternativeFund 另類基金 基本資料維護",
+          "attributes": { "viewName": "frmAlternativeFund", "controllerFolder": "AlternativeFund", "includedScripts": "View/frmAlternativeFund.js | CommonComponents/AsyncConfirmCore.js" },
+          "filePath": "RiskMaster_Web/Views/AlternativeFund/frmAlternativeFund.aspx",
+          "state": "active",
+          "communityId": "community:menu:200298"
+        }
+      },
+      {
+        "kind": "Data",
+        "role": "table | view | procedure | function",
+        "抽取來源": "live DB sys catalog（sys.tables/sys.objects/sys.sql_expression_dependencies）＋ .sql 檔案 ScriptDom 補行號",
+        "抽取規則": "table/view 維持現行；procedure/function 改為以 sys catalog 為權威來源（前次只抽到 16 個 SP，DB 實際有 109 SP + 105 TVF + 48 scalar function），.sql 檔案存在時才補 filePath/行號證據",
+        "範例": {
+          "id": "data:sql:FBL_SPV_SIT/dbo/table/tblPosition105",
+          "kind": "Data",
+          "role": "table",
+          "name": "tblPosition105",
+          "searchableText": "tblPosition105 海外商品 市價 Position105",
+          "aliases": ["dbo.tblPosition105"],
+          "attributes": {
+            "schema": "dbo",
+            "columnCount": "18",
+            "primaryKey": "ID",
+            "rowCountBucket": "10k-100k"
+          },
+          "filePath": null,
+          "state": "active",
+          "degreeHint": 9,
+          "communityId": "community:menu:1"
+        }
+      }
+    ]
+  },
+
+  "edgeSchema": {
+    "設計原則": "邊上只存『結構化、可排序』的小欄位；完整 evidence 清單移出 Neo4j 存 SQLite（以 edgeId 反查）。前次索引 evidenceJson 平均 717B/邊、最大 85KB、全圖 16MB，遍歷 I/O 與 prompt token 都被拖累。",
+    "共通屬性": {
+      "id": "SHA-256(sourceId + kind + targetId)",
+      "kind": "九種之一：ROUTES_TO | HANDLES | CALLS | DISPATCHES_TO | TRIGGERS | READS | WRITES | MAPS_TO | DEPENDS_ON",
+      "weight": "float 0~1，索引時寫死在邊上（取代查詢時 hardcode 常數），公式見 weightRules",
+      "confidence": "enum: certain | probable | inferred（取所有 evidence 最高者）",
+      "evidenceCount": "int，觀察次數（同一對 source/target 出現幾處）",
+      "reasonCode": "enum 代碼（取代中文散文 Reason）：roslyn-invocation | roslyn-route | scriptdom-read | scriptdom-write | sys-dependency | menu-link | menu-link-base64 | roslyn-view-result | aspx-script-include | es-import | fk-constraint | naming-convention",
+      "topArtifact": "string，一筆代表性檔案路徑",
+      "topLine": "int|null，代表性行號",
+      "sourceMethod": "string|null，來源方法名（供未來方法級排序，不建方法節點）",
+      "targetMethod": "string|null"
+    },
+    "weightRules": {
+      "base": { "ROUTES_TO": 1.0, "HANDLES": 0.95, "TRIGGERS": 0.95, "DISPATCHES_TO": 0.9, "WRITES": 0.9, "READS": 0.85, "MAPS_TO": 0.85, "CALLS": 0.75, "DEPENDS_ON": 0.7 },
+      "調整": [
+        "confidence=inferred（naming/regex 推得）→ ×0.8",
+        "跨 namespace 的 CALLS → ×0.9（跨模組間接引用降權）",
+        "evidenceCount>=3 → ×1.1（封頂 1.0，多處觀察提升可信度）",
+        "目標為 utility/logging 類 type（LogHelper 等黑名單）→ ×0.5"
+      ]
+    },
+    "edgeTypes": [
+      {
+        "kind": "ROUTES_TO",
+        "方向": "Feature → EntryPoint",
+        "語意": "菜單的 LinkAddress 對應到 controller action，是使用者→程式碼最可靠的錨點鏈",
+        "範例": {
+          "id": "sha256:...",
+          "kind": "ROUTES_TO",
+          "source": "feature:menu:10006",
+          "target": "entry:web:Position105U/Index",
+          "weight": 1.0,
+          "confidence": "certain",
+          "evidenceCount": 1,
+          "reasonCode": "menu-link",
+          "topArtifact": "db:tblMenuMap",
+          "topLine": null
+        }
+      },
+      {
+        "kind": "HANDLES",
+        "方向": "EntryPoint → Code",
+        "語意": "action 由哪個 controller type 實作",
+        "範例": { "source": "entry:web:Position105U/Upload", "target": "code:csharp:RiskMaster_Web.Controllers.Position105UController", "weight": 0.95, "confidence": "certain", "reasonCode": "roslyn-route", "topArtifact": "RiskMaster_Web/Controllers/Position105UController.cs", "topLine": 42 }
+      },
+      {
+        "kind": "CALLS",
+        "方向": "Code → Code",
+        "語意": "跨 type 方法呼叫；sourceMethod/targetMethod 記在邊上供排序，不建方法節點",
+        "範例": { "source": "code:csharp:RiskMaster_Web.Controllers.Position105UController", "target": "code:csharp:RMDAL.Position105", "weight": 0.75, "confidence": "certain", "evidenceCount": 4, "reasonCode": "roslyn-invocation", "topArtifact": "RiskMaster_Web/Controllers/Position105UController.cs", "topLine": 61, "sourceMethod": "Upload", "targetMethod": "SaveUploadBatch" }
+      },
+      {
+        "kind": "READS / WRITES",
+        "方向": "Code → Data 或 Data(procedure/view) → Data(table)",
+        "語意": "程式碼或 SP/View 對表的讀寫；SP→Table 一律用 sys.sql_expression_dependencies 補全（不依賴 .sql 檔存在）",
+        "範例": { "source": "data:sql:FBL_SPV_SIT/dbo/procedure/uspSavePosition105", "target": "data:sql:FBL_SPV_SIT/dbo/table/tblPosition105", "kind": "WRITES", "weight": 0.9, "confidence": "certain", "reasonCode": "sys-dependency", "topArtifact": "db:sys.sql_expression_dependencies" }
+      },
+      {
+        "kind": "DISPATCHES_TO",
+        "方向": "Feature → Code（動態分派）",
+        "語意": "動態路由菜單直達實作類。兩種來源：(1) /PluginReport/MenuIndex/{base64} → 解碼得 dll/FQN，邊指向 Roslyn 已抽的 code:csharp:{FQN}（反射產報表）；(2) /CustomReport/MenuIndex/{guid} → 現行 CustomReportRouteRegex 已處理，guid 對應 tblCustomDesignRiskReportTemplate.TemplateID。前次索引實測：39 個 plugin 菜單全部匯到同一個 PluginReport/MenuIndex 入口（假連通），base64 未解碼導致菜單與 *_ReportKernel 類斷鏈",
+        "解析失敗處理": "FQN 在圖中不存在時，建 state=unresolved 的 stub Code 節點並掛邊，誠實呈現『菜單宣稱的報表類在原始碼中找不到』",
+        "範例": { "source": "feature:menu:79004", "target": "code:csharp:PlugIn_Report_FBL.InterestIncomeAnlz_ReportKernel", "kind": "DISPATCHES_TO", "weight": 0.9, "confidence": "certain", "reasonCode": "menu-link-base64", "topArtifact": "db:tblMenuMap", "topLine": null }
+      },
+      {
+        "kind": "DISPATCHES_TO / HANDLES",
+        "方向": "EntryPoint(controller-action) → EntryPoint(frontend-page) → Code(frontend module)",
+        "語意": "UI 修改定位鏈（現行完全斷裂，實測 menu→frmalternativefund.js 路徑數為 0）：action 的 return View(\"frmAlternativeFund\") 建 DISPATCHES_TO 指向 aspx page；aspx 的 <script src> include 建 HANDLES 指向 js/tsx 模組。回答『這個畫面要改哪支前端』的必要鏈路",
+        "範例": [
+          { "source": "entry:web:AlternativeFund/Index", "target": "entry:page:.../frmalternativefund.aspx", "kind": "DISPATCHES_TO", "weight": 0.95, "confidence": "certain", "reasonCode": "roslyn-view-result", "topArtifact": "RiskMaster_Web/Controllers/AlternativeFundController.cs", "topLine": 18 },
+          { "source": "entry:page:.../frmalternativefund.aspx", "target": "code:frontend:riskmaster_web/scripts/view/frmalternativefund.js", "kind": "HANDLES", "weight": 0.95, "confidence": "certain", "reasonCode": "aspx-script-include", "topArtifact": "RiskMaster_Web/Views/AlternativeFund/frmAlternativeFund.aspx", "topLine": 4 }
+        ]
+      },
+      {
+        "kind": "CALLS",
+        "方向": "Code(frontend module) → Code(frontend module)",
+        "語意": "新增：tsx/js 的 ES import 關係（僅限相對路徑 import，不追 npm 套件）。React 頁面 tsx import component、fetch 呼叫在 component 層（如 RMCommonLib.Fetch），沒有這條邊則『頁面→component→後端』斷在中間。實測 562 個 tsx 只有 151 個進圖（其餘因非 page 且無 URL 被丟棄），有了 import 邊後 component 因可達而保留",
+        "範例": { "source": "code:frontend:riskmaster_web/scripts/view/frmannouncement.tsx", "target": "code:frontend:riskmaster_web/scripts/component/frmannouncement/mainpanel.tsx", "kind": "CALLS", "weight": 0.8, "confidence": "certain", "reasonCode": "es-import", "topArtifact": "RiskMaster_Web/Scripts/View/frmAnnouncement.tsx", "topLine": 7 }
+      },
+      {
+        "kind": "DEPENDS_ON",
+        "方向": "Data(table) → Data(table)",
+        "語意": "新增：FK 約束（DB 實測有 463 條，目前幾乎沒用到）。影響範圍分析最便宜最準的訊號",
+        "範例": { "source": "data:sql:FBL_SPV_SIT/dbo/table/tblPosition105Detail", "target": "data:sql:FBL_SPV_SIT/dbo/table/tblPosition105", "weight": 0.7, "confidence": "certain", "reasonCode": "fk-constraint", "topArtifact": "db:sys.foreign_keys" }
+      }
+    ],
+    "sqliteEvidenceStore": {
+      "說明": "完整 evidence（含繁中 Reason 散文、全部 Details）移到 SQLite，Neo4j 邊只留上述小欄位",
+      "table": "graph_edge_evidence(edge_id TEXT, seq INT, source TEXT, confidence TEXT, artifact TEXT, reason TEXT, start_line INT, end_line INT, details_json TEXT, PRIMARY KEY(edge_id, seq))"
+    }
+  },
+
+  "communitySchema": {
+    "設計原則": "以 tblMenuMap 樹為權威的兩層階層社群（primary），Leiden 只負責無菜單入口的孤兒節點（secondary）。前次索引 primary 只有 3 個超大社群、secondary 有 1,930 個碎片社群（平均 2-3 成員），兩者都不可用。",
+    "tiers": [
+      {
+        "tier": "C0-模組層",
+        "來源": "tblMenuMap 頂層節點（Parent 指向 Root 的那一層），過濾條件同節點抽取規則",
+        "預期數量": "10~20 個",
+        "用途": "Global Search 第一層漏斗：問題先比對 C0 摘要決定進哪個模組",
+        "範例": {
+          "communityId": "community:menu:1",
+          "tier": "C0",
+          "title": "1-系統設定",
+          "summary": "系統參數、權限、排程、密碼規則、市價上傳等基礎設定模組。核心資料表：tblSystemParameter、tblAuthMap、tblScheduleConfig。",
+          "memberCount": 120,
+          "childCommunityIds": ["community:menu:10006", "community:menu:10004"],
+          "topTables": ["tblSystemParameter", "tblAuthMap"],
+          "topEntryPoints": ["entry:web:Position105U/Index"]
+        }
+      },
+      {
+        "tier": "C1-功能層",
+        "來源": "每個葉子菜單 Feature ＋ 其 ROUTES_TO/HANDLES/CALLS/READS/WRITES 可達的節點閉包（depth<=4、weight>=0.7）",
+        "預期數量": "≈698 個（過濾後菜單數）",
+        "用途": "Local Search 錨點：菜單即社群，回答『這個功能動到哪些程式與表』",
+        "範例": {
+          "communityId": "community:menu:10006",
+          "tier": "C1",
+          "parentCommunityId": "community:menu:1",
+          "title": "10006-海外商品每日市價上傳",
+          "summary": "使用者由選單上傳海外商品市價檔，Position105UController 解析後經 RMDAL.Position105 寫入 tblPosition105，並觸發 uspSavePosition105 檢核。",
+          "memberIds": ["feature:menu:10006", "entry:web:Position105U/Upload", "code:csharp:RMDAL.Position105", "data:sql:FBL_SPV_SIT/dbo/table/tblPosition105"],
+          "memberCount": 6
+        }
+      },
+      {
+        "tier": "C2-孤兒補集",
+        "來源": "對『未被任何 C1 覆蓋』的節點跑 Leiden（排程、MQ consumer、無菜單入口的 batch），成員數 < 3 的社群直接丟棄不產報告",
+        "預期數量": "≈30~80 個（取代目前 1,930 個碎片）",
+        "用途": "覆蓋排程/批次類功能的 Global Search",
+        "範例": {
+          "communityId": "community:leiden:swap-rate-batch",
+          "tier": "C2",
+          "title": "Bloomberg 掉期點差批次擷取",
+          "summary": "RMScheduleService 定時擷取 Bloomberg 掉期點差並寫入 tblSwapPoint，供評價引擎讀取。",
+          "memberCount": 9
+        }
+      }
+    ],
+    "報告產生": "C0/C1 摘要以確定性模板組出骨架，LLM 離線潤飾 2-4 句繁中；cacheKey = 成員 evidence digest + prompt 版本，成員不變不重生。"
+  },
+
+  "引用關係總覽": {
+    "檢索主鏈": "Feature(menu) -ROUTES_TO-> EntryPoint(action) -HANDLES-> Code(controller) -CALLS-> Code(service/repository) -READS/WRITES-> Data(table)",
+    "UI修改定位鏈": "EntryPoint(action) -DISPATCHES_TO-> EntryPoint(frontend-page/.aspx) -HANDLES-> Code(js/tsx) -CALLS(es-import)-> Code(component) -ROUTES_TO-> EntryPoint(後端 action)",
+    "資料庫內部鏈": "Data(procedure/view) -READS/WRITES-> Data(table) -DEPENDS_ON(FK)-> Data(table)",
+    "排程鏈": "Feature(schedule) -TRIGGERS-> EntryPoint(scheduled-task) -HANDLES-> Code -...-> Data",
+    "社群對應": "每個節點的 communityId 指向其 C1 社群；C1 的 parentCommunityId 指向 C0；孤兒節點指向 C2"
+  }
+}

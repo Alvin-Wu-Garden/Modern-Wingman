@@ -118,7 +118,7 @@ export const MessageComposer = memo(function MessageComposer({
           className="hidden"
           type="file"
           multiple
-          accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.docx,.txt,.md,.csv,.json,.xml,.yaml,.yml,.cs,.java,.js,.ts,.tsx,.py"
+          accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.docx,.txt,.md,.csv,.json,.xml,.yaml,.yml,.cs,.js,.ts,.tsx,.py"
           onChange={(event) => void handleAttachmentChange(event)}
         />
         {attachments.length > 0 && (

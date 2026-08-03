@@ -139,7 +139,7 @@ export function MarkdownRenderer({ content, streaming }: MarkdownRendererProps) 
           },
           th({ children }) {
             return (
-              <th className="border border-zinc-700 px-3 py-1.5 bg-zinc-800 font-semibold text-left">
+              <th className="border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-left font-semibold text-zinc-100">
                 {children}
               </th>
             )
