@@ -909,6 +909,9 @@ public sealed class GraphIndexWatcherService(
         {
             return;
         }
+        // 原始碼工具共用的目錄與內容快取只失效異動檔案，下一次查詢再惰性重建；
+        // 這不會觸發同步索引，也不會讓當前問答等待完整 Catch-up。
+        ProjectAnalysisTools.InvalidateFileCatalog(path);
         if (_debounces.TryRemove(projectId, out var previous))
         {
             previous.Cancel();

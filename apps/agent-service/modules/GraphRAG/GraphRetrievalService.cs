@@ -81,6 +81,7 @@ public sealed class GraphRetrievalService
     private readonly GraphRetrievalOptions _options;
     private readonly ILogger<GraphRetrievalService> _logger;
     private readonly ILlmCompletionService? _llm;
+    private readonly SemaphoreSlim _queryConcurrency = new(4, 4);
 
     /// <summary>建立 FBL Graph 檢索服務。</summary>
     public GraphRetrievalService(
@@ -464,12 +465,24 @@ public sealed class GraphRetrievalService
             1,
             30);
         var perQuery = Math.Clamp(effectiveLimit / 2, 3, 8);
-        var resultSets = await Task.WhenAll(selectedQueries.Select(query =>
-            SearchOneQueryAsync(
-                projectId,
-                query,
-                perQuery,
-                cancellationToken)));
+        // 同一輪查詢變體最多四個同時進入 Neo4j；保留全部候選與原有排序，
+        // 只限制資料庫連線尖峰，避免多個使用者同時問答時形成無上限 Task.WhenAll。
+        var resultSets = await Task.WhenAll(selectedQueries.Select(async query =>
+        {
+            await _queryConcurrency.WaitAsync(cancellationToken);
+            try
+            {
+                return await SearchOneQueryAsync(
+                    projectId,
+                    query,
+                    perQuery,
+                    cancellationToken);
+            }
+            finally
+            {
+                _queryConcurrency.Release();
+            }
+        }));
 
         return resultSets
             .SelectMany(values => values)

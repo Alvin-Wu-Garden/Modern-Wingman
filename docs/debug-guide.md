@@ -1,201 +1,144 @@
 # Modern Wingman — VS Code 偵錯與啟動手冊
 
-## 目錄
+本專案目前只有一個推薦的全端 Debug 組態：`Modern Wingman（全端 Debug）`。
+它由 VS Code 啟動 Agent Service 與 Tauri，前置 task 只清理可驗證的舊程序、建置 Vite
+相依服務並啟動 Vite；按下停止後會執行同一套 ownership-aware 清理流程。
 
-1. [前置需求](#1-前置需求)
-2. [VS Code 組態說明](#2-vs-code-組態說明)
-3. [偵錯 Agent Service 與啟動 Wingman（推薦）](#3-偵錯-agent-service-與啟動-wingman推薦)
-4. [附加到已執行的 Agent Service](#4-附加到已執行的-agent-service)
-5. [設定中斷點](#5-設定中斷點)
-6. [聊天室訊息的呼叫鏈](#6-聊天室訊息的呼叫鏈)
-7. [常見問題排除](#7-常見問題排除)
+## 1. 固定本機服務
 
----
+| 服務 | 位址 | 啟動責任 |
+|---|---|---|
+| Vite | `http://127.0.0.1:4173` | `scripts/dev/start-all.ps1` |
+| Agent Service REST／SSE | `http://127.0.0.1:5002` | VS Code `dotnet` debugger |
+| Neo4j Bolt | `bolt://127.0.0.1:17688` | Agent Service managed runtime（需要時啟動） |
+| Tauri Desktop | 無固定 TCP port | VS Code `node-terminal` debugger |
 
-## 1. 前置需求
+Neo4j Browser 的 HTTP port 由 Neo4j 自己的設定管理，不應在 Debug task 內另外猜測或
+重複啟動。若固定 port 被其他程式占用，前置 task 會顯示 PID、程序名稱與路徑並停止，
+不會靜默換 port 或誤殺未知程序。
 
-### 安裝 VS Code 擴充套件
+## 2. 前置需求
 
-開啟 VS Code 擴充套件面板（`Ctrl+Shift+X`），搜尋並安裝：
+請先安裝：
 
-| 擴充套件 | 用途 |
-|---------|------|
-| **C# Dev Kit** (`ms-dotnettools.csdevkit`) | .NET debug 支援（必裝） |
-| **C#** (`ms-dotnettools.csharp`) | 語言支援 |
+- .NET 10 SDK
+- Node.js 24 與 pnpm
+- Rust stable、Cargo
+- VS Code 的 C# Dev Kit（`ms-dotnettools.csdevkit`）與 C# 擴充套件
 
----
+## 3. 推薦的全端 Debug 流程
 
-## 2. VS Code 組態說明
+1. 關閉其他正在使用 `4173`、`5002` 或 `17688` 的本專案程序。
+2. 在 VS Code 按 `Ctrl+Shift+D` 開啟「執行與偵錯」。
+3. 選擇唯一的 `Modern Wingman（全端 Debug）`。
+4. 按 `F5`。
 
-「執行與偵錯」面板提供下列組態（定義於 `.vscode/launch.json`）：
+前置 task 會執行：
 
-| 配置名稱 | 適用情境 |
-|---------|---------|
-| **偵錯 Agent Service + Wingman** | 編譯並偵錯 .NET Agent Service，同時用 `start-all.ps1 -DesktopOnly` 啟動 Tauri/Vite 桌面程式 |
-| **偵錯 Agent Service** | 只由 VS Code 編譯並偵錯 .NET 服務 |
-| **附加至 Agent Service（已在執行）** | 從程序清單附加到已由 `start-all.ps1` 啟動的 `AgentService` |
-| **啟動 Wingman（start-all.ps1）** | 只執行 `start-all.ps1 -DesktopOnly` |
-| **啟動 Agent Service（start-all.ps1）** | 只執行 `start-all.ps1 -AgentOnly` |
-| **啟動全部（start-all.ps1）** | 執行不帶參數的 `start-all.ps1`，開啟 Agent Service 與 Wingman |
-
----
-
-## 3. 偵錯 Agent Service 與啟動 Wingman（推薦）
-
-> 使用此方法時，請先關閉其他已執行的 Agent Service，避免 API 連接埠衝突。
-
-**步驟：**
-
-1. 按 `Ctrl+Shift+D` 開啟「執行與偵錯」面板
-
-2. 在頂部下拉選單選擇 **「偵錯 Agent Service + Wingman」**
-
-3. 按 `F5` 啟動
-
-VS Code 會自動執行以下步驟：
-- 編譯 `AgentService.csproj`
-- 啟動 Agent Service 並附加 .NET debugger
-- 呼叫 `scripts/dev/start-all.ps1 -DesktopOnly`
-- 自動選擇可用的 Vite 開發連接埠並開啟 Tauri Wingman 視窗
-
-若只需要其中一個程序，可改選 **「偵錯 Agent Service」** 或
-**「啟動 Wingman（start-all.ps1）」**。
-
----
-
-## 4. 附加到已執行的 Agent Service
-
-> 使用此方法不需停止服務，適合服務已在運行時臨時加入 debug。
-
-**步驟：**
-
-1. 從「執行與偵錯」選擇 **「啟動全部（start-all.ps1）」**，或在終端機執行：
-
-   ```powershell
-   .\scripts\dev\start-all.ps1
-   ```
-
-2. 按 `Ctrl+Shift+D` 開啟「執行與偵錯」面板
-
-3. 在頂部下拉選單選擇 **「附加至 Agent Service（已在執行）」**
-
-4. 按 `F5`，在程序清單中選擇 `AgentService.exe`
-
-除了偵錯面板，也可以按 `Ctrl+Shift+P` 執行 **Tasks: Run Task**，再選擇：
-
-- `start: agent-service`
-- `start: wingman`
-- `start: all`
-
----
-
-## 5. 設定中斷點
-
-在程式碼行號左側點一下即可設定中斷點（紅點 🔴）。
-
-按 `F5` 後，當程式執行到該行會自動暫停，可以：
-
-| 快捷鍵 | 功能 |
-|--------|------|
-| `F5` | 繼續執行 |
-| `F10` | 單步執行（不進入函式） |
-| `F11` | 單步進入（進入函式內部） |
-| `Shift+F11` | 跳出目前函式 |
-| `Ctrl+Shift+F5` | 重新啟動 |
-| `Shift+F5` | 停止偵錯 |
-
----
-
-## 6. 聊天室訊息的呼叫鏈
-
-當使用者在聊天室送出訊息時，程式的執行順序如下。建議依序在以下位置設定中斷點：
-
-### ① HTTP 入口（最先到達）
-
-**檔案：** `apps/agent-service/src/Host/RestEndpoints/ConversationEndpoints.cs`
-
-**位置：** `SendMessage` 方法（`private static async Task SendMessage(...)`）
-
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\dev\start-all.ps1 -SkipBuild
 ```
+
+接著 VS Code 會啟動可掛中斷點的 Agent Service 與 Tauri。Vite 已就緒後才會繼續，
+所以前端不會在服務尚未準備好時先開啟。
+
+按 `Shift+F5` 停止時，`modern-wingman: stop all` 只會清理本輪 runtime manifest、
+固定 workspace 執行檔與已驗證的 managed Neo4j launcher；未知程序會保留並提示，避免
+影響其他應用程式。
+
+## 4. 手動啟動相依服務
+
+只有在不需要 VS Code debugger 時才直接執行：
+
+```powershell
+.\scripts\dev\start-all.ps1
+```
+
+停止：
+
+```powershell
+.\scripts\dev\stop-all.ps1
+```
+
+若只想驗證啟動前清理與 Vite，可使用 `-SkipBuild`；不要再使用舊的
+`-DesktopOnly`、`-AgentOnly` 或多組 launch profile。
+
+## 5. 設定中斷點與聊天呼叫鏈
+
+### HTTP／SSE 入口
+
+檔案：`apps/agent-service/src/Host/RestEndpoints/ConversationEndpoints.cs`
+
+方法：`SendMessage`
+
+```text
 POST /api/conversations/{id}/messages
-↓
-ConversationEndpoints.SendMessage()   ← 在此設中斷點，可查看完整 request 內容
+  ↓
+ConversationEndpoints.SendMessage
+  ↓
+短時間探測 Graph（Ready／Stale／Unavailable）
+  ↓
+GraphRAG prompt，或 source-only fallback
+  ↓
+WingmanChatAgent.RunStreamingAsync
 ```
 
-在此可以查看：
-- `request.UserMessage`：使用者輸入的訊息
-- `request.ProjectId`：關聯的專案
-- `request.AgentMode`：Agent 模式（Plan / Auto / FullAuto）
+### Agent 串流推論
 
----
+檔案：`apps/agent-service/src/Infrastructure/AgentFramework/WingmanChatAgent.cs`
 
-### ② 建立執行記錄
+方法：`RunStreamingAsync`
 
-同一個檔案往下，`run.Status = RunStatus.Running` 附近可查看 Run 物件的完整內容。
+專案問答會額外提供下列唯讀工具：
 
----
+- `search_project_graph`
+- `trace_project_graph_paths`
+- `search_project_text`
+- `find_csharp_symbol`
+- `read_project_file_range`
 
-### ③ AI 串流推論
+Graph 不可用時仍會建立這些工具，Agent 必須區分已確認事實、合理推論與未知缺口。
 
-**檔案：** `apps/agent-service/src/Infrastructure/AgentFramework/WingmanChatAgent.cs`
+## 6. 常見問題
 
-**位置：** `RunStreamingAsync` 方法
+### Port 已被占用
 
-```
-WingmanChatAgent.RunStreamingAsync()  ← 在此設中斷點，可查看送給 LLM 的 Prompt
-```
+先查詢程序，不要直接殺掉未知 PID：
 
-在此可以查看：
-- `effectiveMessage`：組合後的完整 Prompt（含 workspace context）
-- `profile`：使用的 AI 供應商設定
-- `history`：對話歷史
-
----
-
-## 7. 常見問題排除
-
-### Q: 找不到「偵錯 Agent Service」選項？
-
-**A:** 確認已安裝 **C# Dev Kit** 擴充套件，並用 `Ctrl+Shift+D` 開啟「執行與偵錯」面板（不是編輯器右上角的播放按鈕）。
-
----
-
-### Q: Build 失敗，提示 DLL 被其他程序鎖定？
-
-**A:** 已有 AgentService 在執行，先停止它：
 ```powershell
-Stop-Process -Name "AgentService" -Force
+Get-NetTCPConnection -State Listen -LocalPort 4173,5002,17688 |
+  Select-Object LocalPort,OwningProcess
+Get-Process -Id <PID> | Select-Object Id,ProcessName,Path,StartTime
 ```
 
----
+若程序是上一輪 Modern Wingman，先執行：
 
-### Q: 一直出現 `Neo4j.Driver.ServiceUnavailableException`？
-
-**A:** 開發時不需要 Neo4j，在 `appsettings.Development.json` 已設定停用：
-```json
-{
-  "Neo4jLifecycle": {
-    "Mode": "disabled"
-  }
-}
-```
-若仍出現，確認是否使用最新 build（重新按 `F5`）。
-
----
-
-### Q: Debugger 在已被 `catch` 的例外上暫停（如測試中的預期例外）？
-
-**A:** 在「執行與偵錯」面板底部的 **BREAKPOINTS** 區塊，取消勾選
-**「Common Language Runtime Exceptions」**。
-
----
-
-### Q: 附加模式找不到 AgentService 程序？
-
-**A:** 確認 `start-all.ps1` 已成功啟動，用以下指令確認：
 ```powershell
-Get-Process -Name "AgentService"
+.\scripts\dev\stop-all.ps1
 ```
 
-若是從 `dotnet run` 啟動而只看到 `dotnet.exe`，請在 VS Code 的程序選擇器中搜尋
-`AgentService.dll` 的命令列。
+若不是本 workspace 的程序，請先停止該應用程式或改由擁有者處理；本專案不會自動誤殺。
+
+### 建置顯示 DLL 被鎖定
+
+確認沒有另一個 AgentService 或 debugger session 正在執行，再按 `Shift+F5` 後重試。
+必要時先用上面的 `stop-all.ps1`，不要在工作管理員盲目終止所有 `dotnet.exe`。
+
+### Graph 無法連線
+
+這不應阻斷專案問答。畫面會顯示 Graph 警告，Agent 仍可使用原始碼工具；需要查看
+跨節點鏈路時，再啟動 managed Neo4j 並重新檢查索引狀態。
+
+### 想查看目前實際 port
+
+```powershell
+Get-NetTCPConnection -State Listen |
+  Where-Object LocalAddress -in @('127.0.0.1','::1') |
+  Sort-Object LocalPort |
+  Select-Object LocalAddress,LocalPort,OwningProcess
+```
+
+所有本機開發設定請以 `launch.json`、`tasks.json`、`launchSettings.json`、
+`appsettings.json` 與 `vite.config.ts` 為準；本文件不保留已移除的 gRPC、5001、1420、
+5200、7264 或舊版多組啟動流程。

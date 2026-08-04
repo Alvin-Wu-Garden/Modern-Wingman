@@ -25,13 +25,28 @@ public static class ServiceRegistration
         IHostEnvironment environment)
     {
         // ── REST / JSON ────────────────────────────────────────────────────────
+        // 服務只供本機桌面 UI 使用；限制 Origin 可避免同機其他網站任意呼叫本機 Agent API。
+        // 同時保留 Vite 開發來源與 Tauri production protocol，避免桌面與開發模式互相影響。
+        var allowedOrigins = new[]
+        {
+            "http://127.0.0.1:4173",
+            "http://localhost:4173",
+            "tauri://localhost",
+            "http://tauri.localhost",
+        };
         services.AddCors(opts =>
-            opts.AddDefaultPolicy(p => p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
+            opts.AddDefaultPolicy(policy => policy
+                .WithOrigins(allowedOrigins)
+                // 僅允許目前 REST／SSE 客戶端實際使用的動詞與標頭，避免本機 API
+                // 退化成可被任意跨來源網站呼叫的萬用 CORS 端點。
+                .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+                .WithHeaders("Accept", "Content-Type", "Cache-Control", "Last-Event-ID")));
         // Enum 序列化為字串（"CopilotDefault" 而非 0），讓前端 kind === 'CopilotDefault' 正確比對
         services.ConfigureHttpJsonOptions(opts =>
             opts.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
         // ── HttpClient（供 Provider 與 Skills GitHub PAT 後端驗證）─────────────
-        // CheckCertificateRevocationList = false：繞過企業環境 CRL/OCSP 查詢失敗問題
+        // 預設啟用憑證撤銷檢查；若企業 Proxy 導致外部驗證失敗，應在該環境處理
+        // Proxy/CRL 設定，不在產品程式中永久關閉 TLS 安全檢查。
         services.AddHttpClient("key-validator", client =>
             {
                 client.Timeout = TimeSpan.FromSeconds(10);
@@ -39,7 +54,7 @@ public static class ServiceRegistration
             })
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
             {
-                CheckCertificateRevocationList = false,
+                CheckCertificateRevocationList = true,
             });
 
         services.AddHttpClient("atlassian", client =>
@@ -49,7 +64,7 @@ public static class ServiceRegistration
             })
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
             {
-                CheckCertificateRevocationList = false,
+                CheckCertificateRevocationList = true,
             });
 
         // ── Options / BYOK 設定綁定 ────────────────────────────────────────────
@@ -118,7 +133,7 @@ public static class ServiceRegistration
         services.AddHostedService(
             provider => provider.GetRequiredService<ProjectJobQueue>());
 
-        // ── GraphRAG V3：四種節點、九種關係、單一無 profile 模組 ─────────────
+        // ── GraphRAG V4：FBL 投資系統的節點、關係與 active graph 服務 ────────
         services.AddSingleton<IProjectRepository, ProjectRepository>();
         services.AddSingleton<IProjectIndexManifestStore, ProjectIndexManifestStore>();
         services.AddSingleton<ILlmCompletionService, CopilotCompletionService>();
@@ -134,7 +149,7 @@ public static class ServiceRegistration
             })
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
             {
-                CheckCertificateRevocationList = false,
+                CheckCertificateRevocationList = true,
             });
         services.AddSingleton<SpeechPathResolver>();
         services.AddSingleton<SpeechSettingsStore>();

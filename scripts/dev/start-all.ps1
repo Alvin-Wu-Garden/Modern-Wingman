@@ -21,7 +21,9 @@ $stopScript = Join-Path $PSScriptRoot "stop-all.ps1"
 $runtimeStatePath = Join-Path $env:TEMP "modern-wingman-debug-runtime.json"
 $viteOutputPath = Join-Path $env:TEMP "modern-wingman-vite.stdout.log"
 $viteErrorPath = Join-Path $env:TEMP "modern-wingman-vite.stderr.log"
-$requiredPorts = @(4173, 5002, 17475, 17688)
+# 目前 Debug 流程的唯一必要 Listener：Vite、Agent REST 與 Neo4j Bolt。
+# Neo4j Browser 的 HTTP port 由 Neo4j 自身設定管理，不應在啟動腳本重複維護。
+$requiredPorts = @(4173, 5002, 17688)
 
 function Get-ListeningProcessIds {
     <# 取得指定 TCP port 的唯一監聽程序；沒有 listener 時回傳空陣列。 #>

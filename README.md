@@ -12,7 +12,7 @@
 | Frontend | React 19 + TypeScript + Vite |
 | UI | Shadcn/ui + Tailwind CSS v4 + Zustand |
 | Agent Service | .NET 10 + ASP.NET Core + MAF 1.9.0 |
-| Communication | Tauri IPC ↔ Rust gRPC Client ↔ Agent Service |
+| Communication | Tauri WebView ↔ local REST/SSE Agent Service |
 | AI Providers | OpenAI / Anthropic / Azure OpenAI / Custom BYOK |
 
 ---
@@ -74,19 +74,25 @@ Minimum required config:
 
 ### 3. Start development services
 
-**Option A — One command (recommended)**
+**Option A — VS Code full Debug (recommended)**
 
-Opens two separate PowerShell windows: one for Agent Service, one for Tauri dev.
+Choose `Modern Wingman（全端 Debug）` in VS Code Run and Debug and press `F5`.
+The pre-launch task starts Vite; VS Code starts the debuggable Agent Service and Tauri.
+
+The fixed local endpoints are Vite `4173`, Agent REST/SSE `5002`, and Neo4j Bolt `17688`.
+Press `Shift+F5` to run the matching stop task.
+
+For a service-only smoke test (without debugger), use:
 
 ```powershell
 .\scripts\dev\start-all.ps1
 ```
 
-| Flag | Effect |
-|------|--------|
-| *(none)* | Start both Agent Service and Desktop |
-| `-AgentOnly` | Start Agent Service only |
-| `-DesktopOnly` | Start Desktop (Vite + Tauri) only |
+Stop it with:
+
+```powershell
+.\scripts\dev\stop-all.ps1
+```
 
 **Option B — Manual (two terminals)**
 
@@ -95,8 +101,7 @@ Terminal 1 — Agent Service:
 ```powershell
 cd apps\agent-service
 dotnet run
-# gRPC server listens on http://localhost:5001
-# REST API listens on http://localhost:5002
+# REST/SSE API listens on http://127.0.0.1:5002
 ```
 
 Terminal 2 — Desktop:
@@ -104,9 +109,11 @@ Terminal 2 — Desktop:
 ```powershell
 cd apps\desktop
 pnpm tauri dev
-# Vite dev server: http://localhost:1420
+# Vite dev server: http://127.0.0.1:4173
 # Tauri window opens automatically
 ```
+
+Do not use the removed `-AgentOnly` or `-DesktopOnly` flags.
 
 > **First run:** Cargo will compile all Rust dependencies. This takes **5–10 minutes**. Subsequent runs are fast.
 
@@ -132,7 +139,7 @@ pnpm tauri build
 modern-wingman/
 ├── apps/
 │   ├── desktop/        # Tauri 2 + React 19 + Vite (frontend + Rust shell)
-│   └── agent-service/  # .NET 10 + ASP.NET Core + MAF 1.9.0 + gRPC
+│   └── agent-service/  # .NET 10 + ASP.NET Core + MAF 1.9.0 + REST/SSE
 ├── packages/
 │   ├── contracts/      # Shared Tauri IPC payload types & event schemas
 │   ├── ui-kit/         # Shared React UI components
@@ -153,10 +160,10 @@ modern-wingman/
 
 ```
 React UI
-  │  Tauri IPC (invoke / listen)
+  │  Tauri WebView (local REST/SSE)
   ▼
 Rust (Tauri shell)
-  │  gRPC (Tonic client)  →  http://localhost:5001
+  │  local desktop host
   ▼
 Agent Service (.NET 10)
   │  MAF 1.9.0 Workflows
@@ -164,8 +171,8 @@ Agent Service (.NET 10)
 AI Provider  (OpenAI / Azure OpenAI / Anthropic / Custom BYOK)
 ```
 
-Streaming tokens flow back through the same chain in reverse:  
-`Agent Service → gRPC server-streaming → Rust → app_handle.emit() → React listen()`
+Streaming tokens flow through the local SSE endpoint:
+`Agent Service → REST/SSE → Tauri WebView → React`
 
 ---
 
@@ -190,5 +197,5 @@ cd apps\desktop && pnpm typecheck
 |---------|-----|
 | `tauri dev` hangs on first run | Cargo is compiling — wait 5–10 min |
 | `esbuild` build script warning from pnpm | Benign; run `pnpm approve-builds` in an interactive terminal to silence it |
-| `dotnet run` fails with port conflict | Change `Kestrel.Endpoints.Grpc.Url` (port 5001) or `Kestrel.Endpoints.Rest.Url` (port 5002) in `appsettings.json` |
-| Tauri window blank / white screen | Ensure Vite dev server is running on port 1420 before Tauri connects |
+| `dotnet run` fails with port conflict | Stop the previous Modern Wingman debug session and verify `127.0.0.1:5002` is free; do not kill unknown processes |
+| Tauri window blank / white screen | Ensure Vite is ready on `127.0.0.1:4173` before Tauri connects |

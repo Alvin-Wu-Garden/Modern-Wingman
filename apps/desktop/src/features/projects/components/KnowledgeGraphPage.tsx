@@ -109,7 +109,9 @@ interface NeighborExpansionFeedback {
   message: string
 }
 
-const DEFAULT_LIMIT = 1000
+// 初次只載入小批量節點，避免大型 FBL 圖譜在瀏覽器一次建立過大的力導向圖。
+// 使用者可透過「載入更多」或下拉選單逐步增加視覺化範圍。
+const DEFAULT_LIMIT = 200
 const DEFAULT_COLUMN_WIDTH = 220
 const MIN_COLUMN_WIDTH = 120
 const LONG_TABLE_VALUE_LENGTH = 320
@@ -304,13 +306,15 @@ function nodeCaption(node: CodeGraphVisualNode, option = 'caption') {
 
 function visualLimitOptions(totalNodes: number) {
   if (totalNodes <= 0) return [DEFAULT_LIMIT]
-  if (totalNodes <= 1000) return [totalNodes]
-  if (totalNodes <= 2000) return [1000, totalNodes]
-  if (totalNodes <= 5000) return [1000, 2000, totalNodes]
+  if (totalNodes <= DEFAULT_LIMIT) return [totalNodes]
+  if (totalNodes <= 500) return [DEFAULT_LIMIT, totalNodes]
+  if (totalNodes <= 1000) return [DEFAULT_LIMIT, 500, totalNodes]
+  if (totalNodes <= 2000) return [DEFAULT_LIMIT, 500, 1000, totalNodes]
+  if (totalNodes <= 5000) return [DEFAULT_LIMIT, 500, 1000, 2000, totalNodes]
   // V4 後端為避免 Neo4j 視覺化查詢爆量，服務端上限固定為 5,000。
   // 前端不可提供 8,000／10,000 這類會被後端靜默截斷的選項，避免使用者
   // 以為看到完整圖譜，實際只拿到部分節點而誤判索引結果。
-  return [1000, 2000, 5000]
+  return [DEFAULT_LIMIT, 500, 1000, 2000, 5000]
 }
 
 function onHorizontalWheel(event: ReactWheelEvent<HTMLDivElement>) {
@@ -455,6 +459,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     () => visualLimitOptions(schema?.totalNodes ?? 0),
     [schema?.totalNodes],
   )
+  const nextLimit = limitOptions.find((value) => value > limit) ?? null
   const selectedFilterLabels = useMemo(() => schema?.facets.flatMap((facet) =>
     (selectedFilters[facet.id] ?? []).map((token) => ({
       facetId: facet.id,
@@ -1089,14 +1094,14 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
         </div>
       )}
 
-      <div className="min-h-0 flex flex-1">
+      <div className="relative min-h-0 flex flex-1">
         <aside
           style={filterPanel.panelStyle}
           onMouseEnter={() => {
             if (filterPanel.collapsed) setFilterPanelHoverExpanded(true)
           }}
           onMouseLeave={() => setFilterPanelHoverExpanded(false)}
-          className="relative z-40 min-h-0 shrink-0"
+          className="relative z-40 min-h-0 shrink-0 max-[900px]:absolute max-[900px]:bottom-0 max-[900px]:left-0 max-[900px]:top-0 max-[900px]:shadow-xl"
         >
           <div
             style={{
@@ -1294,6 +1299,18 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                 <option key={value} value={value}>{value} nodes</option>
               ))}
             </select>
+            {nextLimit && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0 whitespace-nowrap"
+                onClick={() => setLimit(nextLimit)}
+                disabled={loading}
+                title={`載入至 ${nextLimit} 個節點`}
+              >
+                載入更多
+              </Button>
+            )}
             {(schema?.totalNodes ?? 0) > 5000 && (
               <span className="whitespace-nowrap text-[10px] text-ink-subtle">搜尋涵蓋全部 {schema?.totalNodes} 筆</span>
             )}
@@ -1684,7 +1701,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
 
         <aside
           style={inspectorPanel.panelStyle}
-          className="relative min-h-0 shrink-0 border-l border-border bg-surface flex flex-col transition-[width] duration-200"
+          className="relative min-h-0 shrink-0 border-l border-border bg-surface flex flex-col transition-[width] duration-200 max-[900px]:absolute max-[900px]:bottom-0 max-[900px]:right-0 max-[900px]:top-0 max-[900px]:z-50 max-[900px]:shadow-xl"
         >
           <button
             type="button"

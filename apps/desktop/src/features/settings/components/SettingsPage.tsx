@@ -34,7 +34,6 @@ import { VersionControlSettingsPanel } from './VersionControlSettingsPanel'
 import { AtlassianSettingsPanel } from './AtlassianSettingsPanel'
 import {
   listProviders,
-  getProviderKeyStatus,
   setProviderKey,
   deleteProviderKey,
   reorderProviders,
@@ -455,16 +454,23 @@ export function SettingsPage() {
     try {
       const list = await listProviders()
       setProviders(list)
-      const statuses: Record<string, ProviderKeyStatus> = {}
-      const baseUrls: Record<string, string> = {}
-      await Promise.all(
-        list.map(async (p) => {
-          try {
-            const s = await getProviderKeyStatus(p.id)
-            statuses[p.id] = s
-            if (s.storedBaseUrl) baseUrls[p.id] = s.storedBaseUrl
-          } catch { /* ignore */ }
-        }),
+      // /api/providers 已在單一回應帶回狀態，設定頁與選擇器共用同一份快照，
+      // 避免每個 provider 再發送一次 key-status 請求。
+      const statuses: Record<string, ProviderKeyStatus> = Object.fromEntries(
+        list.map((provider) => [provider.id, {
+          profileId: provider.id,
+          displayName: provider.displayName,
+          hasEnvVar: provider.hasEnvVar ?? false,
+          hasStoredKey: provider.hasStoredKey ?? false,
+          storedBaseUrl: provider.storedBaseUrl ?? null,
+          sortOrder: provider.sortOrder,
+          runtimeStatus: provider.runtimeStatus ?? null,
+        }]),
+      )
+      const baseUrls: Record<string, string> = Object.fromEntries(
+        list
+          .filter((provider): provider is ProviderInfo & { storedBaseUrl: string } => Boolean(provider.storedBaseUrl))
+          .map((provider) => [provider.id, provider.storedBaseUrl]),
       )
       setKeyStatuses(statuses)
       setBaseUrlInputs((prev) => ({ ...baseUrls, ...prev }))

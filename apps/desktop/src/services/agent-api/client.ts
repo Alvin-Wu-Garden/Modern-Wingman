@@ -58,6 +58,11 @@ export interface ProviderInfo {
   providerType: string | null
   baseUrl: string | null
   sortOrder: number
+  /** 後端一次回傳的本機憑證狀態，供選擇器避免逐一查詢。 */
+  hasEnvVar?: boolean
+  hasStoredKey?: boolean
+  storedBaseUrl?: string | null
+  runtimeStatus?: CopilotRuntimeStatus | null
 }
 
 export interface ProviderKeyStatus {
@@ -206,14 +211,14 @@ export async function sendMessage(
   }
 }
 
-export async function listProviders(): Promise<ProviderInfo[]> {
-  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers`)
+export async function listProviders(signal?: AbortSignal): Promise<ProviderInfo[]> {
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers`, { signal })
   if (!response.ok) throw new Error(`無法載入供應商：HTTP ${response.status}`)
   return response.json()
 }
 
-export async function getProviderKeyStatus(profileId: string): Promise<ProviderKeyStatus> {
-  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers/${profileId}/key-status`)
+export async function getProviderKeyStatus(profileId: string, signal?: AbortSignal): Promise<ProviderKeyStatus> {
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers/${profileId}/key-status`, { signal })
   if (!response.ok) throw new Error(`無法取得供應商狀態：HTTP ${response.status}`)
   return response.json()
 }
@@ -284,9 +289,9 @@ export interface ModelGroup {
   models: string[]
 }
 
-export async function listProviderModels(profileId: string): Promise<ModelGroup[]> {
-  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers/${profileId}/models`)
-  if (!response.ok) return []
+export async function listProviderModels(profileId: string, signal?: AbortSignal): Promise<ModelGroup[]> {
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/providers/${profileId}/models`, { signal })
+  if (!response.ok) throw new Error(`無法載入模型：HTTP ${response.status}`)
   const models = await response.json() as Array<{
     id: string
     group: string

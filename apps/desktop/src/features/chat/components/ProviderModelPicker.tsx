@@ -1,13 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
-import { ChevronDown, Loader2 } from 'lucide-react'
+import { AlertCircle, ChevronDown, Loader2, RefreshCw } from 'lucide-react'
 import { ProviderBrandIcon } from '@/components/ui/provider-brand-icon'
 import { cn } from '@/lib/utils'
 import {
   listProviders,
-  getProviderKeyStatus,
   listProviderModels,
   type ProviderInfo,
-  type ProviderKeyStatus,
   type ModelGroup,
 } from '@/services/agent-api/client'
 
@@ -21,9 +19,9 @@ interface Props {
 const PREFERRED_MODEL_ID = 'claude-sonnet-4.6'
 const LATEST_OPENAI_MODEL_ID = 'gpt-5.6'
 
-function isVerifiedProvider(status: ProviderKeyStatus | null): boolean {
-  // 只有經設定頁驗證成功並寫入 DB 的憑證，才屬於本選擇器的可用供應商。
-  return status?.hasStoredKey === true
+function isVerifiedProvider(provider: ProviderInfo): boolean {
+  // 後端 /api/providers 已一次回傳狀態；選擇器不再逐一呼叫 key-status。
+  return provider.hasStoredKey === true
 }
 
 function selectDefaultModel(groups: ModelGroup[], provider: ProviderInfo | undefined): string | null {
@@ -42,8 +40,13 @@ export function ProviderModelPicker({
 }: Props) {
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [providersLoaded, setProvidersLoaded] = useState(false)
+  const [loadingProviders, setLoadingProviders] = useState(false)
+  const [providerError, setProviderError] = useState<string | null>(null)
   const [modelGroups, setModelGroups] = useState<ModelGroup[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
+  const [modelError, setModelError] = useState<string | null>(null)
+  const [modelReloadNonce, setModelReloadNonce] = useState(0)
+  const modelCacheRef = useRef(new Map<string, ModelGroup[]>())
   const [providerOpen, setProviderOpen] = useState(false)
   const [modelOpen, setModelOpen] = useState(false)
   const providerRef = useRef<HTMLDivElement>(null)
@@ -54,21 +57,17 @@ export function ProviderModelPicker({
     // 清單載入完成後不重複查詢；元件重新掛載時會重新讀取最新設定。
     if (providersLoaded) return
 
+    const controller = new AbortController()
     let cancelled = false
+    setLoadingProviders(true)
+    setProviderError(null)
 
     void (async () => {
       try {
-        const loadedProviders = await listProviders()
-        const statuses = await Promise.all(
-          loadedProviders.map(async (provider) => {
-            try { return await getProviderKeyStatus(provider.id) }
-            catch { return null }
-          }),
-        )
+        const loadedProviders = await listProviders(controller.signal)
         if (cancelled) return
 
-        const configuredProviders = loadedProviders.filter((_provider, index) =>
-          isVerifiedProvider(statuses[index] ?? null))
+        const configuredProviders = loadedProviders.filter(isVerifiedProvider)
         setProviders(configuredProviders)
         setProvidersLoaded(true)
 
@@ -80,17 +79,24 @@ export function ProviderModelPicker({
           onProviderChange(firstConfigured?.id ?? null)
           onModelChange(null)
         }
-      } catch {
+      } catch (error) {
+        if (controller.signal.aborted) return
         if (!cancelled) {
           setProviders([])
           setProvidersLoaded(true)
+          setProviderError(error instanceof Error ? error.message : '無法載入供應商。')
           onProviderChange(null)
           onModelChange(null)
         }
+      } finally {
+        if (!cancelled) setLoadingProviders(false)
       }
     })()
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
   }, [onModelChange, onProviderChange, providersLoaded, selectedProviderId])
 
   /* Close dropdowns when clicking outside */
@@ -105,26 +111,38 @@ export function ProviderModelPicker({
 
   /* Load models when provider changes — backend handles all provider types */
   useEffect(() => {
-    if (!selectedProviderId) {
+    if (!providersLoaded || !selectedProviderId) {
       setModelGroups([])
       onModelChange(null)
       return
     }
 
+    const cached = modelCacheRef.current.get(selectedProviderId)
+    if (cached) {
+      setModelError(null)
+      setModelGroups(cached)
+      onModelChange(selectDefaultModel(cached, providers.find((provider) => provider.id === selectedProviderId)))
+      return
+    }
+
+    const controller = new AbortController()
     let cancelled = false
     setLoadingModels(true)
+    setModelError(null)
     setModelGroups([])
     onModelChange(null)
 
-    listProviderModels(selectedProviderId)
+    listProviderModels(selectedProviderId, controller.signal)
       .then((groups) => {
         if (cancelled) return
+        modelCacheRef.current.set(selectedProviderId, groups)
         setModelGroups(groups)
         onModelChange(selectDefaultModel(groups, providers.find((provider) => provider.id === selectedProviderId)))
       })
-      .catch(() => {
-        if (!cancelled) {
+      .catch((error) => {
+        if (!cancelled && !controller.signal.aborted) {
           setModelGroups([])
+          setModelError(error instanceof Error ? error.message : '無法載入模型。')
           onModelChange(null)
         }
       })
@@ -132,16 +150,19 @@ export function ProviderModelPicker({
         if (!cancelled) setLoadingModels(false)
       })
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedProviderId, providers])
+  }, [modelReloadNonce, providersLoaded, selectedProviderId, providers])
 
   const selectedProvider = providers.find((p) => p.id === selectedProviderId)
 
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex min-w-0 items-center gap-1.5">
       {/* Provider picker */}
-      <div ref={providerRef} className="relative">
+      <div ref={providerRef} className="relative min-w-0">
         <button
           type="button"
           onClick={() => setProviderOpen((o) => !o)}
@@ -152,14 +173,15 @@ export function ProviderModelPicker({
           )}
         >
           {selectedProvider && <ProviderBrandIcon provider={selectedProvider} size="xs" />}
+          {loadingProviders && <Loader2 className="h-3 w-3 animate-spin text-brand" />}
           <span className="max-w-[110px] truncate">
-            {selectedProvider?.displayName ?? '選擇供應商'}
+            {loadingProviders ? '載入供應商…' : selectedProvider?.displayName ?? '選擇供應商'}
           </span>
           <ChevronDown className="w-3 h-3 text-ink-subtle shrink-0" />
         </button>
 
         {providerOpen && providers.length > 0 && (
-          <div className="absolute bottom-full mb-1 left-0 z-50 min-w-[190px] rounded-xl border border-border bg-surface shadow-lg overflow-hidden">
+          <div className="absolute bottom-full left-0 z-50 mb-1 max-h-60 min-w-[190px] max-w-[min(280px,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-xl border border-border bg-surface shadow-lg">
             {providers.map((p) => (
               <button
                 key={p.id}
@@ -176,14 +198,36 @@ export function ProviderModelPicker({
             ))}
           </div>
         )}
+        {providerError && (
+          <button
+            type="button"
+            onClick={() => {
+              setProvidersLoaded(false)
+              setProviderError(null)
+            }}
+            className="absolute left-0 top-full z-40 mt-1 flex max-w-[240px] items-center gap-1 rounded-lg border border-error/30 bg-surface px-2 py-1 text-[10px] text-error shadow-sm"
+            title="重新載入供應商"
+          >
+            <AlertCircle className="h-3 w-3 shrink-0" />
+            <span className="truncate">載入失敗，點擊重試</span>
+            <RefreshCw className="h-3 w-3 shrink-0" />
+          </button>
+        )}
       </div>
 
       {/* Model picker — shown for all providers that have models */}
       {selectedProvider && (
-        <div ref={modelRef} className="relative">
+        <div ref={modelRef} className="relative min-w-0">
           <button
             type="button"
-            onClick={() => setModelOpen((o) => !o)}
+            onClick={() => {
+              if (modelError && selectedProviderId) {
+                modelCacheRef.current.delete(selectedProviderId)
+                setModelReloadNonce((value) => value + 1)
+                return
+              }
+              setModelOpen((o) => !o)
+            }}
             disabled={loadingModels}
             className={cn(
               'flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium',
@@ -195,14 +239,14 @@ export function ProviderModelPicker({
               <Loader2 className="w-3 h-3 animate-spin" />
             ) : (
               <>
-                <span className="max-w-[120px] truncate">{selectedModel ?? '選擇模型'}</span>
+                <span className="max-w-[120px] truncate">{modelError ? '模型載入失敗' : selectedModel ?? '選擇模型'}</span>
                 <ChevronDown className="w-3 h-3 text-ink-subtle shrink-0" />
               </>
             )}
           </button>
 
           {modelOpen && modelGroups.length > 0 && (
-            <div className="absolute bottom-full mb-1 left-0 z-50 min-w-[200px] max-h-60 overflow-y-auto rounded-xl border border-border bg-surface shadow-lg">
+            <div className="absolute bottom-full left-0 z-50 mb-1 max-h-60 min-w-[200px] max-w-[min(320px,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-xl border border-border bg-surface shadow-lg">
               {modelGroups.map((group) => (
                 <div key={group.group}>
                   <div className="px-3 py-1.5 text-[10px] font-semibold text-ink-subtle uppercase tracking-wide bg-surface-alt">
@@ -224,6 +268,11 @@ export function ProviderModelPicker({
                 </div>
               ))}
             </div>
+          )}
+          {modelError && (
+            <span className="absolute left-0 top-full z-40 mt-1 whitespace-nowrap text-[10px] text-error">
+              點擊重新載入模型
+            </span>
           )}
         </div>
       )}

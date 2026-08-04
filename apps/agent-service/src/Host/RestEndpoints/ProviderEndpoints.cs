@@ -41,11 +41,16 @@ public static class ProviderEndpoints
     private static async Task<IResult> ListProviders(
         IModelProviderService providerService,
         IProviderSettingStore settingStore,
+        CopilotClientService copilotClientService,
         CancellationToken ct)
     {
         var profiles = providerService.ListProfiles();
         var dbSettings = await settingStore.GetAllAsync(ct);
-        var sortMap = dbSettings.ToDictionary(x => x.ProfileId, x => x.SortOrder);
+        var settingMap = dbSettings.ToDictionary(x => x.ProfileId);
+
+        // Provider 選擇器需要的憑證狀態與排序在同一個 response 回傳，避免前端
+        // 逐一呼叫 key-status 形成 N+1 HTTP 請求。密鑰本身仍不會回傳。
+        var copilotRuntime = copilotClientService.GetRuntimeStatus();
 
         // 未在 DB 有排序記錄的 profile，依 appsettings 順序排在最後
         var result = profiles
@@ -57,7 +62,21 @@ public static class ProviderEndpoints
                 p.ModelId,
                 p.ProviderType,
                 p.BaseUrl,
-                SortOrder = sortMap.TryGetValue(p.Id, out var s) ? s : idx + 1000,
+                HasEnvVar = settingStore.HasEnvVar(p.Id),
+                HasStoredKey = settingMap.TryGetValue(p.Id, out var setting)
+                    && !string.IsNullOrWhiteSpace(setting.ProtectedApiKey),
+                StoredBaseUrl = setting?.BaseUrl,
+                RuntimeStatus = p.Kind == ProviderKind.CopilotDefault
+                    ? new CopilotRuntimeStatusDto(
+                        copilotRuntime.State,
+                        copilotRuntime.IsAuthenticated,
+                        copilotRuntime.Login,
+                        copilotRuntime.AuthType,
+                        copilotRuntime.CopilotPlan,
+                        copilotRuntime.ModelCount,
+                        copilotRuntime.Error)
+                    : null,
+                SortOrder = setting?.SortOrder ?? idx + 1000,
             })
             .OrderBy(x => x.SortOrder)
             .ToList();

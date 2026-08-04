@@ -97,6 +97,5 @@ Working Copy 陳舊內容與維護成本。建議日後只針對 profiler 找出
 ## 驗收證據
 
 - `docs/reports/graphrag-v4-acceptance-v4.0.8-final.md`
-- `artifacts/graphrag-v4-quality/quality-v4.0.5-final.json`
-- `artifacts/graphrag-v4-quality/graphrag-v4-quality-tests.trx`
+- 本機產生的 JSON／TRX 已於健康度重構中移除，避免把機器絕對路徑與大型診斷產物當成 source of truth。
 

@@ -43,6 +43,7 @@ Thumbs.db
 *.db-shm
 *.db-wal
 /db-backups/
+/artifacts/
 /temp/
 /apps/agent-service/publish-verification/
 
