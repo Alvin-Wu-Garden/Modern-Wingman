@@ -186,6 +186,54 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         await FinalizeActiveVersionAsync(snapshot.ProjectId, cancellationToken);
     }
 
+    /// <summary>
+    /// 發布後本機 manifest 或專案狀態寫入失敗時的補償交易。
+    /// 先把 anchor 指回舊版本，再刪除本次候選節點；沒有舊版本時刪除整個空專案圖。
+    /// </summary>
+    public async Task RollbackPublishedVersionAsync(
+        string projectId,
+        string publishedVersion,
+        string? previousVersion,
+        CancellationToken cancellationToken = default)
+    {
+        if (_driver is null)
+            return;
+
+        if (string.IsNullOrWhiteSpace(previousVersion))
+        {
+            await DeleteProjectAsync(projectId, cancellationToken);
+            return;
+        }
+
+        await using var session = OpenWriteSession();
+        var restored = await session.ExecuteWriteAsync(async transaction =>
+        {
+            var cursor = await transaction.RunAsync(
+                """
+                MATCH (p:ProjectGraph {projectId: $projectId})
+                MATCH (old:GraphEntity {projectId: $projectId, graphVersion: $previousVersion})
+                WITH p, count(old) AS nodeCount
+                OPTIONAL MATCH (oldEdge:GraphEntity {projectId: $projectId, graphVersion: $previousVersion})
+                    -[oldRel {graphVersion: $previousVersion}]->
+                    (:GraphEntity {projectId: $projectId, graphVersion: $previousVersion})
+                WITH p, nodeCount, count(oldRel) AS edgeCount
+                SET p.activeManifestVersion = $previousVersion,
+                    p.schemaVersion = 'fbl-authority-1',
+                    p.nodeCount = nodeCount,
+                    p.edgeCount = edgeCount,
+                    p.previousManifestVersion = NULL,
+                    p.promotedAt = datetime()
+                RETURN count(p) AS restored
+                """,
+                new { projectId, previousVersion });
+            return (await cursor.SingleAsync())["restored"].As<int>();
+        });
+        if (restored != 1)
+            throw new InvalidOperationException($"Neo4j 找不到可恢復的上一版圖譜：{projectId}/{previousVersion}");
+
+        await DeleteVersionAsync(projectId, publishedVersion, cancellationToken);
+    }
+
     /// <inheritdoc />
     public async Task StageVersionAsync(
         FblGraphSnapshot snapshot,

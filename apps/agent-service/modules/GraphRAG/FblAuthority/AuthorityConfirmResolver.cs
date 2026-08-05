@@ -103,14 +103,14 @@ public sealed class ConfirmResolver
                 evidence);
         }
 
-        // mapping 可合法含歷史或範圍外 Menu；保留 Log 但不把它混入696中心圖。
+        // mapping 可合法含歷史或範圍外 Menu；保留診斷但不把它混入本次中心集合。
         if (!menuKeys.Contains(confirmMenuKey)
             || (mapping.MaintainMenuId != 0 && !menuKeys.Contains(maintainMenuKey)))
         {
             issues.Add(new PreflightIssue(
                 PreflightSeverity.Information,
                 PreflightReasonCode.ConfirmMenuPairUnresolved,
-                "Confirm mapping 指向696中心範圍外 Menu，已保留來源節點但未建立 Menu 關係。",
+                "Confirm mapping 指向本次中心集合外 Menu，已保留來源節點但未建立 Menu 關係。",
                 MenuId: mapping.MaintainMenuId == 0 ? null : mapping.MaintainMenuId.ToString(),
                 FromKey: confirmMenuKey,
                 TargetText: confirmSourceKey));

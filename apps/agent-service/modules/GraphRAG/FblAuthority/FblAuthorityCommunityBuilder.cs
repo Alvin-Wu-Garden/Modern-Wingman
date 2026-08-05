@@ -7,7 +7,7 @@ namespace AgentService.Modules.GraphRAG.FblAuthority;
 /// <summary>
 /// 由已完成驗證的 FBL 權威圖建立 Community 結構模板。
 /// 此類別不呼叫模型，也不重新推測程式關係；索引發布只需付出一次線性走訪成本，
-/// AI 摘要則交由既有背景佇列處理，避免 696 個功能阻塞圖譜可用時間。
+/// AI 摘要則交由既有背景佇列處理，避免大量功能阻塞圖譜可用時間。
 /// </summary>
 public static class FblAuthorityCommunityBuilder
 {

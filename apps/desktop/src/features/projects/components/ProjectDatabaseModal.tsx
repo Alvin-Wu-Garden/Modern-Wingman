@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Modal } from '@/components/ui/modal'
 import {
   deleteProjectDatabaseConfiguration,
-  getProjectDatabaseConfiguration,
+  getProjectDatabaseConfigurations,
   listProjectSqlServerDatabases,
   saveProjectDatabaseConfiguration,
   testProjectDatabaseConnection,
@@ -36,17 +36,33 @@ const catalogConnectionKeys: ReadonlyArray<keyof SaveProjectDatabaseConfiguratio
   'trustServerCertificate',
 ]
 
-const emptyConfiguration: SaveProjectDatabaseConfiguration = {
-  provider: 'SqlServer',
+/** 建立單一 Provider 的空白表單，避免 SQL Server 與 SQLite 共用可變物件。 */
+const createEmptyConfiguration = (
+  provider: DatabaseProvider,
+): SaveProjectDatabaseConfiguration => ({
+  provider,
   server: '',
-  port: 1433,
+  port: provider === 'SqlServer' ? 1433 : null,
   databaseName: '',
-  authentication: 'SqlPassword',
+  authentication: provider === 'SqlServer' ? 'SqlPassword' : null,
   username: '',
   password: '',
   trustServerCertificate: true,
   sqlitePath: '',
-}
+})
+
+type ProviderForms = Record<DatabaseProvider, SaveProjectDatabaseConfiguration>
+type ProviderPasswordState = Record<DatabaseProvider, boolean>
+
+const createEmptyForms = (): ProviderForms => ({
+  SqlServer: createEmptyConfiguration('SqlServer'),
+  Sqlite: createEmptyConfiguration('Sqlite'),
+})
+
+const createEmptyPasswordState = (): ProviderPasswordState => ({
+  SqlServer: false,
+  Sqlite: false,
+})
 
 const messageOf = (error: unknown) =>
   error instanceof Error ? error.message : String(error)
@@ -55,7 +71,8 @@ const inputClass =
   'w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-brand'
 
 /**
- * 每個專案的一組主要資料庫設定。
+ * 專案資料庫設定視窗。
+ * SQL Server 與 SQLite 各自保存一份表單狀態；切換 Provider 不會覆蓋另一份設定。
  * 密碼欄留白代表沿用已保存的 DPAPI 密碼，前端永遠讀不到原始密碼。
  */
 export function ProjectDatabaseModal({
@@ -63,8 +80,11 @@ export function ProjectDatabaseModal({
   projectName,
   onClose,
 }: ProjectDatabaseModalProps) {
-  const [form, setForm] = useState<SaveProjectDatabaseConfiguration>(emptyConfiguration)
-  const [hasPassword, setHasPassword] = useState(false)
+  const [forms, setForms] = useState<ProviderForms>(createEmptyForms)
+  const [hasPasswords, setHasPasswords] = useState<ProviderPasswordState>(
+    createEmptyPasswordState,
+  )
+  const [activeProvider, setActiveProvider] = useState<DatabaseProvider>('SqlServer')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<Feedback | null>(null)
@@ -77,21 +97,40 @@ export function ProjectDatabaseModal({
 
   useEffect(() => {
     let active = true
-    void getProjectDatabaseConfiguration(projectId)
-      .then((configuration) => {
-        if (!active || !configuration) return
-        setHasPassword(configuration.hasPassword)
-        setForm({
-          provider: configuration.provider,
-          server: configuration.server ?? '',
-          port: configuration.port ?? 1433,
-          databaseName: configuration.databaseName ?? '',
-          authentication: configuration.authentication ?? 'SqlPassword',
-          username: configuration.username ?? '',
-          password: '',
-          trustServerCertificate: configuration.trustServerCertificate,
-          sqlitePath: configuration.sqlitePath ?? '',
-        })
+    void getProjectDatabaseConfigurations(projectId)
+      .then((configurations) => {
+        if (!active) return
+
+        // /database/all 只回傳已設定 Provider；未設定的 Provider 保留空白表單，
+        // 讓使用者能在同一個視窗分別建立 SQL Server 與 SQLite 設定。
+        const nextForms = createEmptyForms()
+        const nextPasswords = createEmptyPasswordState()
+        for (const configuration of configurations) {
+          nextForms[configuration.provider] = {
+            provider: configuration.provider,
+            server: configuration.server ?? '',
+            port: configuration.port ?? (configuration.provider === 'SqlServer' ? 1433 : null),
+            databaseName: configuration.databaseName ?? '',
+            authentication:
+              configuration.authentication ??
+              (configuration.provider === 'SqlServer' ? 'SqlPassword' : null),
+            username: configuration.username ?? '',
+            password: '',
+            trustServerCertificate: configuration.trustServerCertificate,
+            sqlitePath: configuration.sqlitePath ?? '',
+          }
+          nextPasswords[configuration.provider] = configuration.hasPassword
+        }
+        // 優先開啟已設定的 SQL Server；若只有 SQLite，直接顯示 SQLite 設定。
+        setActiveProvider(
+          configurations.some((item) => item.provider === 'SqlServer')
+            ? 'SqlServer'
+            : configurations.some((item) => item.provider === 'Sqlite')
+              ? 'Sqlite'
+              : 'SqlServer',
+        )
+        setForms(nextForms)
+        setHasPasswords(nextPasswords)
       })
       .catch((reason) => {
         if (active)
@@ -107,11 +146,17 @@ export function ProjectDatabaseModal({
     }
   }, [projectId])
 
+  const form = forms[activeProvider]
+  const hasPassword = hasPasswords[activeProvider]
+
   const update = <K extends keyof SaveProjectDatabaseConfiguration>(
     key: K,
     value: SaveProjectDatabaseConfiguration[K],
   ) => {
-    setForm((current) => ({ ...current, [key]: value }))
+    setForms((current) => ({
+      ...current,
+      [activeProvider]: { ...current[activeProvider], [key]: value },
+    }))
     setFeedback(null)
     if (catalogConnectionKeys.includes(key)) {
       // 連線條件一變，先前取得的資料庫清單就可能失效，禁止沿用舊結果。
@@ -281,16 +326,23 @@ export function ProjectDatabaseModal({
     if (busy) return
     setBusy(true)
     setFeedback(null)
+    const provider = activeProvider
     try {
-      await deleteProjectDatabaseConfiguration(projectId)
-      setForm(emptyConfiguration)
-      setHasPassword(false)
-      setDatabaseNames([])
-      catalogVersion.current += 1
+      // 只刪除目前分頁的 Provider，避免移除 SQL Server 時誤刪 SQLite 設定。
+      await deleteProjectDatabaseConfiguration(projectId, provider)
+      setForms((current) => ({
+        ...current,
+        [provider]: createEmptyConfiguration(provider),
+      }))
+      setHasPasswords((current) => ({ ...current, [provider]: false }))
+      if (provider === 'SqlServer') {
+        setDatabaseNames([])
+        catalogVersion.current += 1
+      }
       setFeedback({
-        provider: 'SqlServer',
+        provider,
         tone: 'success',
-        message: '資料庫設定已移除；既有知識圖譜不受影響。',
+        message: `${provider === 'SqlServer' ? 'SQL Server' : 'SQLite'} 設定已移除；既有知識圖譜不受影響。`,
       })
     } catch (reason) {
       setFeedback({
@@ -317,9 +369,12 @@ export function ProjectDatabaseModal({
               <button
                 key={provider}
                 type="button"
-                onClick={() => update('provider', provider)}
+                onClick={() => {
+                  setActiveProvider(provider)
+                  setFeedback(null)
+                }}
                 className={`rounded-lg px-3 py-2 text-sm ${
-                  form.provider === provider
+                  activeProvider === provider
                     ? 'bg-surface font-medium text-brand shadow-sm'
                     : 'text-ink-secondary'
                 }`}

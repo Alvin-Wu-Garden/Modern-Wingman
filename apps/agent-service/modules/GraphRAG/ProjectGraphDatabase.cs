@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using AgentService.Application.Contracts;
 using AgentService.Domain.Models;
+using AgentService.Modules.GraphRAG.FblAuthority;
 using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
 
@@ -23,11 +24,19 @@ public interface IGraphDatabaseSourceProvider
     Task<GraphDatabaseSource?> GetAsync(
         ProjectEntity project,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 取得專案全部已設定且格式完整的外部資料來源。
+    /// 這個方法只組合唯讀來源，不會測試或掃描資料庫；連線閘門由索引協調器統一執行。
+    /// </summary>
+    Task<IReadOnlyList<GraphDatabaseSource>> GetAllAsync(
+        ProjectEntity project,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>
 /// 將安全的專案資料庫設定轉為唯讀連線字串。
-/// SQLite 設定仍保留給一般連線測試功能，但 FBL Graph 索引只接受 SQL Server FBL_SPV_SIT。
+/// SQL Server 與 SQLite 都以使用者設定為準；外部資料庫只建立唯讀連線來源。
 /// </summary>
 public sealed class ProjectGraphDatabaseSourceProvider(
     IProjectDatabaseConfigurationStore configurations) : IGraphDatabaseSourceProvider
@@ -42,6 +51,45 @@ public sealed class ProjectGraphDatabaseSourceProvider(
             includePassword: true,
             cancellationToken);
         return configuration is null ? null : Build(configuration);
+    }
+
+    /// <summary>將專案全部 Provider 設定轉成穩定排序的唯讀來源。</summary>
+    public async Task<IReadOnlyList<GraphDatabaseSource>> GetAllAsync(
+        ProjectEntity project,
+        CancellationToken cancellationToken = default)
+    {
+        var configuredSources = await configurations.GetAllAsync(
+            project.Id,
+            includePassword: true,
+            cancellationToken);
+        var sources = new List<GraphDatabaseSource>(configuredSources.Count);
+        var errors = new List<string>();
+        foreach (var configuration in configuredSources)
+        {
+            try
+            {
+                sources.Add(Build(configuration));
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                // 只保留 Provider 與安全識別，絕不把完整連線字串或密碼帶入錯誤。
+                var identity = configuration.Provider == ProjectDatabaseProvider.Sqlite
+                    ? configuration.SqlitePath
+                    : $"{configuration.Server}:{configuration.Port}/{configuration.DatabaseName}";
+                errors.Add($"{configuration.Provider} ({identity})：{exception.Message}");
+            }
+        }
+
+        if (errors.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"資料庫設定檢查失敗；索引尚未開始。{string.Join("；", errors)}");
+        }
+
+        return sources
+            .OrderBy(source => source.Provider)
+            .ThenBy(source => source.DatabaseName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     /// <summary>由尚未儲存的設定建立測試用唯讀連線來源。</summary>
@@ -157,9 +205,16 @@ public sealed class ProjectGraphDatabaseExtractor
             await using var connection = new SqlConnection(source.ConnectionString);
             await connection.OpenAsync(cancellationToken);
             await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT 1";
+            command.CommandText = "SELECT DB_NAME()";
             command.CommandTimeout = 15;
-            await command.ExecuteScalarAsync(cancellationToken);
+            var actualDatabase = Convert.ToString(
+                await command.ExecuteScalarAsync(cancellationToken),
+                System.Globalization.CultureInfo.InvariantCulture);
+            if (!string.Equals(actualDatabase, source.DatabaseName, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"SQL Server 連線實際資料庫為 '{actualDatabase}'，與設定的 '{source.DatabaseName}' 不一致。");
+            }
             return;
         }
         await using var sqlite = new SqliteConnection(source.ConnectionString);
@@ -196,5 +251,105 @@ public sealed class ProjectGraphDatabaseExtractor
             result.Add(reader.GetString(0));
         }
         return result;
+    }
+
+    /// <summary>
+    /// 以 SQLite 系統目錄建立唯讀 DB Object 清單。
+    /// SQLite 沒有 FBL 菜單與 CustomReport authority tables，因此只回傳實際存在的使用者物件。
+    /// </summary>
+    public async Task<IReadOnlyList<DatabaseObjectCatalogItem>> LoadSqliteDatabaseObjectsAsync(
+        GraphDatabaseSource source,
+        CancellationToken cancellationToken = default)
+    {
+        if (source.Provider != ProjectDatabaseProvider.Sqlite)
+        {
+            throw new InvalidOperationException("只有 SQLite 支援 SQLite DB Object 清單。");
+        }
+
+        const string sql = """
+            SELECT type, name
+            FROM sqlite_schema
+            WHERE type IN ('table', 'view', 'trigger', 'index')
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY type, name;
+            """;
+        await using var connection = new SqliteConnection(source.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<DatabaseObjectCatalogItem>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var objectType = reader.GetString(0);
+            var kind = objectType switch
+            {
+                "table" => DatabaseObjectKind.Table,
+                "view" => DatabaseObjectKind.View,
+                "trigger" => DatabaseObjectKind.Trigger,
+                "index" => DatabaseObjectKind.Index,
+                _ => throw new InvalidOperationException($"不支援的 SQLite object type：{objectType}"),
+            };
+            result.Add(new DatabaseObjectCatalogItem(
+                "main",
+                reader.GetString(1),
+                kind,
+                "Sqlite",
+                source.DatabaseName));
+        }
+
+        return result;
+    }
+}
+
+/// <summary>
+/// 建立 SQLite-only 的最小可用 GraphDocument。
+/// 它保存原始碼中的 CodeClass 與 SQLite DB Object，刻意不套用 SQL Server 菜單及 FBL authority validator。
+/// </summary>
+public sealed class SqliteGraphDocumentBuilder
+{
+    /// <summary>
+    /// 建立原始碼＋SQLite DB Object 圖；所有輸入均來自唯讀掃描結果。
+    /// </summary>
+    public async Task<GraphDocument> BuildAsync(
+        string rootPath,
+        GraphDatabaseSource source,
+        IReadOnlyList<DatabaseObjectCatalogItem> databaseObjects,
+        CancellationToken cancellationToken = default,
+        bool sourceOnly = false)
+    {
+        var index = await CSharpSourceIndex.CreateAsync(rootPath, cancellationToken);
+        var metadata = new GraphRunMetadata(
+            Guid.NewGuid().ToString("N"),
+            DateTimeOffset.UtcNow,
+            rootPath,
+            sourceOnly ? string.Empty : source.DatabaseName,
+            GraphBuildStage.CompleteExtraction,
+            null,
+            source.ConfigurationFingerprint,
+            sourceOnly ? "SourceOnly" : "Sqlite");
+        var builder = new GraphDocumentBuilder(metadata);
+
+        foreach (var type in index.Types)
+        {
+            CodeClassNodeFactory.Add(builder, type, CodeClassRole.Other);
+        }
+
+        foreach (var databaseObject in databaseObjects)
+        {
+            builder.AddNode(
+                GraphNodeKind.DatabaseObject,
+                databaseObject.CreateNodeKey(),
+                new Dictionary<string, object?>
+                {
+                    ["provider"] = databaseObject.Provider,
+                    ["database"] = databaseObject.DatabaseName,
+                    ["schema"] = databaseObject.SchemaName,
+                    ["name"] = databaseObject.ObjectName,
+                    ["object_kind"] = databaseObject.Kind.ToString(),
+                });
+        }
+
+        return builder.Build();
     }
 }

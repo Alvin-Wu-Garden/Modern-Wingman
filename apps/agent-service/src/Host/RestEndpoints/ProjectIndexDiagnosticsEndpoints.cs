@@ -148,7 +148,7 @@ public static class ProjectIndexDiagnosticsEndpoints
         }
         var limit = Math.Clamp(request.Limit ?? 10, 1, 20);
         // 診斷端點使用與實際專案問答相同的確定性 Query Plan，
-        // 但刻意不呼叫 LLM，讓 696 菜單驗收不受模型狀態與額外成本影響。
+        // 但刻意不呼叫 LLM，讓結構驗收不受模型狀態與額外成本影響。
         var hits = await retrieval.SearchSeedCandidatesAsync(
             id,
             request.Question.Trim(),

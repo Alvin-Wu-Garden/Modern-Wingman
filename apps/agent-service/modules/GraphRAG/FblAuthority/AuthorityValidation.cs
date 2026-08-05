@@ -49,11 +49,14 @@ public sealed class PreflightResult
 /// <summary>定義正式發布前不可被抽取器任意變更的核心驗證條件。</summary>
 public sealed record PreflightValidatorOptions
 {
-    /// <summary>取得中心 SQL 預期回傳的 Menu 數量。</summary>
-    public int ExpectedCenterMenuCount { get; init; } = 696;
+    /// <summary>取得中心 SQL 預期回傳的 Menu 數量；null 表示依當次查詢實際集合驗證。</summary>
+    public int? ExpectedCenterMenuCount { get; init; }
 
-    /// <summary>取得唯一允許發布 DatabaseObject 的資料庫名稱。</summary>
-    public string RequiredDatabaseName { get; init; } = "FBL_SPV_SIT";
+    /// <summary>取得允許發布 DatabaseObject 的資料庫名稱；空值表示不套用資料庫名稱限制。</summary>
+    public string? RequiredDatabaseName { get; init; }
+
+    /// <summary>取得允許發布 DatabaseObject 的 Provider。</summary>
+    public string? RequiredProvider { get; init; }
 
     /// <summary>取得單一 source_text 允許保留的最大字元數。</summary>
     public int MaximumSourceTextLength { get; init; } = 500;
@@ -110,11 +113,16 @@ public static class GoldenPathValidator
             "code:APEX.FileTransform.TransformV2.TransformV2_P13_FxRate",
             "20059 Category→TransformV2_P13_FxRate",
             issues);
+        var databaseName = document.Metadata.DatabaseName;
+        var provider = string.IsNullOrWhiteSpace(document.Metadata.Provider)
+            ? "SqlServer"
+            : document.Metadata.Provider;
+        var fxRateKey = $"db:{provider.ToLowerInvariant()}:{databaseName}:dbo:tblFxRate";
         RequireRelationship(
             document,
             GraphRelationshipKind.MapsTo,
             "code:APEX.RiskMaster.DBDefinition.DDFxRate",
-            "db:FBL_SPV_SIT:dbo:tblFxRate",
+            fxRateKey,
             "20059 DDFxRate→tblFxRate",
             issues);
         RequireOutgoing(document, GraphRelationshipKind.ConfirmedBy, "menu:20059", "20059 放行 Menu", issues);
@@ -219,16 +227,26 @@ public sealed class GraphDocumentValidator
             issues.Add(new PreflightIssue(
                 PreflightSeverity.Error,
                 PreflightReasonCode.ExtractionIncomplete,
-                $"GraphDocument 階段為 {document.Metadata.BuildStage}，尚未完成696功能全路徑抽取。"));
+                $"GraphDocument 階段為 {document.Metadata.BuildStage}，尚未完成目前資料來源要求的全路徑抽取。"));
         }
 
-        // 資料庫邊界固定為 FBL_SPV_SIT，避免意外把其他站台物件混入權威圖譜。
-        if (!string.Equals(document.Metadata.DatabaseName, _options.RequiredDatabaseName, StringComparison.OrdinalIgnoreCase))
+        // 只有呼叫端明確提供 Provider／DatabaseName 時才套用來源邊界。
+        if (_options.RequiredDatabaseName is not null &&
+            !string.Equals(document.Metadata.DatabaseName, _options.RequiredDatabaseName, StringComparison.OrdinalIgnoreCase))
         {
             issues.Add(new PreflightIssue(
                 PreflightSeverity.Error,
                 PreflightReasonCode.DatabaseScopeInvalid,
                 $"GraphDocument 的資料庫為 '{document.Metadata.DatabaseName}'，預期為 '{_options.RequiredDatabaseName}'。"));
+        }
+
+        if (_options.RequiredProvider is not null &&
+            !string.Equals(document.Metadata.Provider, _options.RequiredProvider, StringComparison.OrdinalIgnoreCase))
+        {
+            issues.Add(new PreflightIssue(
+                PreflightSeverity.Error,
+                PreflightReasonCode.DatabaseScopeInvalid,
+                $"GraphDocument 的 Provider 為 '{document.Metadata.Provider}'，預期為 '{_options.RequiredProvider}'。"));
         }
 
         // 將節點依 Key 建索引，供後續關係與孤立 Menu 驗證使用。
@@ -280,18 +298,23 @@ public sealed class GraphDocumentValidator
         return nodesByKey;
     }
 
-    /// <summary>驗證中心 Menu 數量固定為人工確認的 696。</summary>
+    /// <summary>依選用的期望值驗證中心 Menu 數量；未指定時只保留實際集合。</summary>
     private void ValidateCenterMenuCount(
         IEnumerable<GraphNode> nodes,
         ICollection<PreflightIssue> issues)
     {
         var menuCount = nodes.Count(node => node.Kind == GraphNodeKind.Menu);
-        if (menuCount != _options.ExpectedCenterMenuCount)
+        if (_options.ExpectedCenterMenuCount is null)
+        {
+            return;
+        }
+
+        if (menuCount != _options.ExpectedCenterMenuCount.Value)
         {
             issues.Add(new PreflightIssue(
                 PreflightSeverity.Error,
                 PreflightReasonCode.MenuCountMismatch,
-                $"中心 Menu 數量為 {menuCount}，預期必須為 {_options.ExpectedCenterMenuCount}。"));
+                $"中心 Menu 數量為 {menuCount}，預期必須為 {_options.ExpectedCenterMenuCount.Value}。"));
         }
     }
 

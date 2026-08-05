@@ -71,7 +71,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         builder.Entity<ProjectDatabaseConfigurationRecord>(entity =>
         {
             entity.ToTable("project_database_configurations");
-            entity.HasKey(x => x.ProjectId);
+            entity.HasKey(x => new { x.ProjectId, x.Provider });
             entity.Property(x => x.ProjectId).HasMaxLength(64);
             entity.Property(x => x.Provider).HasMaxLength(20);
             entity.Property(x => x.Server).HasMaxLength(300);
@@ -82,8 +82,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.SqlitePath).HasMaxLength(600);
             entity.Property(x => x.UpdatedAt).HasConversion<string>();
             entity.HasOne<ProjectRecord>()
-                .WithOne()
-                .HasForeignKey<ProjectDatabaseConfigurationRecord>(x => x.ProjectId)
+                .WithMany()
+                .HasForeignKey(x => x.ProjectId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

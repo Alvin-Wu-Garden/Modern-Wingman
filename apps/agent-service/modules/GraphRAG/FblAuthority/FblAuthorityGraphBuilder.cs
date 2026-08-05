@@ -7,9 +7,12 @@ namespace AgentService.Modules.GraphRAG.FblAuthority;
 public sealed record FblAuthorityBuildRequest(
     string RootPath,
     IFblAuthoritySqlSource SqlSource,
-    int ExpectedMenuCount = 696,
+    int? ExpectedMenuCount = null,
     string? SourceCommit = null,
-    string? DatabaseSnapshotId = null);
+    string? DatabaseSnapshotId = null,
+    string Provider = "SqlServer",
+    string DatabaseName = "",
+    bool ValidateGoldenPaths = false);
 
 /// <summary>
 /// 回傳同一個 run 的完整圖與 Preflight 診斷。
@@ -39,7 +42,7 @@ public sealed class FblAuthorityGraphBuilder
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(request.SqlSource);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.RootPath);
-        if (request.ExpectedMenuCount <= 0)
+        if (request.ExpectedMenuCount is <= 0)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(request),
@@ -48,6 +51,10 @@ public sealed class FblAuthorityGraphBuilder
         }
 
         var rootPath = Path.GetFullPath(request.RootPath);
+        var databaseName = string.IsNullOrWhiteSpace(request.DatabaseName) &&
+                           request.SqlSource is FblSqlServerAuthoritySource sqlSource
+            ? sqlSource.DatabaseName
+            : request.DatabaseName;
         if (!Directory.Exists(rootPath))
         {
             throw new DirectoryNotFoundException($"FBL 原始碼根目錄不存在：{rootPath}");
@@ -56,7 +63,7 @@ public sealed class FblAuthorityGraphBuilder
         cancellationToken.ThrowIfCancellationRequested();
         GraphSchema.EnsureCompleteMappings();
 
-        // 696 Menu 是全部解析的中心，不從檔名或向量相似度額外猜測入口。
+        // Menu 是 SQL Server FBL authority graph 的中心，不從檔名或向量相似度額外猜測入口。
         var menus = await request.SqlSource
             .LoadMenusAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -65,7 +72,9 @@ public sealed class FblAuthorityGraphBuilder
                 menus,
                 rootPath,
                 request.SourceCommit,
-                request.DatabaseSnapshotId),
+                request.DatabaseSnapshotId,
+                request.Provider,
+                databaseName),
             Array.Empty<PreflightIssue>());
 
         // C#、MVC View 與瀏覽器端 JavaScript／TypeScript 各建立一次記憶體索引，後續 resolver 只查索引。
@@ -112,11 +121,15 @@ public sealed class FblAuthorityGraphBuilder
             .FromDocument(extraction.Document, GraphBuildStage.CompleteExtraction)
             .Build();
         var issues = extraction.Issues
-            .Concat(GoldenPathValidator.Validate(completedDocument))
+            .Concat(request.ValidateGoldenPaths
+                ? GoldenPathValidator.Validate(completedDocument)
+                : Array.Empty<PreflightIssue>())
             .ToArray();
         var diagnostics = new GraphDocumentValidator(new PreflightValidatorOptions
         {
-            ExpectedCenterMenuCount = request.ExpectedMenuCount,
+            ExpectedCenterMenuCount = request.ExpectedMenuCount ?? menus.Count,
+            RequiredDatabaseName = databaseName,
+            RequiredProvider = request.Provider,
             RequireCompleteExtraction = true,
         }).Validate(completedDocument, issues);
 

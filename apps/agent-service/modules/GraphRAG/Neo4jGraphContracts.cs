@@ -321,6 +321,16 @@ public interface IGraphStore
     /// <summary>將完整 snapshot staging、驗證並原子切換為 active。</summary>
     Task PublishAsync(FblGraphSnapshot snapshot, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 發布後續步驟失敗時，將 active anchor 恢復到發布前版本並清理候選版本。
+    /// 非 Neo4j 測試 store 可使用預設空實作。
+    /// </summary>
+    Task RollbackPublishedVersionAsync(
+        string projectId,
+        string publishedVersion,
+        string? previousVersion,
+        CancellationToken cancellationToken = default) => Task.CompletedTask;
+
     /// <summary>取得專案目前 active manifest；圖譜不一致或尚未發布時回傳 null。</summary>
     Task<string?> GetActiveManifestAsync(
         string projectId,

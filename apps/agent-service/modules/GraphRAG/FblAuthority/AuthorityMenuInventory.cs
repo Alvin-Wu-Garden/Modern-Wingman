@@ -11,27 +11,37 @@ public sealed class MenuInventoryExtractor
         IReadOnlyList<MenuCatalogItem> menus,
         string sourceRoot,
         string? sourceCommit = null,
-        string? databaseSnapshotIdentity = null)
+        string? databaseSnapshotIdentity = null,
+        string provider = "SqlServer",
+        string databaseName = "")
     {
         var runId = $"{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffZ}-{Guid.NewGuid():N}";
         var metadata = new GraphRunMetadata(
             runId,
             DateTimeOffset.UtcNow,
             sourceRoot,
-            "FBL_SPV_SIT",
+            databaseName,
             GraphBuildStage.MenuInventory,
             sourceCommit,
-            databaseSnapshotIdentity);
+            databaseSnapshotIdentity,
+            provider);
         var builder = new GraphDocumentBuilder(metadata);
 
-        // tblMenuMap 本身是 DEFINED_IN 的目標，因此以 DatabaseObject enum 建立一次。
-        const string menuTableKey = "db:FBL_SPV_SIT:dbo:tblMenuMap";
+        // tblMenuMap 本身是 DEFINED_IN 的目標，因此以同一套 DB Object key 規則建立一次。
+        var menuTable = new DatabaseObjectCatalogItem(
+            "dbo",
+            "tblMenuMap",
+            DatabaseObjectKind.Table,
+            provider,
+            databaseName);
+        var menuTableKey = menuTable.CreateNodeKey();
         builder.AddNode(
             GraphNodeKind.DatabaseObject,
             menuTableKey,
             new Dictionary<string, object?>
             {
-                ["database"] = "FBL_SPV_SIT",
+                ["provider"] = provider,
+                ["database"] = databaseName,
                 ["schema"] = "dbo",
                 ["name"] = "tblMenuMap",
                 ["object_kind"] = DatabaseObjectKind.Table.ToString(),

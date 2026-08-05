@@ -299,6 +299,17 @@ export async function getProjectDatabaseConfiguration(
   return response.json()
 }
 
+/** 取得專案所有已設定資料來源；SQL Server 與 SQLite 可同時存在。 */
+export async function getProjectDatabaseConfigurations(
+  projectId: string,
+): Promise<ProjectDatabaseConfiguration[]> {
+  const response = await fetch(`${AGENT_API_BASE_URL}/api/projects/${projectId}/database/all`)
+  if (!response.ok) throw new Error(`讀取資料庫設定失敗 (${response.status})`)
+  const body: unknown = await response.json()
+  if (!Array.isArray(body)) return []
+  return body as ProjectDatabaseConfiguration[]
+}
+
 export async function saveProjectDatabaseConfiguration(
   projectId: string,
   configuration: SaveProjectDatabaseConfiguration,
@@ -313,8 +324,14 @@ export async function saveProjectDatabaseConfiguration(
   return response.json()
 }
 
-export async function deleteProjectDatabaseConfiguration(projectId: string): Promise<void> {
-  const response = await fetch(`${AGENT_API_BASE_URL}/api/projects/${projectId}/database`, {
+export async function deleteProjectDatabaseConfiguration(
+  projectId: string,
+  provider?: SaveProjectDatabaseConfiguration['provider'],
+): Promise<void> {
+  const endpoint = provider
+    ? `${AGENT_API_BASE_URL}/api/projects/${projectId}/database/${provider}`
+    : `${AGENT_API_BASE_URL}/api/projects/${projectId}/database`
+  const response = await fetch(endpoint, {
     method: 'DELETE',
   })
   if (!response.ok && response.status !== 204)

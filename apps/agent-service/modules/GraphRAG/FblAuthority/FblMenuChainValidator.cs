@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 namespace AgentService.Modules.GraphRAG.FblAuthority;
 
 /// <summary>
-/// 驗證 FBL 696 個中心菜單是否保留參考專案已確認的強型別核心鏈。
+/// 僅供 FBL_SPV_SIT 開發驗收資料集使用的 696 筆菜單回歸驗證器；production pipeline 不會呼叫本類別。
 /// 驗證器只讀取單次 <see cref="GraphDocument"/>，不存取 Neo4j、SQL Server 或檔案系統。
 /// </summary>
 public sealed partial class FblMenuChainValidator
@@ -730,11 +730,23 @@ public sealed partial class FblMenuChainValidator
             "code:APEX.FileTransform.TransformV2.TransformV2_P13_FxRate",
             "20059 Category->Transform",
             failures);
+        var provider = string.IsNullOrWhiteSpace(document.Metadata.Provider)
+            ? "SqlServer"
+            : document.Metadata.Provider;
+        var databaseName = string.IsNullOrWhiteSpace(document.Metadata.DatabaseName)
+            ? "unknown"
+            : document.Metadata.DatabaseName;
+        var fxRateKey = new DatabaseObjectCatalogItem(
+            "dbo",
+            "tblFxRate",
+            DatabaseObjectKind.Table,
+            provider,
+            databaseName).CreateNodeKey();
         RequireGoldenEdge(
             adjacency,
             "code:APEX.RiskMaster.DBDefinition.DDFxRate",
             GraphRelationshipKind.MapsTo,
-            "db:FBL_SPV_SIT:dbo:tblFxRate",
+            fxRateKey,
             "20059 DD->tblFxRate",
             failures);
         RequireGoldenOutgoing(adjacency, "menu:20059", GraphRelationshipKind.ConfirmedBy, "20059 ConfirmedBy", failures);

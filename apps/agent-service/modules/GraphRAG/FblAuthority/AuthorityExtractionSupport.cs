@@ -34,14 +34,24 @@ public sealed record CustomReportDataSourceItem(Guid SerialId, string? Descripti
 /// <summary>表示 tblCustomDesignReportCustomParameterDataSource 的 PD。</summary>
 public sealed record CustomParameterDataSourceItem(Guid SerialId, string? Description);
 
-/// <summary>表示 FBL_SPV_SIT 系統目錄中已存在的一個資料庫物件。</summary>
+/// <summary>表示外部資料庫系統目錄中已存在的一個資料庫物件。</summary>
 public sealed record DatabaseObjectCatalogItem(
     string SchemaName,
     string ObjectName,
-    DatabaseObjectKind Kind)
+    DatabaseObjectKind Kind,
+    string Provider = "SqlServer",
+    string DatabaseName = "")
 {
-    /// <summary>取得包含固定資料庫範圍的穩定節點 Key。</summary>
-    public string CreateNodeKey() => $"db:FBL_SPV_SIT:{SchemaName}:{ObjectName}";
+    /// <summary>
+    /// 取得包含 Provider、資料庫與 Schema 的穩定節點 Key，避免不同資料來源的同名物件碰撞。
+    /// 舊測試建立的三參數物件仍會產生可用 Key，正式抽取器會填入實際識別。
+    /// </summary>
+    public string CreateNodeKey()
+    {
+        var provider = string.IsNullOrWhiteSpace(Provider) ? "SqlServer" : Provider.Trim();
+        var database = string.IsNullOrWhiteSpace(DatabaseName) ? "unknown" : DatabaseName.Trim();
+        return $"db:{provider.ToLowerInvariant()}:{database}:{SchemaName}:{ObjectName}";
+    }
 }
 
 /// <summary>保存一個 Resolver 階段產生的圖與所有待人工審閱問題。</summary>
