@@ -13,7 +13,7 @@ public sealed class BackendDependencyResolver
     private readonly CSharpSourceIndex _sourceIndex;
     private readonly IReadOnlyList<DatabaseObjectCatalogItem> _databaseObjects;
 
-    /// <summary>建立只使用原始碼索引與 FBL_SPV_SIT 目錄事實的 Resolver。</summary>
+    /// <summary>建立只使用原始碼索引與目前 SQL authority 目錄事實的 Resolver。</summary>
     public BackendDependencyResolver(
         CSharpSourceIndex sourceIndex,
         IReadOnlyList<DatabaseObjectCatalogItem> databaseObjects)
@@ -183,7 +183,7 @@ public sealed class BackendDependencyResolver
                     issues.Add(new PreflightIssue(
                         PreflightSeverity.Information,
                         PreflightReasonCode.OutOfScopeDatabase,
-                        $"'{target.FullName}' 使用非 FBL_SPV_SIT 連線變數，依範圍規則停止向 DB Object 展開。",
+                        $"'{target.FullName}' 使用非目前資料庫連線變數，依範圍規則停止向 DB Object 展開。",
                         FromKey: $"code:{controller.FullName}",
                         TargetText: target.FullName,
                         SourceFile: method.RelativePath,
@@ -285,7 +285,8 @@ public sealed class BackendDependencyResolver
                         databaseObject.CreateNodeKey(),
                         new Dictionary<string, object?>
                         {
-                            ["database"] = "FBL_SPV_SIT",
+                            ["provider"] = databaseObject.Provider,
+                            ["database"] = databaseObject.DatabaseName,
                             ["schema"] = databaseObject.SchemaName,
                             ["name"] = databaseObject.ObjectName,
                             ["object_kind"] = databaseObject.Kind.ToString(),
@@ -436,7 +437,7 @@ public sealed class BackendDependencyResolver
             issues.Add(new PreflightIssue(
                 PreflightSeverity.Error,
                 PreflightReasonCode.DatabaseObjectNotFound,
-                $"FBL_SPV_SIT 中找不到唯一資料庫物件 '{parsedName.DisplayName}'。",
+                $"資料庫中找不到唯一資料庫物件 '{parsedName.DisplayName}'。",
                 FromKey: $"code:{definition.FullName}",
                 TargetText: parsedName.DisplayName,
                 Candidates: matches.Select(item => $"{item.SchemaName}.{item.ObjectName}").ToArray()));
@@ -449,7 +450,8 @@ public sealed class BackendDependencyResolver
             databaseObject.CreateNodeKey(),
             new Dictionary<string, object?>
             {
-                ["database"] = "FBL_SPV_SIT",
+                ["provider"] = databaseObject.Provider,
+                ["database"] = databaseObject.DatabaseName,
                 ["schema"] = databaseObject.SchemaName,
                 ["name"] = databaseObject.ObjectName,
                 ["object_kind"] = databaseObject.Kind.ToString(),

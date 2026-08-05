@@ -74,7 +74,7 @@
     <!-- Override the vulnerable 9.x transitive dependency from Roslyn/MSBuild. -->
     <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.10" NoWarn="NU1510" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
-    <!-- GraphRAG V3 的 live SQL Server metadata 與業務設定抽取只使用唯讀查詢。 -->
+    <!-- GraphRAG V4 的 live SQL Server metadata 與業務設定抽取只使用唯讀查詢。 -->
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
     <!-- 使用正式 T-SQL AST 判斷 READS/WRITES，避免以正規表示式猜測 SQL 關係。 -->
     <PackageReference Include="Microsoft.SqlServer.TransactSql.ScriptDom" Version="180.37.3" />

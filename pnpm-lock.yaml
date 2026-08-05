@@ -114,12 +114,6 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
-  packages/mcp-presets: {}
-
-  packages/prompt-assets: {}
-
-  packages/skills: {}
-
   packages/ui-kit:
     devDependencies:
       typescript:

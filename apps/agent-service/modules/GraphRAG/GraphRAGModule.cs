@@ -38,7 +38,8 @@ public static class GraphRagModule
                 client => client.Timeout = TimeSpan.FromMinutes(15))
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
             {
-                CheckCertificateRevocationList = false,
+                // Neo4j 套件下載也必須保留 TLS 憑證撤銷檢查，避免以方便開發為由降低供應鏈安全性。
+                CheckCertificateRevocationList = true,
             });
 
         // FBLAuthority 是唯一抽取核心；禁止再註冊通用語言 Extractor 或舊 Graph assembler。

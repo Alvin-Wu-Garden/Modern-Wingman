@@ -104,16 +104,16 @@ public static class ConversationEndpoints
         IConversationRepository conversations,
         IProjectRepository projects,
         IModelProviderService providers,
-        GraphIndexingService indexing,
         GraphRetrievalService graphRag,
         IGraphStore graphStore,
-        INeo4jRuntime neo4j,
         WingmanChatAgent agent,
-        ILlmCompletionService llm,
-        IGraphIndexWatcherRegistry watcherRegistry,
+        IProjectJobQueue projectJobs,
+        IServiceScopeFactory scopeFactory,
+        ILoggerFactory loggerFactory,
         HttpContext http,
         CancellationToken ct)
     {
+        var logger = loggerFactory.CreateLogger("ConversationEndpoints");
         var conversation = await conversations.GetAsync(id, ct);
         if (conversation is null)
         {
@@ -130,6 +130,8 @@ public static class ConversationEndpoints
         var prompt = request.UserMessage;
         ProjectEntity? project = null;
         IReadOnlyList<AIFunction> projectTools = [];
+        var graphStatus = "not_applicable";
+        string? graphWarning = null;
 
         if (conversation.Scope == ConversationScope.Project)
         {
@@ -141,51 +143,16 @@ public static class ConversationEndpoints
                 http.Response.StatusCode = StatusCodes.Status404NotFound;
                 return;
             }
-            if (!await neo4j.EnsureAvailableAsync(null, ct))
-            {
-                http.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                await http.Response.WriteAsJsonAsync(new
-                {
-                    error = neo4j.LastError ?? "Neo4j 圖譜資料庫目前無法連線。",
-                }, ct);
-                return;
-            }
 
-            // 正常情況由 FileSystemWatcher 在檔案異動當下標記 PendingChanges，
-            // 不應在每一次問答前重新列舉並 SHA-256 整個專案。
-            // 只有索引已知過期，或 watcher 沒有成功註冊時，才啟用一次性 hash fallback。
-            if (RequiresFullIndexRefreshForProjectQuestion(project))
-            {
-                project = await indexing.IndexProjectAsync(project.Id, ct);
-            }
-            else if (!watcherRegistry.IsRegistered(project.Id) &&
-                     await indexing.CatchUpAsync(project.Id, ct))
-            {
-                project = await indexing.IndexProjectAsync(project.Id, ct);
-            }
-            if (project.IndexManifestVersion is null)
-            {
-                http.Response.StatusCode = StatusCodes.Status409Conflict;
-                await http.Response.WriteAsJsonAsync(new
-                {
-                    error = "此專案尚未有可用的成功索引，請先完成索引。",
-                }, ct);
-                return;
-            }
-            var activeVersion = await graphStore.GetActiveManifestAsync(project.Id, ct);
-            if (!string.Equals(
-                    activeVersion,
-                    project.IndexManifestVersion,
-                    StringComparison.Ordinal))
-            {
-                http.Response.StatusCode = StatusCodes.Status409Conflict;
-                await http.Response.WriteAsJsonAsync(new
-                {
-                    error = "專案索引版本與目前啟用的 Graph 版本不一致，暫時不開放問答。",
-                    errorCode = "graph_manifest_mismatch",
-                }, ct);
-                return;
-            }
+            // 問答只做短時間 Graph probe，不在 HTTP request 內啟動 Neo4j、完整索引或
+            // 重新 SHA-256 專案。Graph 暫時不可用時，後續仍會建立唯讀原始碼工具。
+            var graphContext = await ProbeGraphContextAsync(
+                project,
+                graphStore,
+                logger,
+                ct);
+            graphStatus = graphContext.Status;
+            graphWarning = graphContext.Warning;
         }
 
         var firstExchange = conversation.Messages.Count == 0;
@@ -216,6 +183,8 @@ public static class ConversationEndpoints
                 resolvedModelId = modelId,
                 scope = ToWireValue(conversation.Scope),
                 runId,
+                graphStatus = project is null ? null : graphStatus,
+                graphWarning,
             }, ct);
             runActivityId = await activity.StartAsync(
                 "run.started",
@@ -226,16 +195,44 @@ public static class ConversationEndpoints
 
             if (project is not null)
             {
-                // 只把本次問題拿去檢索；歷史訊息仍由共用 Agent 以正常對話歷史提供。
-                // 這可避免舊問題污染 GraphRAG 關鍵字，同時保留多輪對話的語意連續性。
-                prompt = await graphRag.BuildAnswerPromptAsync(
-                    project.Id,
-                    project.RootPath,
-                    request.UserMessage,
-                    ct,
-                    profile.Id,
-                    modelId,
-                    activity: activity);
+                if (graphStatus is "ready" or "stale")
+                {
+                    try
+                    {
+                        // 只把本次問題拿去檢索；歷史訊息仍由共用 Agent 以正常對話歷史提供。
+                        // 這可避免舊問題污染 GraphRAG 關鍵字，同時保留多輪對話的語意連續性。
+                        prompt = await graphRag.BuildAnswerPromptAsync(
+                            project.Id,
+                            project.RootPath,
+                            request.UserMessage,
+                            ct,
+                            profile.Id,
+                            modelId,
+                            activity: activity);
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        // Graph probe 可能在真正查詢時失效；降級到 source-only，讓 Agent
+                        // 仍可使用 search_project_text、read_project_file_range 與 symbol tool。
+                        graphStatus = "unavailable";
+                        graphWarning = "知識圖譜檢索暫時失敗，本輪改用最新原始碼工具。";
+                        logger.LogWarning(
+                            exception,
+                            "Project Graph retrieval failed; falling back to source tools. ProjectId={ProjectId}",
+                            project.Id);
+                        prompt = BuildSourceOnlyPrompt(
+                            request.UserMessage,
+                            project.RootPath,
+                            graphWarning);
+                    }
+                }
+                else
+                {
+                    prompt = BuildSourceOnlyPrompt(
+                            request.UserMessage,
+                            project.RootPath,
+                            graphWarning ?? "目前沒有可用的知識圖譜版本。");
+                }
 
                 // 工具實例綁定本輪 projectId 與 rootPath，不註冊成全域 Singleton，
                 // 避免另一個對話誤查到不同專案，也不讓模型自行指定任意工作目錄。
@@ -283,21 +280,37 @@ public static class ConversationEndpoints
                 }, ct);
             }
 
-            if (firstExchange && fullResponse.Length > 0)
-                await TryGenerateTitleAsync(
-                    id,
-                    request.UserMessage,
-                    fullResponse.ToString(),
-                    profile.Id,
-                    modelId,
-                    conversations,
-                    llm);
-
             if (runActivityId is not null)
                 await activity.CompleteAsync(
                     runActivityId,
                     "回答已完成");
             await WriteSseAsync(http, new { done = true }, CancellationToken.None);
+
+            if (firstExchange && fullResponse.Length > 0)
+            {
+                var titleInput = fullResponse.ToString();
+                await projectJobs.EnqueueAsync(async backgroundToken =>
+                {
+                    // 背景工作自行建立 scope，避免 HTTP request 結束後使用已釋放的
+                    // scoped repository；標題失敗不得影響已送出的主要回答。
+                    using var backgroundScope = scopeFactory.CreateScope();
+                    var backgroundConversations =
+                        backgroundScope.ServiceProvider
+                            .GetRequiredService<IConversationRepository>();
+                    var backgroundLlm =
+                        backgroundScope.ServiceProvider
+                            .GetRequiredService<ILlmCompletionService>();
+                    await TryGenerateTitleAsync(
+                        id,
+                        request.UserMessage,
+                        titleInput,
+                        profile.Id,
+                        modelId,
+                        backgroundConversations,
+                        backgroundLlm,
+                        backgroundToken);
+                }, CancellationToken.None);
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -320,11 +333,14 @@ public static class ConversationEndpoints
         string providerProfileId,
         string? modelId,
         IConversationRepository conversations,
-        ILlmCompletionService llm)
+        ILlmCompletionService llm,
+        CancellationToken cancellationToken = default)
     {
         try
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
             var prompt = $"""
                 請用十個繁體中文字以內，為以下對話產生純文字標題，不要加標點。
                 使用者：{Truncate(userMessage, 300)}
@@ -343,7 +359,7 @@ public static class ConversationEndpoints
                 await conversations.SetTitleAsync(
                     conversationId,
                     Truncate(title, 30),
-                    CancellationToken.None);
+                    cancellationToken);
         }
         catch
         {
@@ -369,24 +385,95 @@ public static class ConversationEndpoints
             ? ConversationScope.Project
             : ConversationScope.General;
 
-    /// <summary>
-    /// 判斷專案問答是否必須先執行完整索引。
-    /// PendingChanges 包含檔案 watcher 與資料庫設定異動；Stale 表示上一輪更新失敗但
-    /// 仍有舊圖可用。兩者都應在回答前重試；Indexed 且 watcher 正常時則直接使用現有 Graph。
-    /// </summary>
-    /// <param name="project">本次專案對話綁定的持久化專案狀態。</param>
-    /// <returns>需要先呼叫 IndexProjectAsync 時為 true。</returns>
-    internal static bool RequiresFullIndexRefreshForProjectQuestion(
-        ProjectEntity project) =>
-        project.IndexStatus is
-            ProjectIndexStatus.PendingChanges or
-            ProjectIndexStatus.Stale;
-
     private static string ToWireValue(ConversationScope scope) =>
         scope == ConversationScope.Project ? "project" : "general";
 
     private static string ShortTitle(string value) =>
         value.Length > 50 ? value[..50] + "…" : value;
+
+    /// <summary>
+    /// 建立沒有 Graph 證據時使用的專案提示，明確要求 Agent 改用唯讀原始碼工具。
+    /// </summary>
+    private static string BuildSourceOnlyPrompt(
+        string question,
+        string rootPath,
+        string warning) =>
+        $"""
+        你正在分析 FBL 投資系統專案，專案根目錄為：{rootPath}
+
+        本輪知識圖譜狀態：{warning}
+        請不要假設不存在的 Graph 節點或鏈路。請優先使用本輪提供的唯讀工具：
+        - search_project_text：搜尋原始碼、ASPX、JavaScript、TypeScript、SQL 與設定。
+        - find_csharp_symbol：確認 C# 類別、方法與行號。
+        - read_project_file_range：讀取實際原始碼並附上檔案路徑與行號。
+
+        回答時必須區分已確認事實、合理推論與尚未確認項目；資訊不足時說明缺口，不能自行補造 Graph 關係。
+
+        使用者問題：
+        {question}
+        """;
+
+    /// <summary>
+    /// 以短逾時檢查目前已存在的 Graph，不負責啟動 Neo4j 或執行索引。
+    /// 這是專案問答的可降級探測，避免 Graph cold start 阻塞原始碼問答。
+    /// </summary>
+    private static async Task<GraphContextSnapshot> ProbeGraphContextAsync(
+        ProjectEntity project,
+        IGraphStore graphStore,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        using var probeTimeout = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken);
+        probeTimeout.CancelAfter(TimeSpan.FromMilliseconds(750));
+
+        try
+        {
+            if (!await graphStore.PingAsync(probeTimeout.Token))
+            {
+                return new GraphContextSnapshot(
+                    "unavailable",
+                    "知識圖譜目前無法連線；本輪改用最新原始碼工具。");
+            }
+
+            var activeVersion = await graphStore.GetActiveManifestAsync(
+                project.Id,
+                probeTimeout.Token);
+            if (string.IsNullOrWhiteSpace(activeVersion))
+            {
+                return new GraphContextSnapshot(
+                    "unavailable",
+                    "目前沒有可用的成功 Graph 版本；本輪改用原始碼工具。" );
+            }
+
+            var status = string.Equals(
+                    project.IndexManifestVersion,
+                    activeVersion,
+                    StringComparison.Ordinal)
+                ? "ready"
+                : "stale";
+            var warning = status == "stale"
+                ? "知識圖譜版本可能落後目前專案檔案；重要結論需用原始碼工具確認。"
+                : null;
+            return new GraphContextSnapshot(status, warning);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new GraphContextSnapshot(
+                "unavailable",
+                "知識圖譜探測逾時；本輪改用最新原始碼工具。" );
+        }
+        catch (Exception exception)
+        {
+            logger.LogDebug(
+                exception,
+                "Graph probe failed; source-only project analysis will continue. ProjectId={ProjectId}",
+                project.Id);
+            return new GraphContextSnapshot(
+                "unavailable",
+                "知識圖譜探測失敗；本輪改用最新原始碼工具。" );
+        }
+    }
 
     private static string Truncate(string value, int maximumLength) =>
         value.Length <= maximumLength ? value : value[..maximumLength] + "…";
@@ -408,4 +495,6 @@ public static class ConversationEndpoints
         string? ProjectId = null);
 
     private sealed record SetTitlePayload(string Title);
+
+    private sealed record GraphContextSnapshot(string Status, string? Warning);
 }

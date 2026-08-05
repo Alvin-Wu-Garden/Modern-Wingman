@@ -36,13 +36,43 @@ public sealed class ProjectDatabaseConfigurationStore(
         bool includePassword = false,
         CancellationToken ct = default)
     {
-        await using var db = await factory.CreateDbContextAsync(ct);
-        var row = await db.ProjectDatabaseConfigurations
-            .AsNoTracking()
-            .FirstOrDefaultAsync(item => item.ProjectId == projectId, ct);
-        if (row is null)
-            return null;
+        var configurations = await GetAllAsync(projectId, includePassword, ct);
+        // 舊版 API 仍只回傳一筆；優先選 SQL Server，確保既有 UI 行為不變。
+        return configurations.FirstOrDefault(item => item.Provider == ProjectDatabaseProvider.SqlServer)
+            ?? configurations.FirstOrDefault();
+    }
 
+    /// <summary>讀取指定 Provider，避免多來源設定互相誤用。</summary>
+    public async Task<ProjectDatabaseConfiguration?> GetAsync(
+        string projectId,
+        ProjectDatabaseProvider provider,
+        bool includePassword = false,
+        CancellationToken ct = default)
+    {
+        var configurations = await GetAllAsync(projectId, includePassword, ct);
+        return configurations.FirstOrDefault(item => item.Provider == provider);
+    }
+
+    /// <summary>讀取專案全部 Provider 設定，並依 Provider 穩定排序。</summary>
+    public async Task<IReadOnlyList<ProjectDatabaseConfiguration>> GetAllAsync(
+        string projectId,
+        bool includePassword = false,
+        CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        var rows = await db.ProjectDatabaseConfigurations
+            .AsNoTracking()
+            .Where(item => item.ProjectId == projectId)
+            .OrderBy(item => item.Provider)
+            .ToListAsync(ct);
+        return rows.Select(row => ToDomain(row, includePassword)).ToArray();
+    }
+
+    /// <summary>將 EF 資料列轉成不暴露密文的領域設定。</summary>
+    private ProjectDatabaseConfiguration ToDomain(
+        ProjectDatabaseConfigurationRecord row,
+        bool includePassword)
+    {
         var hasPassword = !string.IsNullOrWhiteSpace(row.ProtectedPassword);
         var password = includePassword && hasPassword
             ? secretProtector.Unprotect(row.ProtectedPassword!, row.EncryptionScheme!)
@@ -73,18 +103,21 @@ public sealed class ProjectDatabaseConfigurationStore(
         CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
+        var providerName = configuration.Provider.ToString();
         var row = await db.ProjectDatabaseConfigurations
-            .FirstOrDefaultAsync(item => item.ProjectId == configuration.ProjectId, ct);
+            .FirstOrDefaultAsync(item => item.ProjectId == configuration.ProjectId &&
+                                         item.Provider == providerName, ct);
         if (row is null)
         {
             row = new ProjectDatabaseConfigurationRecord
             {
                 ProjectId = configuration.ProjectId,
+                Provider = providerName,
             };
             db.ProjectDatabaseConfigurations.Add(row);
         }
 
-        row.Provider = configuration.Provider.ToString();
+        row.Provider = providerName;
         row.Server = configuration.Server;
         row.Port = configuration.Port;
         row.DatabaseName = configuration.DatabaseName;
@@ -110,12 +143,19 @@ public sealed class ProjectDatabaseConfigurationStore(
         await db.SaveChangesAsync(ct);
     }
 
-    /// <summary>依 ProjectId 刪除設定；不存在時視為成功。</summary>
-    public async Task DeleteAsync(string projectId, CancellationToken ct = default)
+    /// <summary>刪除指定 Provider 或專案全部設定；不存在時視為成功。</summary>
+    public async Task DeleteAsync(
+        string projectId,
+        ProjectDatabaseProvider? provider = null,
+        CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        await db.ProjectDatabaseConfigurations
-            .Where(item => item.ProjectId == projectId)
-            .ExecuteDeleteAsync(ct);
+        var query = db.ProjectDatabaseConfigurations.Where(item => item.ProjectId == projectId);
+        if (provider is not null)
+        {
+            var providerName = provider.Value.ToString();
+            query = query.Where(item => item.Provider == providerName);
+        }
+        await query.ExecuteDeleteAsync(ct);
     }
 }

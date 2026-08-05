@@ -150,7 +150,25 @@ public sealed partial class Neo4jGraphStore
                        startNode(item.relationship).id AS sourceId,
                        endNode(item.relationship).id AS targetId,
                        item.direction AS direction
-                ORDER BY centerId, type(item.relationship), item.neighbor.id
+                ORDER BY
+                    centerId,
+                    CASE type(item.relationship)
+                        WHEN 'OPENS' THEN 0
+                        WHEN 'ROUTES_TO' THEN 1
+                        WHEN 'IMPLEMENTED_BY' THEN 2
+                        WHEN 'RENDERS' THEN 3
+                        WHEN 'LOADS_PLUGIN_REPORT' THEN 4
+                        WHEN 'OPENS_CUSTOM_REPORT' THEN 5
+                        WHEN 'CONTAINS_DATA_SOURCE' THEN 6
+                        WHEN 'READS_VIA' THEN 7
+                        WHEN 'WRITES_VIA' THEN 8
+                        WHEN 'USES_DEFINITION' THEN 9
+                        WHEN 'MAPS_TO' THEN 10
+                        WHEN 'QUERIES' THEN 11
+                        WHEN 'CALLS' THEN 12
+                        ELSE 13
+                    END,
+                    item.neighbor.id
                 """,
                 new { projectId, nodeIds = distinctIds, limitPerNode });
             var mutable = distinctIds.ToDictionary(

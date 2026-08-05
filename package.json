@@ -10,8 +10,7 @@
   "scripts": {
     "dev": "pnpm -r --filter=@modern-wingman/desktop tauri dev",
     "build": "pnpm -r build",
-    "typecheck": "pnpm -r typecheck",
-    "lint": "pnpm -r lint"
+    "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
     "typescript": "^5.8.3"

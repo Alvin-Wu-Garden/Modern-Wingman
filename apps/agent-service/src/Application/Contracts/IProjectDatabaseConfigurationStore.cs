@@ -32,7 +32,7 @@ public sealed record ProjectDatabaseConfiguration(
     string? SqlitePath,
     DateTimeOffset UpdatedAt);
 
-/// <summary>每個專案只保存一組主要資料庫設定。</summary>
+/// <summary>保存專案可供 GraphRAG 使用的多組外部資料庫設定。</summary>
 public interface IProjectDatabaseConfigurationStore
 {
     /// <summary>
@@ -40,6 +40,22 @@ public interface IProjectDatabaseConfigurationStore
     /// 只有建立索引連線字串的後端流程可以要求解密密碼。
     /// </summary>
     Task<ProjectDatabaseConfiguration?> GetAsync(
+        string projectId,
+        bool includePassword = false,
+        CancellationToken ct = default);
+
+    /// <summary>取得指定 Provider 的設定；不存在時回傳 null。</summary>
+    Task<ProjectDatabaseConfiguration?> GetAsync(
+        string projectId,
+        ProjectDatabaseProvider provider,
+        bool includePassword = false,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// 取得專案全部已保存的資料來源設定。
+    /// 回傳順序固定為 Provider 名稱，供索引閘門穩定逐一驗證；未設定的 Provider 不會出現在結果中。
+    /// </summary>
+    Task<IReadOnlyList<ProjectDatabaseConfiguration>> GetAllAsync(
         string projectId,
         bool includePassword = false,
         CancellationToken ct = default);
@@ -53,5 +69,8 @@ public interface IProjectDatabaseConfigurationStore
         CancellationToken ct = default);
 
     /// <summary>刪除專案設定與其密文，不接觸外部資料庫。</summary>
-    Task DeleteAsync(string projectId, CancellationToken ct = default);
+    Task DeleteAsync(
+        string projectId,
+        ProjectDatabaseProvider? provider = null,
+        CancellationToken ct = default);
 }

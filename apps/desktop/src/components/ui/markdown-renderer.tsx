@@ -132,21 +132,22 @@ export function MarkdownRenderer({ content, streaming }: MarkdownRendererProps) 
           /* ── 表格 ── */
           table({ children }) {
             return (
-              <div className="overflow-x-auto my-3">
+              <div className="my-3 max-w-full overflow-x-auto rounded-lg border border-border">
                 <table className="w-full text-xs border-collapse">{children}</table>
               </div>
             )
           },
           th({ children }) {
             return (
-              <th className="border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-left font-semibold text-zinc-100">
+              // 使用主題 token，避免 Light／Dark／Glass 主題下沿用固定黑底造成對比失衡。
+              <th className="border-b border-border bg-surface-alt px-3 py-1.5 text-left font-semibold text-ink">
                 {children}
               </th>
             )
           },
           td({ children }) {
             return (
-              <td className="border border-zinc-700 px-3 py-1.5">{children}</td>
+              <td className="border-b border-border px-3 py-1.5 align-top text-ink-secondary">{children}</td>
             )
           },
         }}

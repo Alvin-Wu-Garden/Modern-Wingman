@@ -14,17 +14,44 @@ param(
 $ErrorActionPreference = "Stop"
 $workspaceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $desktopRoot = Join-Path $workspaceRoot "apps\desktop"
+$tauriRoot = Join-Path $desktopRoot "src-tauri"
 $agentExecutable = [System.IO.Path]::GetFullPath(
     (Join-Path $workspaceRoot "apps\agent-service\bin\Debug\net10.0\AgentService.exe"))
+$agentAssembly = [System.IO.Path]::GetFullPath(
+    (Join-Path $workspaceRoot "apps\agent-service\bin\Debug\net10.0\AgentService.dll"))
+
+# Cargo 的 target-dir 可能由 workspace 的 .cargo/config.toml 指定在工作區外，
+# 因此透過 cargo metadata 取得實際路徑，避免綁定特定電腦或使用者目錄。
+$tauriTargetDirectory = $null
+try {
+    $cargoMetadataJson = & cargo metadata `
+        --no-deps `
+        --format-version 1 `
+        --manifest-path (Join-Path $tauriRoot "Cargo.toml") `
+        2>$null | Out-String
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($cargoMetadataJson)) {
+        $tauriTargetDirectory = [string](
+            ($cargoMetadataJson | ConvertFrom-Json).target_directory)
+    }
+}
+catch {
+    # 停止流程仍可在 cargo 尚未安裝時清理 Agent/Vite；Tauri 路徑退回預設 target。
+}
+
+if ([string]::IsNullOrWhiteSpace($tauriTargetDirectory)) {
+    $tauriTargetDirectory = Join-Path $tauriRoot "target"
+}
+
 $tauriExecutable = [System.IO.Path]::GetFullPath(
-    "D:\CargoTarget\modern-wingman\debug\modern-wingman-desktop.exe")
+    (Join-Path $tauriTargetDirectory "debug\modern-wingman-desktop.exe"))
 $neo4jRuntimeRoot = [System.IO.Path]::GetFullPath(
     (Join-Path ([Environment]::GetFolderPath("UserProfile")) ".Wingman\neo4j"))
 $neo4jOwnershipPath = Join-Path $neo4jRuntimeRoot "managed-v3-owner.json"
 $runtimeStatePath = Join-Path $env:TEMP "modern-wingman-debug-runtime.json"
 $viteOutputPath = Join-Path $env:TEMP "modern-wingman-vite.stdout.log"
 $viteErrorPath = Join-Path $env:TEMP "modern-wingman-vite.stderr.log"
-$portsToVerify = @(4173, 5002, 17475, 17688)
+# 只驗證本流程明確管理的 Listener；Neo4j Browser HTTP port 不在此清單。
+$portsToVerify = @(4173, 5002, 17688)
 $stoppedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
 
 function Get-ListeningProcessIds {
@@ -97,20 +124,53 @@ function Stop-VerifiedProcessTree {
     [void]$stoppedProcessIds.Add($ProcessId)
 }
 
-function Test-ViteProcess {
-    <# Vite 必須同時具有 vite command 與本專案 desktop 路徑，不能只依 node.exe 判斷。 #>
+function Test-AgentProcess {
+    <# AgentService 可由 VS Code 以 exe 或 dotnet + DLL 啟動，兩者都必須屬於目前 workspace。 #>
     param([Parameter(Mandatory)][object]$Snapshot)
 
-    return $Snapshot.Name -ieq "node.exe" -and
-        $Snapshot.CommandLine.Contains("vite", [StringComparison]::OrdinalIgnoreCase) -and
-        $Snapshot.CommandLine.Contains($desktopRoot, [StringComparison]::OrdinalIgnoreCase)
+    if (Test-SamePath -Left $Snapshot.ExecutablePath -Right $agentExecutable) {
+        return $true
+    }
+
+    return $Snapshot.Name -ieq "dotnet.exe" -and
+        $Snapshot.CommandLine.Contains($agentAssembly, [StringComparison]::OrdinalIgnoreCase)
 }
 
-function Test-AgentProcess {
-    <# AgentService 只接受目前 workspace 的 Debug 執行檔。 #>
-    param([Parameter(Mandatory)][object]$Snapshot)
+function Test-PathWithinRoot {
+    <#
+    安全判斷候選路徑是否位於指定 runtime root 內。
 
-    return Test-SamePath -Left $Snapshot.ExecutablePath -Right $agentExecutable
+    Neo4j ownership 的 Home 是實際版本目錄（例如
+    .Wingman\neo4j\neo4j-community-5.26.0），不是 .Wingman\neo4j
+    本身，因此不能使用完全相等的路徑比較；同時仍要拒絕 root 外的路徑。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Candidate
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Root) -or
+        [string]::IsNullOrWhiteSpace($Candidate)) {
+        return $false
+    }
+
+    try {
+        $rootFullPath = [System.IO.Path]::GetFullPath($Root).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar) +
+            [System.IO.Path]::DirectorySeparatorChar
+        $candidateFullPath = [System.IO.Path]::GetFullPath($Candidate).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar) +
+            [System.IO.Path]::DirectorySeparatorChar
+
+        return $candidateFullPath.StartsWith(
+            $rootFullPath,
+            [StringComparison]::OrdinalIgnoreCase)
+    }
+    catch {
+        return $false
+    }
 }
 
 function Test-TauriProcess {
@@ -120,16 +180,97 @@ function Test-TauriProcess {
     return Test-SamePath -Left $Snapshot.ExecutablePath -Right $tauriExecutable
 }
 
-function Test-Neo4jProcess {
-    <# 只回收 .Wingman runtime 內建 Java；不得碰使用者自行安裝的 Neo4j 或其他 Java。 #>
-    param([Parameter(Mandatory)][object]$Snapshot)
+function Read-ManagedNeo4jOwnership {
+    <# 讀取 Agent Service 建立的 ownership；檔案遺失或損壞時不得猜測並終止 Java。 #>
+    if (-not (Test-Path -LiteralPath $neo4jOwnershipPath)) {
+        return $null
+    }
+
+    try {
+        return Get-Content -LiteralPath $neo4jOwnershipPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        Write-Warning "Neo4j ownership 無法解析，略過 managed Neo4j 清理以避免誤殺程序。"
+        return $null
+    }
+}
+
+function Test-Neo4jLauncher {
+    <# launcher 必須同時指向 ownership 的安裝路徑與 neo4j 指令，避免 PID 重用誤判。 #>
+    param(
+        [Parameter(Mandatory)][object]$Snapshot,
+        [Parameter(Mandatory)][string]$Neo4jHome
+    )
+
+    return ($Snapshot.Name -ieq "cmd.exe" -or
+            $Snapshot.Name -ieq "powershell.exe" -or
+            $Snapshot.Name -ieq "pwsh.exe") -and
+        $Snapshot.CommandLine.Contains("neo4j", [StringComparison]::OrdinalIgnoreCase) -and
+        $Snapshot.CommandLine.Contains($Neo4jHome, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-Neo4jJavaProcess {
+    <#
+    只接受由固定 runtime JRE 啟動、且命令列明確指向 ownership Home 的
+    Neo4j Java 程序。這是 launcher PID 過期時的安全復原路徑，不會依
+    port 或 java.exe 名稱單獨終止未知程序。
+    #>
+    param(
+        [Parameter(Mandatory)][object]$Snapshot,
+        [Parameter(Mandatory)][string]$Neo4jHome
+    )
 
     return $Snapshot.Name -ieq "java.exe" -and
-        -not [string]::IsNullOrWhiteSpace($Snapshot.ExecutablePath) -and
-        [System.IO.Path]::GetFullPath($Snapshot.ExecutablePath).StartsWith(
-            $neo4jRuntimeRoot,
-            [StringComparison]::OrdinalIgnoreCase) -and
-        $Snapshot.CommandLine.Contains("neo4j", [StringComparison]::OrdinalIgnoreCase)
+        (Test-PathWithinRoot -Root $neo4jRuntimeRoot -Candidate ([string]$Snapshot.ExecutablePath)) -and
+        $Snapshot.CommandLine.Contains("org.neo4j.server", [StringComparison]::OrdinalIgnoreCase) -and
+        $Snapshot.CommandLine.Contains($Neo4jHome, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Stop-StaleManagedNeo4jJava {
+    <#
+    ownership launcher 可能因 Debugger 強制停止而留下過期 PID，但 Neo4j
+    Java 子程序仍在監聽固定 Bolt port。只有同時通過 runtime JRE、Neo4j
+    命令列與 ownership Home 驗證，才回收最上層 Neo4j Java 程序樹。
+    #>
+    param([Parameter(Mandatory)][string]$Neo4jHome)
+
+    $candidateSnapshots = @(
+        Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                $snapshot = Get-ProcessSnapshot -ProcessId ([int]$_.ProcessId)
+                if ($null -ne $snapshot -and
+                    (Test-Neo4jJavaProcess -Snapshot $snapshot -Neo4jHome $Neo4jHome)) {
+                    $snapshot
+                }
+            }
+    )
+
+    if ($candidateSnapshots.Count -eq 0) {
+        return $false
+    }
+
+    $candidateProcessIds = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($candidate in $candidateSnapshots) {
+        [void]$candidateProcessIds.Add([int]$candidate.ProcessId)
+    }
+
+    # Neo4j console launcher與 CommunityEntryPoint 都可能是 java.exe；選沒有
+    # 另一個候選程序作為父程序的最上層節點，taskkill /T 才能完整回收子樹。
+    $rootSnapshot = $candidateSnapshots |
+        Where-Object { -not $candidateProcessIds.Contains([int]$_.ParentProcessId) } |
+        Select-Object -First 1
+    if ($null -eq $rootSnapshot) {
+        $rootSnapshot = $candidateSnapshots | Select-Object -First 1
+    }
+
+    Stop-VerifiedProcessTree `
+        -ProcessId ([int]$rootSnapshot.ProcessId) `
+        -DisplayName "Stale managed Neo4j" `
+        -Validator {
+            param($snapshot)
+            return Test-Neo4jJavaProcess -Snapshot $snapshot -Neo4jHome $Neo4jHome
+        }
+    return $true
 }
 
 function Read-RuntimeState {
@@ -152,27 +293,25 @@ function Read-RuntimeState {
 }
 
 function Stop-OwnedViteProcesses {
-    <# 優先使用 PID + StartTime；再檢查 4173，以支援 VS Code 異常退出後的自我修復。 #>
+    <# 只依 runtime manifest 回收 Vite；沒有 manifest 時，4173 視為未知程序不得誤殺。 #>
     param([object]$State)
 
-    if ($null -ne $State) {
-        foreach ($entry in @(
-            @($State.ViteListenerProcessId, $State.ViteListenerStartTimeUtcTicks, "Vite listener"),
-            @($State.ViteLauncherProcessId, $State.ViteLauncherStartTimeUtcTicks, "Vite launcher")
-        )) {
-            if ($null -eq $entry[0] -or $null -eq $entry[1]) {
-                continue
-            }
-            $expectedTicks = [long]$entry[1]
-            Stop-VerifiedProcessTree -ProcessId ([int]$entry[0]) -DisplayName ([string]$entry[2]) -Validator {
-                param($snapshot)
-                return $snapshot.StartTimeUtcTicks -eq $expectedTicks
-            }
-        }
+    if ($null -eq $State) {
+        return
     }
 
-    foreach ($processId in Get-ListeningProcessIds -Port 4173) {
-        Stop-VerifiedProcessTree -ProcessId $processId -DisplayName "Vite listener" -Validator ${function:Test-ViteProcess}
+    foreach ($entry in @(
+        @($State.ViteListenerProcessId, $State.ViteListenerStartTimeUtcTicks, "Vite listener"),
+        @($State.ViteLauncherProcessId, $State.ViteLauncherStartTimeUtcTicks, "Vite launcher")
+    )) {
+        if ($null -eq $entry[0] -or $null -eq $entry[1]) {
+            continue
+        }
+        $expectedTicks = [long]$entry[1]
+        Stop-VerifiedProcessTree -ProcessId ([int]$entry[0]) -DisplayName ([string]$entry[2]) -Validator {
+            param($snapshot)
+            return $snapshot.StartTimeUtcTicks -eq $expectedTicks
+        }
     }
 }
 
@@ -189,21 +328,39 @@ function Stop-KnownDebugProcesses {
 }
 
 function Stop-ManagedNeo4j {
-    <# Agent 被 Debugger 強制終止時 DisposeAsync 未必執行，因此必須顯式清理內建 Neo4j。 #>
-    $neo4jProcesses = @(
-        Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" -ErrorAction SilentlyContinue |
-            Where-Object {
-                -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
-                [System.IO.Path]::GetFullPath($_.ExecutablePath).StartsWith(
-                    $neo4jRuntimeRoot,
-                    [StringComparison]::OrdinalIgnoreCase) -and
-                ([string]$_.CommandLine).Contains("neo4j", [StringComparison]::OrdinalIgnoreCase)
-            } |
-            Sort-Object ParentProcessId -Descending
-    )
-    foreach ($process in $neo4jProcesses) {
-        Stop-VerifiedProcessTree -ProcessId ([int]$process.ProcessId) -DisplayName "Managed Neo4j" -Validator ${function:Test-Neo4jProcess}
+    <# Agent 被 Debugger 強制終止時 DisposeAsync 未必執行；先依 ownership launcher，失效時再走嚴格驗證的 Java fallback。 #>
+    $ownership = Read-ManagedNeo4jOwnership
+    if ($null -eq $ownership) {
+        return
     }
+
+    $neo4jHome = [string]$ownership.Home
+    if (-not [string]::Equals(
+            [string]$ownership.Endpoint,
+            "127.0.0.1:17688",
+            [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-PathWithinRoot -Root $neo4jRuntimeRoot -Candidate $neo4jHome)) {
+        Write-Warning "Neo4j ownership 不屬於目前固定 endpoint 或 runtime root，略過清理。"
+        return
+    }
+
+    $launcherSnapshot = Get-ProcessSnapshot -ProcessId ([int]$ownership.LauncherProcessId)
+    if ($null -eq $launcherSnapshot -or
+        $launcherSnapshot.StartTimeUtcTicks -ne [long]$ownership.LauncherProcessStartTimeUtcTicks) {
+        if (Stop-StaleManagedNeo4jJava -Neo4jHome $neo4jHome) {
+            return
+        }
+        Write-Warning "Neo4j ownership launcher 已結束或 PID 已重用，且找不到通過 runtime 驗證的 Neo4j Java 程序，保留 ownership 並略過清理。"
+        return
+    }
+
+    Stop-VerifiedProcessTree `
+        -ProcessId ([int]$ownership.LauncherProcessId) `
+        -DisplayName "Managed Neo4j" `
+        -Validator {
+            param($snapshot)
+            return Test-Neo4jLauncher -Snapshot $snapshot -Neo4jHome $neo4jHome
+        }
 }
 
 function Wait-ForOwnedPortsToClose {
@@ -241,19 +398,16 @@ Stop-OwnedViteProcesses -State $state
 Stop-ManagedNeo4j
 Wait-ForOwnedPortsToClose
 
-# 只有確認內建 Java 與 Bolt listener 都已消失，才能移除 Neo4j ownership。
-# 若有程序無法停止，保留 ownership 能讓下一次啟動繼續做安全身分驗證。
-$remainingManagedNeo4j = @(
-    Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" -ErrorAction SilentlyContinue |
-        Where-Object {
-            -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
-            [System.IO.Path]::GetFullPath($_.ExecutablePath).StartsWith(
-                $neo4jRuntimeRoot,
-                [StringComparison]::OrdinalIgnoreCase) -and
-            ([string]$_.CommandLine).Contains("neo4j", [StringComparison]::OrdinalIgnoreCase)
-        }
-)
-if ($remainingManagedNeo4j.Count -eq 0 -and @(Get-ListeningProcessIds -Port 17688).Count -eq 0) {
+# 只有 ownership launcher 已不存在且 Bolt listener 已釋放，才能移除 ownership。
+# 若仍有 listener，可能是 launcher 的 Java 子程序尚未收尾，必須保留記錄供下次安全接管。
+$remainingOwnership = Read-ManagedNeo4jOwnership
+$ownershipLauncherAlive = $false
+if ($null -ne $remainingOwnership) {
+    $remainingLauncher = Get-ProcessSnapshot -ProcessId ([int]$remainingOwnership.LauncherProcessId)
+    $ownershipLauncherAlive = $null -ne $remainingLauncher -and
+        $remainingLauncher.StartTimeUtcTicks -eq [long]$remainingOwnership.LauncherProcessStartTimeUtcTicks
+}
+if (-not $ownershipLauncherAlive -and @(Get-ListeningProcessIds -Port 17688).Count -eq 0) {
     Remove-Item -LiteralPath $neo4jOwnershipPath -Force -ErrorAction SilentlyContinue
 }
 

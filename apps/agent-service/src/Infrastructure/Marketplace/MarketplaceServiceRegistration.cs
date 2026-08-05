@@ -13,7 +13,11 @@ public static class MarketplaceServiceRegistration
                 client.Timeout = TimeSpan.FromSeconds(20);
                 client.DefaultRequestHeaders.UserAgent.ParseAdd("Modern-Wingman/1.0");
             })
-            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { CheckCertificateRevocationList = false });
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+            {
+                // Marketplace 只允許透過正式 GitHub TLS 連線，不因企業網路問題永久關閉撤銷檢查。
+                CheckCertificateRevocationList = true,
+            });
         services.AddSingleton<MarketplaceDiscoveryClassifier>();
         services.AddSingleton<MarketplaceDiscoveryScorer>();
         services.AddSingleton<MarketplaceArtifactQualityScorer>();

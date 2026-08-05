@@ -7,8 +7,11 @@ namespace AgentService.Infrastructure.Providers;
 /// <summary>
 /// 從 IOptions&lt;AgentServiceOptions&gt; 讀取 BYOK 設定並實作 IModelProviderService。
 ///
-/// BaseUrl 優先順序：DB (ProviderSettingStore) → appsettings.json
+/// BaseUrl 優先順序：DB (ProviderSettingStore) → appsettings.json。
 /// SortOrder 由 DB 管理；appsettings 順序僅用於首次種子資料。
+///
+/// 列舉 profile 時只讀取目前設定快照，避免在 ASP.NET request thread 上以同步
+/// 方式等待 SQLite。需要套用使用者自訂 BaseUrl 的執行路徑，改用 GetProfileAsync。
 /// </summary>
 public sealed class ModelProviderService : IModelProviderService
 {
@@ -27,12 +30,10 @@ public sealed class ModelProviderService : IModelProviderService
 
     public IReadOnlyList<ModelProviderProfile> ListProfiles()
     {
-        // 同步讀取 DB 設定（用於非 async 呼叫路徑）
-        var dbSettings = _settingStore.GetAllAsync().GetAwaiter().GetResult();
-        var dbMap = dbSettings.ToDictionary(x => x.ProfileId);
-
+        // ProviderEndpoints 會在同一個非同步請求中一次讀取 DB 狀態；此方法
+        // 只負責提供 appsettings 的 profile 定義，避免 async-over-sync 死結與阻塞。
         return _optionsMonitor.CurrentValue.ModelProviders
-            .Select(c => MapToProfile(c, dbMap.GetValueOrDefault(c.Id)))
+            .Select(c => MapToProfile(c, null))
             .ToList();
     }
 

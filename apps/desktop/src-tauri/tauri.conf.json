@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:5002 http://localhost:5002 http://127.0.0.1:4173 ws://127.0.0.1:4173 ws://127.0.0.1:5002 ws://localhost:5002; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; media-src 'self' data: blob:"
     }
   },
   "bundle": {

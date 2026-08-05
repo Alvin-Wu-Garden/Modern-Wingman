@@ -36,7 +36,7 @@ public sealed class StandardWebEntryResolver
             .Where(edge => edge.Kind == GraphRelationshipKind.Opens)
             .ToDictionary(edge => edge.SourceKey, edge => edge.TargetKey, StringComparer.Ordinal);
 
-        // 只處理 resolver_kind 明確為 StandardWeb 的696中心 Menu 子集合。
+        // 只處理 resolver_kind 明確為 StandardWeb 的本次中心 Menu 子集合。
         foreach (var menu in inventoryDocument.Nodes.Where(IsStandardWebMenu))
         {
             ResolveMenu(builder, menu, endpointsByMenu, issues);

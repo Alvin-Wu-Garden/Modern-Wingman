@@ -10,7 +10,7 @@ public sealed partial class CustomReportResolver
     private readonly CustomReportCatalog _catalog;
     private readonly IReadOnlyList<DatabaseObjectCatalogItem> _databaseObjects;
 
-    /// <summary>建立只依 FBL_SPV_SIT 資料列與 XML 的 Resolver。</summary>
+    /// <summary>建立只依 SQL authority 資料列與 XML 的 Resolver。</summary>
     public CustomReportResolver(
         CustomReportCatalog catalog,
         IReadOnlyList<DatabaseObjectCatalogItem> databaseObjects)
@@ -254,7 +254,8 @@ public sealed partial class CustomReportResolver
                     databaseObject.CreateNodeKey(),
                     new Dictionary<string, object?>
                     {
-                        ["database"] = "FBL_SPV_SIT",
+                        ["provider"] = databaseObject.Provider,
+                        ["database"] = databaseObject.DatabaseName,
                         ["schema"] = databaseObject.SchemaName,
                         ["name"] = databaseObject.ObjectName,
                         ["object_kind"] = databaseObject.Kind.ToString(),

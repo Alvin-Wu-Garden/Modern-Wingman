@@ -28,8 +28,11 @@ public static class ProjectDatabaseEndpoints
     {
         var group = app.MapGroup("/api/projects/{projectId}/database");
         group.MapGet("/", Get);
+        group.MapGet("/all", GetAll);
         group.MapPut("/", Save);
+        group.MapPut("/{provider}", SaveProvider);
         group.MapDelete("/", Delete);
+        group.MapDelete("/{provider}", DeleteProvider);
         group.MapPost("/test", Test);
         group.MapPost("/databases", ListDatabases);
         return app;
@@ -47,6 +50,20 @@ public static class ProjectDatabaseEndpoints
         return configuration is null
             ? Results.NoContent()
             : Results.Ok(ToDto(configuration));
+    }
+
+    /// <summary>取得專案全部已設定 Provider，供多資料來源設定頁使用。</summary>
+    private static async Task<IResult> GetAll(
+        string projectId,
+        IProjectRepository projects,
+        IProjectDatabaseConfigurationStore configurations,
+        CancellationToken ct)
+    {
+        if (await projects.GetAsync(projectId, ct) is null)
+            return Results.NotFound();
+        return Results.Ok((await configurations.GetAllAsync(projectId, false, ct))
+            .Select(ToDto)
+            .ToArray());
     }
 
     /// <summary>
@@ -79,7 +96,27 @@ public static class ProjectDatabaseEndpoints
         // 由既有索引操作在使用者可控的時間重新連線與發布。
         await indexing.MarkPendingChangesAsync(projectId, cancellationToken: ct);
         return Results.Ok(ToDto(
-            (await configurations.GetAsync(projectId, false, ct))!));
+            (await configurations.GetAsync(
+                projectId,
+                validation.Configuration!.Provider,
+                false,
+                ct))!));
+    }
+
+    /// <summary>Provider-specific PUT 別名，讓 SQL Server 與 SQLite 可各自保存。</summary>
+    private static Task<IResult> SaveProvider(
+        string projectId,
+        string provider,
+        SaveProjectDatabaseRequest request,
+        IProjectRepository projects,
+        IProjectDatabaseConfigurationStore configurations,
+        GraphIndexingService indexing,
+        CancellationToken ct)
+    {
+        var normalized = string.Equals(provider, request.Provider, StringComparison.OrdinalIgnoreCase)
+            ? request
+            : request with { Provider = provider };
+        return Save(projectId, normalized, projects, configurations, indexing, ct);
     }
 
     /// <summary>
@@ -104,8 +141,9 @@ public static class ProjectDatabaseEndpoints
 
         var existing = await configurations.GetAsync(
             projectId,
+            provider,
             includePassword: useStoredPassword,
-            ct);
+            ct: ct);
         if (provider == ProjectDatabaseProvider.SqlServer)
         {
             if (string.IsNullOrWhiteSpace(request.Server) ||
@@ -195,7 +233,25 @@ public static class ProjectDatabaseEndpoints
     {
         if (await projects.GetAsync(projectId, ct) is null)
             return Results.NotFound();
-        await configurations.DeleteAsync(projectId, ct);
+        await configurations.DeleteAsync(projectId, provider: null, ct: ct);
+        await indexing.MarkPendingChangesAsync(projectId, cancellationToken: ct);
+        return Results.NoContent();
+    }
+
+    /// <summary>只刪除指定 Provider 的本機設定，不影響其他資料來源。</summary>
+    private static async Task<IResult> DeleteProvider(
+        string projectId,
+        string provider,
+        IProjectRepository projects,
+        IProjectDatabaseConfigurationStore configurations,
+        GraphIndexingService indexing,
+        CancellationToken ct)
+    {
+        if (await projects.GetAsync(projectId, ct) is null)
+            return Results.NotFound();
+        if (!Enum.TryParse<ProjectDatabaseProvider>(provider, true, out var parsed))
+            return Results.BadRequest(new { error = "Provider 必須是 SqlServer 或 Sqlite。" });
+        await configurations.DeleteAsync(projectId, parsed, ct);
         await indexing.MarkPendingChangesAsync(projectId, cancellationToken: ct);
         return Results.NoContent();
     }

@@ -63,13 +63,12 @@ public sealed record GraphIndexRun(
 
 /// <summary>
 /// FBL GraphRAG 唯一索引協調器。
-/// 流程固定為來源指紋、696 Menu 權威抽取、Preflight、Neo4j 原子發布與背景 Community 摘要；
+/// 流程固定為資料來源前置閘門、原始碼／資料庫抽取、Preflight、Neo4j 原子發布與背景 Community 摘要；
 /// 不再執行舊的通用語言 Extractor、SQLite Evidence 雙寫或 Reconciliation 輪詢。
 /// </summary>
 public sealed class GraphIndexingService
 {
     private const string IndexerVersion = "fbl-authority-v1";
-    private const string RequiredDatabaseName = "FBL_SPV_SIT";
     private const long TransientIndexMemoryCollectionThresholdBytes = 1L * 1024 * 1024 * 1024;
     private static readonly IReadOnlySet<string> SupportedExtensions = new HashSet<string>(
         [
@@ -90,6 +89,7 @@ public sealed class GraphIndexingService
     private readonly IProjectRepository _projects;
     private readonly IProjectIndexManifestStore _manifests;
     private readonly IGraphDatabaseSourceProvider _databaseSources;
+    private readonly ProjectGraphDatabaseExtractor _databaseExtractor;
     private readonly GraphIndexingOptions _options;
     private readonly ILogger<GraphIndexingService> _logger;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
@@ -109,6 +109,7 @@ public sealed class GraphIndexingService
         IProjectRepository projects,
         IProjectIndexManifestStore manifests,
         IGraphDatabaseSourceProvider databaseSources,
+        ProjectGraphDatabaseExtractor databaseExtractor,
         IOptions<GraphIndexingOptions> options,
         ILogger<GraphIndexingService> logger)
     {
@@ -119,6 +120,7 @@ public sealed class GraphIndexingService
         _projects = projects;
         _manifests = manifests;
         _databaseSources = databaseSources;
+        _databaseExtractor = databaseExtractor;
         _options = options.Value;
         _logger = logger;
         ValidateOptions(_options);
@@ -308,19 +310,76 @@ public sealed class GraphIndexingService
         var previousVersion = project.IndexManifestVersion;
         var previousNodeCount = project.NodeCount;
         var previousEdgeCount = project.EdgeCount;
+        var publishedVersion = (string?)null;
 
         try
         {
-            SetProgress(projectId, "scan", "正在計算 FBL 原始碼指紋…", 5, runId, "full", stopwatch);
+            SetProgress(projectId, "preflight", "正在檢查資料庫設定與唯讀連線…", 2, runId, "full", stopwatch);
             project.IndexStatus = ProjectIndexStatus.Indexing;
             project.IndexError = null;
             await _projects.SaveAsync(project, cancellationToken);
 
+            // 連線測試必須先於任何原始碼掃描；先完成所有來源測試，再一次回報失敗清單。
+            var databaseSources = await _databaseSources.GetAllAsync(project, cancellationToken);
+            var connectionFailures = new List<string>();
+            foreach (var source in databaseSources)
+            {
+                SetProgress(
+                    projectId,
+                    "preflight",
+                    $"正在測試 {source.Provider}／{source.DatabaseName} 唯讀連線…",
+                    3,
+                    runId,
+                    "full",
+                    stopwatch);
+                try
+                {
+                    await _databaseExtractor.TestConnectionAsync(source, cancellationToken);
+                    SetProgress(
+                        projectId,
+                        "preflight",
+                        $"{source.Provider}／{source.DatabaseName} 唯讀連線測試通過。",
+                        4,
+                        runId,
+                        "full",
+                        stopwatch);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    // 連線測試只記錄安全識別與型別；密碼不會進入進度、Log 或例外摘要。
+                    connectionFailures.Add(
+                        $"{source.Provider} ({source.DatabaseName})：{exception.Message}");
+                }
+            }
+
+            if (connectionFailures.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"資料庫唯讀連線測試未全部通過；索引尚未開始。{string.Join("；", connectionFailures)}");
+            }
+
+            if (databaseSources.Count == 0)
+            {
+                SetProgress(
+                    projectId,
+                    "preflight",
+                    "未設定外部資料庫，將執行僅原始碼索引。",
+                    4,
+                    runId,
+                    "full",
+                    stopwatch);
+            }
+
+            SetProgress(projectId, "scan", "正在計算原始碼指紋…", 5, runId, "full", stopwatch);
             var scanWatch = Stopwatch.StartNew();
             var files = EnumerateFiles(project.RootPath);
             var fileManifests = await HashFilesAsync(project.RootPath, files, cancellationToken);
-            var databaseSource = await RequiredFblDatabaseAsync(project, cancellationToken);
-            var fingerprint = ComputeInputFingerprint(fileManifests, databaseSource.ConfigurationFingerprint);
+            var databaseFingerprint = ComputeDatabaseFingerprint(databaseSources);
+            var fingerprint = ComputeInputFingerprint(fileManifests, databaseFingerprint);
             scanWatch.Stop();
             stageDurations["scan"] = scanWatch.ElapsedMilliseconds;
 
@@ -332,7 +391,7 @@ public sealed class GraphIndexingService
                        current is not null &&
                        current.IndexerVersion == IndexerVersion &&
                        current.WorkingTreeFingerprint == fingerprint &&
-                       current.AnalysisSnapshotHash == databaseSource.ConfigurationFingerprint &&
+                       current.AnalysisSnapshotHash == databaseFingerprint &&
                        current.Version == activeVersion;
             if (noOp)
             {
@@ -353,7 +412,7 @@ public sealed class GraphIndexingService
                 project,
                 version,
                 fingerprint,
-                databaseSource.ConfigurationFingerprint,
+                databaseFingerprint,
                 fileManifests,
                 startedAt,
                 IndexManifestStatus.Indexing);
@@ -365,31 +424,24 @@ public sealed class GraphIndexingService
                     _neo4jRuntime.LastError ?? "Neo4j 圖譜資料庫目前無法使用。");
             }
 
-            SetProgress(projectId, "extract", "正在解析 696 個 FBL 菜單與程式、報表、資料鏈…", 20, runId, "full", stopwatch);
+            SetProgress(projectId, "extract", "正在解析原始碼與已設定資料庫物件…", 20, runId, "full", stopwatch);
             var extractWatch = Stopwatch.StartNew();
-            var authoritySource = new FblSqlServerAuthoritySource(databaseSource.ConnectionString);
-            var result = await _builder.BuildAsync(
-                new FblAuthorityBuildRequest(
-                    project.RootPath,
-                    authoritySource,
-                    ExpectedMenuCount: 696,
-                    SourceCommit: null,
-                    DatabaseSnapshotId: databaseSource.ConfigurationFingerprint),
+            var resultDocument = await BuildGraphDocumentAsync(
+                project.RootPath,
+                databaseSources,
                 cancellationToken);
             extractWatch.Stop();
             stageDurations["extract"] = extractWatch.ElapsedMilliseconds;
-            if (result.Diagnostics.HasBlockingErrors)
-            {
-                throw new InvalidOperationException(BuildPreflightError(result.Diagnostics));
-            }
 
             SetProgress(projectId, "publish", "結構驗證完成，正在原子發布 Neo4j 圖譜…", 80, runId, "full", stopwatch);
             var publishWatch = Stopwatch.StartNew();
-            var communities = FblAuthorityCommunityBuilder.Build(result.Document);
-            var digest = ComputeDocumentDigest(result.Document, fingerprint);
+            var communities = FblAuthorityCommunityBuilder.Build(resultDocument);
+            var digest = ComputeDocumentDigest(resultDocument, fingerprint);
             await _graphStore.EnsureSchemaAsync(cancellationToken);
+            // 先記錄候選版本；Publish 內部若在 Promote 後發生例外，catch 仍能執行補償。
+            publishedVersion = version;
             await _graphStore.PublishAsync(
-                new FblGraphSnapshot(projectId, version, digest, result.Document, communities),
+                new FblGraphSnapshot(projectId, version, digest, resultDocument, communities),
                 cancellationToken);
             publishWatch.Stop();
             stageDurations["publish"] = publishWatch.ElapsedMilliseconds;
@@ -399,8 +451,8 @@ public sealed class GraphIndexingService
             {
                 CompletedAt = completedAt,
                 Status = IndexManifestStatus.Fresh,
-                NodeCount = result.Document.Nodes.Count,
-                EdgeCount = result.Document.Relationships.Count,
+                NodeCount = resultDocument.Nodes.Count,
+                EdgeCount = resultDocument.Relationships.Count,
                 GraphSchemaVersion = "fbl-authority-14x35",
                 IndexMode = "full",
                 RequiresRetry = false,
@@ -411,8 +463,8 @@ public sealed class GraphIndexingService
             project.IndexStatus = ProjectIndexStatus.Indexed;
             project.IndexedAt = completedAt;
             project.IndexError = null;
-            project.NodeCount = result.Document.Nodes.Count;
-            project.EdgeCount = result.Document.Relationships.Count;
+            project.NodeCount = resultDocument.Nodes.Count;
+            project.EdgeCount = resultDocument.Relationships.Count;
             project.IndexManifestVersion = version;
             project.PendingFileCount = 0;
             _pendingFiles.TryRemove(projectId, out _);
@@ -443,6 +495,29 @@ public sealed class GraphIndexingService
         }
         catch (Exception exception)
         {
+            if (publishedVersion is not null)
+            {
+                try
+                {
+                    // Publish 已切換 Neo4j 後，若本機 manifest／Project 寫入失敗，補償回上一版。
+                    await _graphStore.RollbackPublishedVersionAsync(
+                        projectId,
+                        publishedVersion,
+                        previousVersion,
+                        CancellationToken.None);
+                    await _manifests.RestoreCurrentAsync(
+                        projectId,
+                        previousVersion,
+                        CancellationToken.None);
+                }
+                catch (Exception rollbackException)
+                {
+                    _logger.LogError(
+                        rollbackException,
+                        "GraphRAG 發布補償失敗；需人工檢查 active graph。Project={ProjectId}",
+                        projectId);
+                }
+            }
             project.IndexStatus = ProjectIndexStatus.Failed;
             project.IndexError = SafeError(exception);
             project.IndexManifestVersion = previousVersion;
@@ -492,22 +567,163 @@ public sealed class GraphIndexingService
         }
     }
 
-    /// <summary>取得且驗證專案的 SQL Server FBL_SPV_SIT 唯讀資料來源。</summary>
-    private async Task<GraphDatabaseSource> RequiredFblDatabaseAsync(
-        ProjectEntity project,
+    /// <summary>
+    /// 依已通過連線測試的來源建立候選 GraphDocument。
+    /// SQL Server 使用 FBL authority pipeline；SQLite 使用 catalog-only pipeline；沒有資料庫時保留 source-only 圖。
+    /// </summary>
+    private async Task<GraphDocument> BuildGraphDocumentAsync(
+        string rootPath,
+        IReadOnlyList<GraphDatabaseSource> sources,
         CancellationToken cancellationToken)
     {
-        var source = await _databaseSources.GetAsync(project, cancellationToken);
-        if (source is null)
+        // SQL Server authority builder 會建立一次 C#/View/Script 索引；SQLite 只附加 DB Object，
+        // 避免雙 Provider 時重複掃描整個原始碼。
+        var sqlSource = sources.FirstOrDefault(source =>
+            source.Provider == ProjectDatabaseProvider.SqlServer);
+        GraphDocument? document = null;
+        if (sqlSource is not null)
         {
-            throw new InvalidOperationException("FBL 專案解析需要先設定 FBL_SPV_SIT 的唯讀 SQL Server 連線。");
+            var authority = await _builder.BuildAsync(
+                new FblAuthorityBuildRequest(
+                    rootPath,
+                    new FblSqlServerAuthoritySource(sqlSource.ConnectionString),
+                    ExpectedMenuCount: null,
+                    SourceCommit: null,
+                    DatabaseSnapshotId: sqlSource.ConfigurationFingerprint,
+                    Provider: "SqlServer",
+                    DatabaseName: sqlSource.DatabaseName),
+                cancellationToken);
+            if (authority.Diagnostics.HasBlockingErrors)
+            {
+                throw new InvalidOperationException(BuildPreflightError(authority.Diagnostics));
+            }
+            document = authority.Document;
         }
-        if (source.Provider != ProjectDatabaseProvider.SqlServer ||
-            !string.Equals(source.DatabaseName, RequiredDatabaseName, StringComparison.OrdinalIgnoreCase))
+
+        foreach (var source in sources.Where(source =>
+                     source.Provider == ProjectDatabaseProvider.Sqlite))
         {
-            throw new InvalidOperationException("GraphRAG 僅支援 FBL 投資系統的 FBL_SPV_SIT SQL Server 資料來源。");
+            var objects = await _databaseExtractor.LoadSqliteDatabaseObjectsAsync(
+                source,
+                cancellationToken);
+            if (document is null)
+            {
+                document = await new SqliteGraphDocumentBuilder().BuildAsync(
+                    rootPath,
+                    source,
+                    objects,
+                    cancellationToken);
+            }
+            else
+            {
+                document = AddSqliteDatabaseObjects(document, source, objects);
+            }
         }
-        return source;
+
+        if (document is not null)
+        {
+            // SQLite-only 不套用 SQL Server authority 規則，但仍檢查共用 schema、端點與機敏資料界線。
+            var diagnostics = new GraphDocumentValidator(new PreflightValidatorOptions
+            {
+                ExpectedCenterMenuCount = null,
+                RequiredDatabaseName = sqlSource is null && sources.Count == 1
+                    ? sources[0].DatabaseName
+                    : null,
+                RequiredProvider = sqlSource is null && sources.Count == 1
+                    ? "Sqlite"
+                    : null,
+                RequireCompleteExtraction = true,
+            }).Validate(document);
+            if (diagnostics.HasBlockingErrors)
+            {
+                throw new InvalidOperationException(BuildPreflightError(diagnostics));
+            }
+            return document;
+        }
+
+        // 沒有設定外部資料庫時仍建立可檢索的原始碼類別清單，並明確標示 source-only。
+        return await new SqliteGraphDocumentBuilder().BuildAsync(
+            rootPath,
+            new GraphDatabaseSource(
+                ProjectDatabaseProvider.Sqlite,
+                new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                {
+                    DataSource = ":memory:",
+                    Mode = Microsoft.Data.Sqlite.SqliteOpenMode.Memory,
+                }.ConnectionString,
+                "source-only"),
+            Array.Empty<DatabaseObjectCatalogItem>(),
+            cancellationToken,
+            sourceOnly: true);
+    }
+
+    /// <summary>將 SQLite catalog 節點附加到既有 authority graph，不重新解析原始碼。</summary>
+    private static GraphDocument AddSqliteDatabaseObjects(
+        GraphDocument document,
+        GraphDatabaseSource source,
+        IReadOnlyList<DatabaseObjectCatalogItem> objects)
+    {
+        var metadata = document.Metadata with
+        {
+            Provider = "Mixed",
+            DatabaseName = string.Join(
+                ";",
+                new[] { document.Metadata.DatabaseName, source.DatabaseName }
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)),
+            DatabaseSnapshotIdentity = string.Join(
+                ";",
+                new[] { document.Metadata.DatabaseSnapshotIdentity, source.ConfigurationFingerprint }
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)),
+        };
+        var builder = new GraphDocumentBuilder(metadata);
+        foreach (var node in document.Nodes)
+        {
+            builder.AddNode(node.Kind, node.Key, node.Properties);
+        }
+        foreach (var relationship in document.Relationships)
+        {
+            builder.AddRelationship(
+                relationship.Kind,
+                relationship.SourceKey,
+                relationship.TargetKey,
+                relationship.Evidence,
+                relationship.Properties);
+        }
+        foreach (var databaseObject in objects)
+        {
+            builder.AddNode(
+                GraphNodeKind.DatabaseObject,
+                databaseObject.CreateNodeKey(),
+                new Dictionary<string, object?>
+                {
+                    ["provider"] = databaseObject.Provider,
+                    ["database"] = databaseObject.DatabaseName,
+                    ["schema"] = databaseObject.SchemaName,
+                    ["name"] = databaseObject.ObjectName,
+                    ["object_kind"] = databaseObject.Kind.ToString(),
+                });
+        }
+        return builder.Build();
+    }
+
+    /// <summary>以已設定來源的 Provider、DatabaseName 與 fingerprint 產生 deterministic aggregate fingerprint。</summary>
+    private static string ComputeDatabaseFingerprint(
+        IReadOnlyList<GraphDatabaseSource> sources)
+    {
+        var material = string.Join(
+            "|",
+            sources
+                .OrderBy(source => source.Provider)
+                .ThenBy(source => source.DatabaseName, StringComparer.OrdinalIgnoreCase)
+                .Select(source => string.Join(
+                    ":",
+                    source.Provider,
+                    source.DatabaseName.Trim().ToUpperInvariant(),
+                    source.ConfigurationFingerprint)));
+        return Sha256(material);
     }
 
     /// <summary>建立成功或進入中的 immutable manifest。</summary>
@@ -909,6 +1125,9 @@ public sealed class GraphIndexWatcherService(
         {
             return;
         }
+        // 原始碼工具共用的目錄與內容快取只失效異動檔案，下一次查詢再惰性重建；
+        // 這不會觸發同步索引，也不會讓當前問答等待完整 Catch-up。
+        ProjectAnalysisTools.InvalidateFileCatalog(path);
         if (_debounces.TryRemove(projectId, out var previous))
         {
             previous.Cancel();

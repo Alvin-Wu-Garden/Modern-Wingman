@@ -44,6 +44,41 @@ public sealed class ProjectIndexManifestStore(IDbContextFactory<AppDbContext> db
             : JsonSerializer.Deserialize<ProjectIndexManifest>(json, JsonOptions);
     }
 
+    /// <summary>
+    /// 恢復發布前的本機 active manifest；若先前沒有版本，則清除目前指標。
+    /// 此補償只操作 Modern Wingman 自身 SQLite，不接觸外部資料庫。
+    /// </summary>
+    public async Task RestoreCurrentAsync(
+        string projectId,
+        string? previousVersion,
+        CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        if (string.IsNullOrWhiteSpace(previousVersion))
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE project_index_manifests SET IsCurrent = 0 WHERE ProjectId = {projectId}", ct);
+            return;
+        }
+
+        var previous = await GetByVersionAsync(projectId, previousVersion, ct);
+        if (previous is null)
+        {
+            throw new InvalidOperationException(
+                $"找不到需要恢復的索引 manifest：{projectId}/{previousVersion}");
+        }
+
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE project_index_manifests SET IsCurrent = 0 WHERE ProjectId = {projectId}", ct);
+        var json = JsonSerializer.Serialize(previous, JsonOptions);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE project_index_manifests
+            SET IsCurrent = 1, Status = {previous.Status.ToString()}, ManifestJson = {json},
+                CompletedAt = {previous.CompletedAt?.ToString("O")}
+            WHERE ProjectId = {projectId} AND Version = {previous.Version}
+            """, ct);
+    }
+
     public async Task DeleteProjectAsync(string projectId, CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);

@@ -3,11 +3,18 @@
   "configurations": [
     {
       "name": "Modern Wingman AgentService（背景子程序）",
-      "type": "dotnet",
+      "type": "coreclr",
       "request": "launch",
-      "projectPath": "${workspaceFolder}/apps/agent-service/AgentService.csproj",
+      "program": "${workspaceFolder}/apps/agent-service/bin/Debug/net10.0/AgentService.dll",
+      "cwd": "${workspaceFolder}/apps/agent-service",
+      "console": "integratedTerminal",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "ASPNETCORE_URLS": "http://127.0.0.1:5002",
+        "COMPlus_ReadyToRun": "0"
+      },
       "presentation": {
-        "hidden": true
+        "hidden": false
       }
     },
     {
@@ -17,7 +24,7 @@
       "command": "cargo run --bin modern-wingman-desktop",
       "cwd": "${workspaceFolder}/apps/desktop/src-tauri",
       "presentation": {
-        "hidden": true
+        "hidden": false
       }
     }
   ],

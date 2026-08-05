@@ -8,7 +8,7 @@ namespace AgentService.Modules.GraphRAG.FblAuthority;
 /// </summary>
 public interface IFblAuthoritySqlSource
 {
-    /// <summary>載入 Released 且具有入口網址的696個中心菜單。</summary>
+    /// <summary>載入目前資料庫中 Released 且具有入口網址的中心菜單。</summary>
     Task<IReadOnlyList<MenuCatalogItem>> LoadMenusAsync(CancellationToken cancellationToken);
 
     /// <summary>載入 SQL Server 已存在的 Table、View、Procedure、Function 與 Synonym。</summary>
@@ -53,6 +53,10 @@ public sealed class FblSqlServerAuthoritySource : IFblAuthoritySqlSource
         """;
 
     private readonly string _connectionString;
+    private readonly string _databaseName;
+
+    /// <summary>取得目前連線實際指定的資料庫名稱，供 Graph metadata 與 stable key 使用。</summary>
+    public string DatabaseName => _databaseName;
 
     /// <summary>
     /// 建立固定 SELECT 資料來源。呼叫端仍負責從秘密儲存取得帳密；本類別不記錄或輸出連線字串。
@@ -65,6 +69,7 @@ public sealed class FblSqlServerAuthoritySource : IFblAuthoritySqlSource
             ApplicationIntent = ApplicationIntent.ReadOnly,
         };
         _connectionString = builder.ConnectionString;
+        _databaseName = builder.InitialCatalog;
     }
 
     /// <inheritdoc />
@@ -98,7 +103,9 @@ public sealed class FblSqlServerAuthoritySource : IFblAuthoritySqlSource
             result.Add(new DatabaseObjectCatalogItem(
                 reader.GetString(0),
                 reader.GetString(1),
-                MapDatabaseObjectKind(reader.GetString(2).Trim())));
+                MapDatabaseObjectKind(reader.GetString(2).Trim()),
+                Provider: "SqlServer",
+                DatabaseName: _databaseName));
         }
 
         return result;

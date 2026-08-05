@@ -168,6 +168,8 @@ public static class AgentSchemaMigrator
 
             """, ct);
 
+        await EnsureProjectDatabaseConfigurationSchemaAsync(db.Database.GetDbConnection(), ct);
+
         // 目前尚未發布，不需要多版本 schema migration；只需確保目前版本的
         // Atlassian 連線表存在，且不覆寫既有本機資料。
         await EnsureAtlassianConnectionTableAsync(db.Database.GetDbConnection(), ct);
@@ -201,6 +203,121 @@ public static class AgentSchemaMigrator
             CREATE UNIQUE INDEX IF NOT EXISTS IX_atlassian_connections_ServiceType
                 ON atlassian_connections (ServiceType);
             """;
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// 將舊版每專案單列設定表升級為 Project＋Provider 複合鍵。
+    /// 這是 Modern Wingman 自身的 SQLite 設定庫，不是使用者選擇的外部資料庫；
+    /// 升級只搬移既有設定資料，不執行任何外部資料庫操作。
+    /// </summary>
+    private static async Task EnsureProjectDatabaseConfigurationSchemaAsync(
+        DbConnection connection,
+        CancellationToken ct)
+    {
+        if (connection.State == System.Data.ConnectionState.Closed)
+        {
+            await connection.OpenAsync(ct);
+        }
+
+        await using var inspect = connection.CreateCommand();
+        inspect.CommandText = "PRAGMA table_info(\"project_database_configurations\");";
+        var columns = new List<(string Name, int PrimaryKeyOrder)>();
+        await using (var reader = await inspect.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                columns.Add((reader.GetString(1), reader.GetInt32(5)));
+            }
+        }
+
+        if (columns.Count == 0)
+        {
+            // 以防 EnsureCreated 尚未建立 DbSet 對應表，這裡仍補建目前的複合鍵 schema。
+            await using var create = connection.CreateCommand();
+            create.CommandText = """
+                CREATE TABLE IF NOT EXISTS "project_database_configurations" (
+                    "ProjectId" TEXT NOT NULL,
+                    "Provider" TEXT NOT NULL,
+                    "Server" TEXT,
+                    "Port" INTEGER,
+                    "DatabaseName" TEXT,
+                    "Authentication" TEXT,
+                    "Username" TEXT,
+                    "ProtectedPassword" TEXT,
+                    "EncryptionScheme" TEXT,
+                    "TrustServerCertificate" INTEGER NOT NULL DEFAULT 1,
+                    "SqlitePath" TEXT,
+                    "UpdatedAt" TEXT NOT NULL,
+                    PRIMARY KEY ("ProjectId", "Provider"),
+                    FOREIGN KEY ("ProjectId") REFERENCES "Projects" ("Id") ON DELETE CASCADE
+                );
+                """;
+            await create.ExecuteNonQueryAsync(ct);
+            return;
+        }
+
+        var isCompositeKey = columns.Any(column =>
+                column.Name.Equals("ProjectId", StringComparison.OrdinalIgnoreCase) &&
+                column.PrimaryKeyOrder > 0)
+            && columns.Any(column =>
+                column.Name.Equals("Provider", StringComparison.OrdinalIgnoreCase) &&
+                column.PrimaryKeyOrder > 0);
+        if (isCompositeKey)
+        {
+            return;
+        }
+
+        var hasProviderColumn = columns.Any(column =>
+            column.Name.Equals("Provider", StringComparison.OrdinalIgnoreCase));
+
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await ExecuteSchemaCommandAsync(connection, transaction, "ALTER TABLE \"project_database_configurations\" RENAME TO \"project_database_configurations_legacy\";", ct);
+        await ExecuteSchemaCommandAsync(connection, transaction, """
+            CREATE TABLE "project_database_configurations" (
+                "ProjectId" TEXT NOT NULL,
+                "Provider" TEXT NOT NULL,
+                "Server" TEXT,
+                "Port" INTEGER,
+                "DatabaseName" TEXT,
+                "Authentication" TEXT,
+                "Username" TEXT,
+                "ProtectedPassword" TEXT,
+                "EncryptionScheme" TEXT,
+                "TrustServerCertificate" INTEGER NOT NULL DEFAULT 1,
+                "SqlitePath" TEXT,
+                "UpdatedAt" TEXT NOT NULL,
+                PRIMARY KEY ("ProjectId", "Provider"),
+                FOREIGN KEY ("ProjectId") REFERENCES "Projects" ("Id") ON DELETE CASCADE
+            );
+            """, ct);
+        var providerExpression = hasProviderColumn
+            ? "COALESCE(NULLIF(\"Provider\", ''), 'SqlServer')"
+            : "'SqlServer'";
+        await ExecuteSchemaCommandAsync(connection, transaction, $"""
+            INSERT INTO "project_database_configurations" (
+                "ProjectId", "Provider", "Server", "Port", "DatabaseName", "Authentication",
+                "Username", "ProtectedPassword", "EncryptionScheme", "TrustServerCertificate",
+                "SqlitePath", "UpdatedAt")
+            SELECT "ProjectId", {providerExpression}, "Server", "Port",
+                   "DatabaseName", "Authentication", "Username", "ProtectedPassword",
+                   "EncryptionScheme", "TrustServerCertificate", "SqlitePath", "UpdatedAt"
+            FROM "project_database_configurations_legacy";
+            """, ct);
+        await ExecuteSchemaCommandAsync(connection, transaction, "DROP TABLE \"project_database_configurations_legacy\";", ct);
+        await transaction.CommitAsync(ct);
+    }
+
+    /// <summary>在指定交易中執行內部設定庫的固定 schema 指令。</summary>
+    private static async Task ExecuteSchemaCommandAsync(
+        DbConnection connection,
+        DbTransaction transaction,
+        string sql,
+        CancellationToken ct)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
         await command.ExecuteNonQueryAsync(ct);
     }
 }

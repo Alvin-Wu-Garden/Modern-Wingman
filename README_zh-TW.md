@@ -12,7 +12,7 @@
 | 前端 | React 19 + TypeScript + Vite |
 | UI 元件 | Shadcn/ui + Tailwind CSS v4 + Zustand |
 | Agent 服務 | .NET 10 + ASP.NET Core + MAF 1.9.0 |
-| 通訊架構 | Tauri IPC ↔ Rust gRPC Client ↔ Agent Service |
+| 通訊架構 | Tauri WebView ↔ 本機 REST/SSE Agent Service |
 | AI 供應商 | OpenAI / Anthropic / Azure OpenAI / Custom BYOK |
 
 ---
@@ -73,19 +73,25 @@ notepad apps\agent-service\appsettings.Development.json
 
 ### 3. 啟動開發服務
 
-**方式 A — 一鍵啟動（建議）**
+**方式 A — VS Code 全端 Debug（建議）**
 
-會開啟兩個獨立的 PowerShell 視窗，分別執行 Agent Service 與桌面應用：
+在 VS Code 的「執行與偵錯」選擇 `Modern Wingman（全端 Debug）`，按 `F5`。
+前置 task 會啟動 Vite；Agent Service 與 Tauri 由 VS Code 啟動並可掛中斷點。
+
+固定本機端點為 Vite `4173`、Agent REST／SSE `5002`、Neo4j Bolt `17688`。
+按 `Shift+F5` 會執行對應的停止 task。
+
+若只需不掛 debugger 的服務 smoke test，可使用：
 
 ```powershell
 .\scripts\dev\start-all.ps1
 ```
 
-| 參數 | 效果 |
-|------|------|
-| *（不加參數）* | 同時啟動 Agent Service 與桌面應用 |
-| `-AgentOnly` | 僅啟動 Agent Service |
-| `-DesktopOnly` | 僅啟動桌面應用（Vite + Tauri） |
+停止：
+
+```powershell
+.\scripts\dev\stop-all.ps1
+```
 
 **方式 B — 手動啟動（兩個終端機）**
 
@@ -94,8 +100,7 @@ notepad apps\agent-service\appsettings.Development.json
 ```powershell
 cd apps\agent-service
 dotnet run
-# gRPC 伺服器監聽 http://localhost:5001
-# REST API 監聽 http://localhost:5002
+# REST/SSE API 監聽 http://127.0.0.1:5002
 ```
 
 終端機 2 — 桌面應用：
@@ -103,9 +108,11 @@ dotnet run
 ```powershell
 cd apps\desktop
 pnpm tauri dev
-# Vite 開發伺服器：http://localhost:1420
+# Vite 開發伺服器：http://127.0.0.1:4173
 # Tauri 視窗將自動開啟
 ```
+
+請勿再使用已移除的 `-AgentOnly` 或 `-DesktopOnly` 參數。
 
 > **首次執行：** Cargo 需要編譯所有 Rust 相依項目，約需 **5～10 分鐘**。後續啟動將快許多。
 
@@ -131,7 +138,7 @@ pnpm tauri build
 modern-wingman/
 ├── apps/
 │   ├── desktop/        # Tauri 2 + React 19 + Vite（前端 + Rust 殼層）
-│   └── agent-service/  # .NET 10 + ASP.NET Core + MAF 1.9.0 + gRPC
+│   └── agent-service/  # .NET 10 + ASP.NET Core + MAF 1.9.0 + REST/SSE
 ├── packages/
 │   ├── contracts/      # 共用 Tauri IPC Payload 型別 & 事件 Schema
 │   ├── ui-kit/         # 共用 React UI 元件
@@ -152,10 +159,10 @@ modern-wingman/
 
 ```
 React UI
-  │  Tauri IPC（invoke / listen）
+  │  Tauri WebView（本機 REST/SSE）
   ▼
 Rust（Tauri 殼層）
-  │  gRPC（Tonic client）→  http://localhost:5001
+  │  本機桌面 Host
   ▼
 Agent Service（.NET 10）
   │  MAF 1.9.0 Workflows
@@ -163,8 +170,8 @@ Agent Service（.NET 10）
 AI 供應商（OpenAI / Azure OpenAI / Anthropic / Custom BYOK）
 ```
 
-串流 Token 沿反方向回傳：  
-`Agent Service → gRPC server-streaming → Rust → app_handle.emit() → React listen()`
+串流 Token 透過本機 SSE 回傳：
+`Agent Service → REST/SSE → Tauri WebView → React`
 
 ---
 
@@ -189,6 +196,6 @@ cd apps\desktop && pnpm typecheck
 |------|------|
 | `tauri dev` 首次卡住不動 | Cargo 正在編譯中，等待 5～10 分鐘即可 |
 | pnpm 出現 `esbuild` build script 警告 | 不影響功能；在互動式終端機執行 `pnpm approve-builds` 可消除警告 |
-| `dotnet run` 報 Port 衝突 | 修改 `appsettings.json` 中的 `Kestrel.Endpoints.Grpc.Url`（port 5001）或 `Kestrel.Endpoints.Rest.Url`（port 5002） |
-| Tauri 視窗空白或白屏 | 確認 Vite 開發伺服器已在 port 1420 正常運行後再啟動 Tauri |
+| `dotnet run` 報 Port 衝突 | 先停止上一輪 Modern Wingman Debug，確認 `127.0.0.1:5002` 已釋放；不要終止未知程序 |
+| Tauri 視窗空白或白屏 | 確認 Vite 已在 `127.0.0.1:4173` Ready 後再啟動 Tauri |
 | 內網無法下載 NuGet / npm 套件 | 設定內部 registry，或手動下載離線套件後重試 |

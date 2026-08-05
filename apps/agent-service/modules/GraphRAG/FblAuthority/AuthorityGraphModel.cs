@@ -36,7 +36,7 @@ public enum GraphNodeKind
     /// <summary>由 mapping 或 enum 證實的放行來源型別。</summary>
     ConfirmSourceType,
 
-    /// <summary>FBL_SPV_SIT 中的 Table、View、Function 或 Stored Procedure。</summary>
+    /// <summary>目前 SQL Server authority 資料來源中的 Table、View、Function 或 Stored Procedure。</summary>
     DatabaseObject,
 
     /// <summary>CustomReport 的 RT Template。</summary>
@@ -157,7 +157,7 @@ public enum GraphRelationshipKind
     /// <summary>ReportField 或 DS 使用後端 CodeClass 元件。</summary>
     UsesBackendControl,
 
-    /// <summary>DS 或 PD 查詢 FBL_SPV_SIT DatabaseObject。</summary>
+    /// <summary>DS 或 PD 查詢目前 SQL Server authority 資料來源的 DatabaseObject。</summary>
     Queries,
 
     /// <summary>Menu 或 Endpoint 載入已驗證的 ReportKernel CodeClass。</summary>
@@ -169,7 +169,7 @@ public enum GraphSourceKind
 {
     /// <summary>C#、JavaScript、TypeScript 或 View 原始碼。</summary>
     SourceCode,
-    /// <summary>FBL_SPV_SIT 的實際資料列。</summary>
+    /// <summary>目前 SQL Server authority 資料來源的實際資料列。</summary>
     DatabaseRow,
     /// <summary>SQL module definition 或相依性目錄。</summary>
     SqlDefinition,
@@ -227,7 +227,7 @@ public enum CodeClassRole
     Other,
 }
 
-/// <summary>定義 FBL_SPV_SIT 中可發布的資料庫物件種類。</summary>
+/// <summary>定義 SQL Server authority 與 SQLite catalog 可發布的資料庫物件種類。</summary>
 public enum DatabaseObjectKind
 {
     /// <summary>實體資料表。</summary>
@@ -240,6 +240,10 @@ public enum DatabaseObjectKind
     StoredProcedure,
     /// <summary>SQL Server Synonym；名稱存在於目前資料庫但目標可由同義字指向。</summary>
     Synonym,
+    /// <summary>SQLite trigger；只保存資料庫目錄事實，不推測觸發流程。</summary>
+    Trigger,
+    /// <summary>SQLite index；只保存資料庫目錄事實，不推測查詢效能。</summary>
+    Index,
 }
 
 /// <summary>表示 Menu LinkAddress 應交由哪一種解析器處理。</summary>
@@ -256,7 +260,7 @@ public enum MenuResolverKind
 /// <summary>標示 GraphDocument 目前是中心盤點或已完成全功能解析。</summary>
 public enum GraphBuildStage
 {
-    /// <summary>只完成 696 Menu 與入口盤點，不具正式發布資格。</summary>
+    /// <summary>只完成中心 Menu 與入口盤點，不具正式發布資格。</summary>
     MenuInventory,
 
     /// <summary>完成 Standard Web 入口解析，但其他 Resolver 尚未全部完成。</summary>
@@ -283,7 +287,7 @@ public enum PreflightReasonCode
     /// <summary>GraphDocument 尚未完成全部功能解析。</summary>
     ExtractionIncomplete,
 
-    /// <summary>中心 Menu 查詢結果不是預期的 696 筆。</summary>
+    /// <summary>中心 Menu 查詢結果不符合當次驗收條件。</summary>
     MenuCountMismatch,
     /// <summary>Menu 路由無法分類或解析。</summary>
     MenuRouteUnresolved,
@@ -303,7 +307,7 @@ public enum PreflightReasonCode
     SensitiveValueDetected,
     /// <summary>GraphDocument 的 enum 映射不完整。</summary>
     EnumMappingIncomplete,
-    /// <summary>中心資料庫不是 FBL_SPV_SIT。</summary>
+    /// <summary>圖文件的資料庫識別與當次設定不一致。</summary>
     DatabaseScopeInvalid,
     /// <summary>發現範圍外資料庫，記錄後停止展開。</summary>
     OutOfScopeDatabase,
@@ -337,7 +341,7 @@ public enum PreflightReasonCode
     QueryDefinitionMappingMissing,
     /// <summary>DAL 與 DD 的產生器家族對應缺失。</summary>
     DataAccessDefinitionMappingMissing,
-    /// <summary>FBL_SPV_SIT 中找不到預期 DatabaseObject。</summary>
+    /// <summary>目前資料來源中找不到預期 DatabaseObject。</summary>
     DatabaseObjectNotFound,
     /// <summary>動態 SQL 無法安全解析出明確 DatabaseObject。</summary>
     DynamicSqlObjectUnresolved,
@@ -659,7 +663,8 @@ public sealed record GraphRunMetadata(
     string DatabaseName,
     GraphBuildStage BuildStage,
     string? SourceCommit,
-    string? DatabaseSnapshotIdentity);
+    string? DatabaseSnapshotIdentity,
+    string Provider = "SqlServer");
 
 /// <summary>
 /// 表示 Preflight、Neo4j 與 BYOG 共用的唯一圖資料契約。
