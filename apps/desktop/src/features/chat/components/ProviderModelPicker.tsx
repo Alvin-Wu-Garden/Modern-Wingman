@@ -57,14 +57,16 @@ export function ProviderModelPicker({
     // 清單載入完成後不重複查詢；元件重新掛載時會重新讀取最新設定。
     if (providersLoaded) return
 
-    const controller = new AbortController()
     let cancelled = false
     setLoadingProviders(true)
     setProviderError(null)
 
     void (async () => {
       try {
-        const loadedProviders = await listProviders(controller.signal)
+        // Provider profiles are a small local SQLite read. Let the request
+        // finish when this component is unmounted; the cancelled flag still
+        // prevents a late response from updating an unmounted component.
+        const loadedProviders = await listProviders()
         if (cancelled) return
 
         const configuredProviders = loadedProviders.filter(isVerifiedProvider)
@@ -80,7 +82,6 @@ export function ProviderModelPicker({
           onModelChange(null)
         }
       } catch (error) {
-        if (controller.signal.aborted) return
         if (!cancelled) {
           setProviders([])
           setProvidersLoaded(true)
@@ -95,7 +96,6 @@ export function ProviderModelPicker({
 
     return () => {
       cancelled = true
-      controller.abort()
     }
   }, [onModelChange, onProviderChange, providersLoaded, selectedProviderId])
 

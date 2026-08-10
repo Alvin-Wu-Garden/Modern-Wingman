@@ -34,6 +34,7 @@ public sealed class ProviderSettingStore : IProviderSettingStore
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
         return await db.ProviderSettings
+            .AsNoTracking()
             .OrderBy(x => x.SortOrder)
             .ToListAsync(ct);
     }

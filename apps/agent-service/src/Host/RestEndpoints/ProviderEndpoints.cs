@@ -45,7 +45,19 @@ public static class ProviderEndpoints
         CancellationToken ct)
     {
         var profiles = providerService.ListProfiles();
-        var dbSettings = await settingStore.GetAllAsync(ct);
+        IReadOnlyList<ProviderSettingEntity> dbSettings;
+        try
+        {
+            dbSettings = await settingStore.GetAllAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The browser can abandon this read when the provider picker is
+            // unmounted or refreshed. Treat that as a client-closed request,
+            // not as an agent-service failure.
+            return Results.StatusCode(499);
+        }
+
         var settingMap = dbSettings.ToDictionary(x => x.ProfileId);
 
         // Provider 選擇器需要的憑證狀態與排序在同一個 response 回傳，避免前端
