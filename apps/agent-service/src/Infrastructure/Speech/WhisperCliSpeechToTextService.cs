@@ -116,7 +116,7 @@ public sealed class WhisperCliSpeechToTextService(
         if (process.ExitCode != 0)
         {
             logger.LogWarning(
-                "whisper-cli failed with code {ExitCode}: {Error}",
+                "whisper-cli 執行失敗。ExitCode={ExitCode}, Error={Error}",
                 process.ExitCode,
                 stderr);
             throw new InvalidOperationException("語音轉文字失敗，請確認模型檔與音訊格式正確。");

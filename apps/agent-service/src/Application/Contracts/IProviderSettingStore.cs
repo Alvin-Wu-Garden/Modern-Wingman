@@ -6,7 +6,7 @@ namespace AgentService.Application.Contracts;
 /// 使用者在設定頁填入的 provider 設定（API Key、BaseUrl、SortOrder）的持久化介面。
 /// 資料存入 wingman.db 的 ProviderSettings 資料表。
 ///
-/// 優先順序（API Key）：環境變數 → DB 儲存值 → null
+/// API Key 只讀取設定頁驗證後保存於本機資料庫的值。
 /// </summary>
 public interface IProviderSettingStore
 {
@@ -17,13 +17,10 @@ public interface IProviderSettingStore
     Task<ProviderSettingEntity?> GetAsync(string profileId, CancellationToken ct = default);
 
     /// <summary>
-    /// 取得 API Key（環境變數優先）。
+    /// 取得已驗證並保存於本機資料庫的 API Key。
     /// 回傳 null 表示尚未設定。
     /// </summary>
     string? GetApiKey(string profileId);
-
-    /// <summary>傳回是否存在環境變數（true = 前端顯示 disabled masked input）。</summary>
-    bool HasEnvVar(string profileId);
 
     /// <summary>
     /// 原子儲存已經由真實供應商驗證成功的 API Key 與其 Base URL。

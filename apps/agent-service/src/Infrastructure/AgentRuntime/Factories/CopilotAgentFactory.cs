@@ -1,14 +1,13 @@
 using AgentService.Application.Contracts;
 using AgentService.Domain.Models;
 using AgentService.Infrastructure.Providers;
-using AgentService.Infrastructure.Skills;
 using GitHub.Copilot;
 using GitHub.Copilot.Rpc;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 
-namespace AgentService.Infrastructure.AgentFramework;
+namespace AgentService.Infrastructure.AgentRuntime.Factories;
 
 #pragma warning disable GHCP001 // SDK 的權限決策 API 是拒絕內建工具所需的正式掛點。
 
@@ -18,7 +17,6 @@ namespace AgentService.Infrastructure.AgentFramework;
 /// </summary>
 public sealed class CopilotAgentFactory(
     CopilotClientService copilotClientService,
-    ISkillProvider skillProvider,
     ILogger<CopilotAgentFactory> logger) : IAgentFactory
 {
     public ProviderKind Kind => ProviderKind.CopilotDefault;
@@ -31,9 +29,9 @@ public sealed class CopilotAgentFactory(
         var agent = client.AsAIAgent(sessionConfig);
 
         logger.LogDebug(
-            "CopilotAgentFactory 建立 Agent（model={Model}, skills={SkillCount}）",
+            "CopilotAgentFactory 建立 Agent。Model={Model}, ToolCount={ToolCount}",
             context.ModelOverride ?? context.Profile.ModelId,
-            skillProvider.ListSkills().Count);
+            context.Tools.Count);
 
         return agent;
     }

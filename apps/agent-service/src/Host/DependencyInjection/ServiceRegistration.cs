@@ -1,8 +1,10 @@
 using AgentService.Application.Contracts;
 using AgentService.Application.Atlassian;
 using AgentService.Host.RestEndpoints;
-using AgentService.Infrastructure.AgentFramework;
 using AgentService.Infrastructure.Atlassian;
+using AgentService.Infrastructure.AgentRuntime;
+using AgentService.Infrastructure.AgentRuntime.Factories;
+using AgentRuntimeService = AgentService.Infrastructure.AgentRuntime.AgentRuntime;
 using AgentService.Infrastructure.Orchestration;
 using AgentService.Infrastructure.Persistence;
 using AgentService.Infrastructure.Providers;
@@ -93,6 +95,10 @@ public static class ServiceRegistration
             configuration.GetSection(LocalJiraFileOptions.SectionName));
         services.AddSingleton<LocalJiraFileRepository>();
 
+        // ── 對話執行 ─────────────────────────────────────────────────────────
+        services.AddScoped<ConversationExecutionService>();
+        services.AddScoped<ProjectConversationPreparationService>();
+
         // ── Copilot CLI 生命週期（Singleton Hosted Service）───────────────────
         services.AddSingleton<CopilotClientService>();
         services.AddSingleton<ICopilotCredentialRuntime>(
@@ -115,7 +121,7 @@ public static class ServiceRegistration
         // ── MAF Agent（Strategy：依 ProviderKind 選擇工廠，OCP）────────────────
         services.AddScoped<IAgentFactory, CopilotAgentFactory>();
         services.AddScoped<IAgentFactory, ByokAgentFactory>();
-        services.AddScoped<WingmanChatAgent>();
+        services.AddScoped<AgentRuntimeService>();
 
         // Copilot SDK 若要求工具權限，一律拒絕，確保聊天只產生文字回覆。
         services.AddSingleton<CopilotPermissionHandlerFactory>();
@@ -164,7 +170,8 @@ public static class ServiceRegistration
         app.UseCors();
 
         // ── REST ───────────────────────────────────────────────────────────────
-        app.MapConversationEndpoints();
+        app.MapGeneralConversationEndpoints();
+        app.MapProjectConversationEndpoints();
         app.MapProviderEndpoints();
         app.MapProjectEndpoints();
         app.MapProjectDatabaseEndpoints();

@@ -8,8 +8,8 @@ using Wingman.Marketplace.Domain;
 namespace AgentService.Infrastructure.Marketplace;
 
 /// <summary>
-/// Applies a validated .mcp.json definition to a target JSON config. This service is deliberately
-/// file-only: it does not launch, connect to, or health-check the configured MCP server.
+/// 將已驗證的 .mcp.json 定義套用至目標 JSON 設定。
+/// 此服務只處理檔案，不啟動、連線或健康檢查設定的 MCP Server。
 /// </summary>
 public sealed class MarketplaceMcpDeploymentService(
     IMarketplaceArtifactStore artifactStore,

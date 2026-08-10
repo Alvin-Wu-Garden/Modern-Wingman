@@ -68,7 +68,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass `
 
 ### HTTP／SSE 入口
 
-檔案：`apps/agent-service/src/Host/RestEndpoints/ConversationEndpoints.cs`
+檔案：`apps/agent-service/src/Host/RestEndpoints/GeneralConversationEndpoints.cs` 或 `ProjectConversationEndpoints.cs`
 
 方法：`SendMessage`
 
@@ -81,12 +81,12 @@ ConversationEndpoints.SendMessage
   ↓
 GraphRAG prompt，或 source-only fallback
   ↓
-WingmanChatAgent.RunStreamingAsync
+AgentRuntime.RunStreamingAsync
 ```
 
 ### Agent 串流推論
 
-檔案：`apps/agent-service/src/Infrastructure/AgentFramework/WingmanChatAgent.cs`
+檔案：`apps/agent-service/src/Infrastructure/AgentRuntime/AgentRuntime.cs`
 
 方法：`RunStreamingAsync`
 

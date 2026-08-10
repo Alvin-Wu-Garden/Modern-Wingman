@@ -93,7 +93,7 @@ public sealed class ProviderConfigResolver
             providerConfig.WireApi = profile.WireApi;
 
         _logger.LogDebug(
-            "BYOK provider config built: profile={ProfileId}, type={ProviderType}, model={ModelId}, baseUrl={BaseUrl}",
+            "BYOK Provider 設定已建立。ProfileId={ProfileId}, ProviderType={ProviderType}, ModelId={ModelId}, BaseUrl={BaseUrl}",
             profile.Id, profile.ProviderType, profile.ModelId, baseUrl);
 
         return providerConfig;

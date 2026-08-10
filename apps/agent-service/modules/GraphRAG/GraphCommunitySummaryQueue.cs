@@ -153,7 +153,7 @@ public sealed class GraphCommunitySummaryQueue(
                 next with { State = QueueState.Failed },
                 next);
             logger.LogWarning(
-                "Community AI queue 已滿，保留 deterministic template。Project={ProjectId}, Community={CommunityId}",
+                "Community AI 佇列已滿，保留確定性模板。ProjectId={ProjectId}, CommunityId={CommunityId}",
                 job.ProjectId,
                 job.CommunityId);
             return false;
@@ -334,7 +334,7 @@ public sealed class GraphCommunitySummaryQueue(
             };
             _states[item.Key] = next;
             logger.LogWarning(
-                "Community AI 摘要失敗。Project={ProjectId}, Community={CommunityId}, Retry={Retry}, ExceptionType={ExceptionType}",
+                "Community AI 摘要失敗。ProjectId={ProjectId}, CommunityId={CommunityId}, Retry={Retry}, ExceptionType={ExceptionType}",
                 item.Job.ProjectId,
                 item.Job.CommunityId,
                 retryCount,
@@ -433,7 +433,7 @@ public sealed class GraphCommunitySummaryQueue(
         catch (Exception exception)
         {
             logger.LogWarning(
-                "Community AI 最終失敗狀態無法持久化。Project={ProjectId}, Community={CommunityId}, ExceptionType={ExceptionType}",
+                "Community AI 最終失敗狀態無法持久化。ProjectId={ProjectId}, CommunityId={CommunityId}, ExceptionType={ExceptionType}",
                 job.ProjectId,
                 job.CommunityId,
                 exception.GetType().Name);

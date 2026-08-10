@@ -30,6 +30,6 @@ public sealed class DpapiSecretProtector : ISecretProtector
         "dpapi-current-user-v1" when OperatingSystem.IsWindows() => Encoding.UTF8.GetString(
             ProtectedData.Unprotect(Convert.FromBase64String(value), Entropy, DataProtectionScope.CurrentUser)),
         "dpapi-current-user-v1" => throw new PlatformNotSupportedException("Windows DPAPI credentials can only be read by the Windows user that saved them."),
-        _ => throw new InvalidOperationException($"Unsupported credential encryption scheme: {scheme}"),
+        _ => throw new InvalidOperationException($"不支援的憑證加密方案：{scheme}"),
     };
 }

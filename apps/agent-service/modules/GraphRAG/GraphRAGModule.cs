@@ -15,7 +15,7 @@ public static class GraphRagModule
     /// 註冊完整 V4 module。此方法只綁定技術 budget 與連線設定，不提供任何 schema profile。
     /// </summary>
     /// <param name="services">Agent Service DI container。</param>
-    /// <param name="configuration">應用程式設定；Neo4j 密碼應由環境變數或 DPAPI 注入。</param>
+    /// <param name="configuration">應用程式設定；Neo4j 密碼由本機設定與 DPAPI 生命週期管理。</param>
     /// <returns>同一個 service collection，供 fluent registration 使用。</returns>
     public static IServiceCollection AddGraphRagV4(
         this IServiceCollection services,

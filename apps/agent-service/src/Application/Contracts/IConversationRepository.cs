@@ -4,16 +4,20 @@ namespace AgentService.Application.Contracts;
 
 /// <summary>
 /// 對話持久化介面。
-/// Phase 1：SQLite 實作。Phase 2+：可替換為其他儲存後端。
+/// SQLite 對話持久化介面。
 /// </summary>
 public interface IConversationRepository
 {
-    Task<List<ConversationEntity>> ListAsync(CancellationToken ct = default);
-    Task<ConversationEntity?> GetAsync(string id, CancellationToken ct = default);
-    Task<ConversationEntity> CreateAsync(
+    Task<List<ConversationEntity>> ListGeneralAsync(CancellationToken ct = default);
+    Task<List<ConversationEntity>> ListProjectAsync(string projectId, CancellationToken ct = default);
+    Task<ConversationEntity?> GetGeneralAsync(string id, CancellationToken ct = default);
+    Task<ConversationEntity?> GetProjectAsync(string projectId, string id, CancellationToken ct = default);
+    Task<ConversationEntity> CreateGeneralAsync(
         string? providerProfileId = null,
-        ConversationScope scope = ConversationScope.General,
-        string? projectId = null,
+        CancellationToken ct = default);
+    Task<ConversationEntity> CreateProjectAsync(
+        string projectId,
+        string? providerProfileId = null,
         CancellationToken ct = default);
     Task DeleteAsync(string id, CancellationToken ct = default);
 

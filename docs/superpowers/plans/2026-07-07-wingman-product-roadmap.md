@@ -98,7 +98,7 @@ Modern Wingman 是類 Codex 的桌面 AI Agent（React 19 + Tauri 2 + .NET 10 + 
 
 ### 2.1 Agent Service
 
-- `WingmanChatAgent` 拆分：
+- `AgentRuntime` 拆分：
   - `IAgentFactory` → `CopilotAgentFactory` / `ByokAgentFactory`（Strategy，依 `ProviderKind` 選擇）
   - Agent 建構、訊息組裝、usage 回報各自獨立
 - `RunOrchestrator`：
@@ -115,7 +115,7 @@ Modern Wingman 是類 Codex 的桌面 AI Agent（React 19 + Tauri 2 + .NET 10 + 
 
 - [x] 新增一個 model provider 只需新增一個 IAgentFactory 實作（`CopilotAgentFactory` / `ByokAgentFactory`，OCP）
 - [x] Run 狀態持久化至 SQLite（`RunRepository`，upsert + 終態保存，4 個單元測試）
-- [x] 既有功能保留（WingmanChatAgent 對外簽章不變、CopilotEventBridge 抽出後 RunOrchestrator 行為一致）
+- [x] 既有功能保留（AgentRuntime 對外串流行為維持一致）
 - [x] `dotnet build` 0 錯誤、`cargo build` 通過、`tsc --noEmit` 通過
 - [x] 單元測試 32 個全過（SkillProvider 8、PromptBuilder 3、RunRepository 4、分析器 7、其他 10）
 

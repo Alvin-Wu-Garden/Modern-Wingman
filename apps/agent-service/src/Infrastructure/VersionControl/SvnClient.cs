@@ -16,7 +16,7 @@ public sealed class SvnClient(
         CancellationToken ct = default)
     {
         var result = await BrowseAsync(profileId, repositoryUrl, ct);
-        return result.Success ? result with { Output = "Connection successful." } : result;
+        return result.Success ? result with { Output = "連線成功。" } : result;
     }
 
     public Task<SvnCommandResult> BrowseAsync(

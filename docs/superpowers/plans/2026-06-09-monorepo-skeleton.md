@@ -95,7 +95,7 @@ modern-wingman/
 │       │   ├── Domain/
 │       │   │   └── .gitkeep
 │       │   └── Infrastructure/
-│       │       └── AgentFramework/
+│       │       └── AgentRuntime/
 │       │           └── .gitkeep
 │       ├── appsettings.json
 │       ├── appsettings.Development.json

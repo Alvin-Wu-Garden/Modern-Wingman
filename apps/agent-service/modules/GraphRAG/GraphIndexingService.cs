@@ -709,7 +709,7 @@ public sealed class GraphIndexingService
         return builder.Build();
     }
 
-    /// <summary>以已設定來源的 Provider、DatabaseName 與 fingerprint 產生 deterministic aggregate fingerprint。</summary>
+    /// <summary>以已設定來源的 Provider、DatabaseName 與 fingerprint 產生確定性的彙總指紋。</summary>
     private static string ComputeDatabaseFingerprint(
         IReadOnlyList<GraphDatabaseSource> sources)
     {

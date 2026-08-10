@@ -63,11 +63,7 @@ Minimum required config:
 }
 ```
 
-> Set API keys via environment variables — never hardcode them:
-> ```powershell
-> $env:OPENAI_API_KEY = "sk-..."
-> $env:ANTHROPIC_API_KEY = "sk-ant-..."
-> ```
+> Enter each API key in Modern Wingman Settings. The backend validates it against the provider and stores only an encrypted local value; provider keys are not read from environment variables.
 > Available profile IDs: `copilot-default`, `openai-byok`, `anthropic-byok`, `azure-openai-byok`, `azure-foundry-byok`, `custom-byok`
 
 > **Note:** `appsettings.Development.json` is excluded from git (`.gitignore`). Never commit API keys.

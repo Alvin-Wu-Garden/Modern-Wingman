@@ -7,7 +7,7 @@ using Wingman.Marketplace.Domain;
 
 namespace AgentService.Infrastructure.Marketplace;
 
-/// <summary>Small persistence adapter for preview results. It intentionally stores no source content.</summary>
+/// <summary>預覽結果的輕量持久化轉接器；刻意不保存來源內容。</summary>
 public sealed class MarketplaceInstallabilitySqliteStore(IDbContextFactory<AppDbContext> factory) : IMarketplaceInstallabilityStore
 {
     public async Task SaveAsync(IReadOnlyList<MarketplaceInstallabilityResult> results, CancellationToken cancellationToken = default)

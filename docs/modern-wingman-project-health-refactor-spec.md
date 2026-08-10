@@ -719,7 +719,7 @@ AgentService = Debug
 |---|---|
 | Debug／Port／process lifecycle | `.vscode/launch.json`、`.vscode/tasks.json`、`scripts/dev/start-all.ps1`、`scripts/dev/stop-all.ps1` |
 | Agent bind／readiness／CORS | `Program.cs`、`ServiceRegistration.cs`、`appsettings*.json`、`launchSettings.json` |
-| 專案問答降級／SSE／title | `ConversationEndpoints.cs` 與現有 Conversation service |
+| 專案問答降級／SSE／title | `ProjectConversationEndpoints.cs`、`ProjectConversationPreparationService` 與 `ConversationExecutionService` |
 | Index status／watcher／catch-up | `GraphIndexWatcher.cs`、`GraphIndexingService.cs` |
 | Source tools／tool budget | `ProjectAnalysisTools.cs` 與 Agent instruction 組裝位置 |
 | Query concurrency／BFS | `GraphRetrievalService.cs`、`Neo4jGraphStore.Retrieval.cs` |

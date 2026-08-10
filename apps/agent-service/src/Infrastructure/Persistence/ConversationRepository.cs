@@ -11,34 +11,74 @@ namespace AgentService.Infrastructure.Persistence;
 /// </summary>
 public sealed class ConversationRepository(IDbContextFactory<AppDbContext> dbFactory) : IConversationRepository
 {
-    public async Task<List<ConversationEntity>> ListAsync(CancellationToken ct = default)
+    public async Task<List<ConversationEntity>> ListGeneralAsync(CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         return await db.Conversations
+            .Where(c => c.ProjectId == null)
             .OrderByDescending(c => c.UpdatedAt)
             .ToListAsync(ct);
     }
 
-    public async Task<ConversationEntity?> GetAsync(string id, CancellationToken ct = default)
+    public async Task<List<ConversationEntity>> ListProjectAsync(
+        string projectId,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        return await db.Conversations
+            .Where(c => c.ProjectId == projectId)
+            .OrderByDescending(c => c.UpdatedAt)
+            .ToListAsync(ct);
+    }
+
+    public async Task<ConversationEntity?> GetGeneralAsync(
+        string id,
+        CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         return await db.Conversations
             .Include(c => c.Messages.OrderBy(m => m.CreatedAt))
-            .FirstOrDefaultAsync(c => c.Id == id, ct);
+            .FirstOrDefaultAsync(c => c.Id == id && c.ProjectId == null, ct);
     }
 
-    public async Task<ConversationEntity> CreateAsync(
+    public async Task<ConversationEntity?> GetProjectAsync(
+        string projectId,
+        string id,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        return await db.Conversations
+            .Include(c => c.Messages.OrderBy(m => m.CreatedAt))
+            .FirstOrDefaultAsync(c => c.Id == id && c.ProjectId == projectId, ct);
+    }
+
+    public async Task<ConversationEntity> CreateGeneralAsync(
         string? providerProfileId = null,
-        ConversationScope scope = ConversationScope.General,
-        string? projectId = null,
         CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var conv = new ConversationEntity
         {
             ProviderProfileId = providerProfileId,
-            Scope = scope,
-            ProjectId = scope == ConversationScope.Project ? projectId : null,
+        };
+        db.Conversations.Add(conv);
+        await db.SaveChangesAsync(ct);
+        return conv;
+    }
+
+    public async Task<ConversationEntity> CreateProjectAsync(
+        string projectId,
+        string? providerProfileId = null,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var conv = new ConversationEntity
+        {
+            ProviderProfileId = providerProfileId,
+            ProjectId = projectId,
         };
         db.Conversations.Add(conv);
         await db.SaveChangesAsync(ct);

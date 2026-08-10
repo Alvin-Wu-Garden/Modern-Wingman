@@ -69,7 +69,6 @@ public sealed class ModelProviderService : IModelProviderService
             ProviderType = c.ProviderType,
             // DB BaseUrl 優先（只有 custom-byok 才會有 DB 值）
             BaseUrl = dbSetting?.BaseUrl ?? c.BaseUrl,
-            ApiKeyEnvVar = c.ApiKeyEnvVar,
             AzureApiVersion = c.AzureApiVersion,
             WireApi = c.WireApi,
         };

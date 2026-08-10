@@ -2,10 +2,12 @@ using System.Text;
 using System.Text.Json;
 using AgentService.Application.Atlassian;
 using AgentService.Application.Contracts;
+using AgentService.Application.Models;
 using AgentService.Domain.Models;
 using AgentService.Infrastructure.Atlassian;
-using AgentService.Infrastructure.AgentFramework;
+using AgentService.Infrastructure.AgentRuntime;
 using AgentService.Modules.GraphRAG;
+using AgentRuntimeService = AgentService.Infrastructure.AgentRuntime.AgentRuntime;
 
 namespace AgentService.Host.RestEndpoints;
 
@@ -16,7 +18,7 @@ namespace AgentService.Host.RestEndpoints;
 /// POST   /api/atlassian/connections/{type}/validate  → 驗證並儲存連線
 /// DELETE /api/atlassian/connections/{type}           → 刪除連線
 /// POST   /api/atlassian/jira/preview          → 取得議題預覽（使用者確認用）
-/// POST   /api/atlassian/jira/analyze          → 完整分析（SSE 串流）
+/// POST   /api/projects/{projectId}/analysis/jira → 完整專案分析（SSE 串流）
 /// </summary>
 public static class AtlassianEndpoints
 {
@@ -30,7 +32,6 @@ public static class AtlassianEndpoints
     public sealed record PreviewJiraIssueRequest(string JiraKey);
 
     public sealed record AnalyzeJiraIssueRequest(
-        string ProjectId,
         string JiraKey,
         string? ProviderProfileId,
         /// <summary>
@@ -52,7 +53,7 @@ public static class AtlassianEndpoints
         group.MapDelete("/connections/{serviceType}", DeleteConnection);
         group.MapPost("/jira/preview", PreviewIssue);
         group.MapGet("/jira/local-files", ListLocalFiles);
-        group.MapPost("/jira/analyze", AnalyzeIssue);
+        app.MapPost("/api/projects/{projectId}/analysis/jira", AnalyzeIssue);
         return app;
     }
 
@@ -193,9 +194,10 @@ public static class AtlassianEndpoints
         return Results.Ok(result.Value);
     }
 
-    // ── POST /api/atlassian/jira/analyze （SSE） ─────────────────────────────
+    // ── POST /api/projects/{projectId}/analysis/jira （SSE） ────────────────
 
     private static async Task AnalyzeIssue(
+        string projectId,
         AnalyzeJiraIssueRequest request,
         IAtlassianConnectionRepository atlassianRepo,
         IConversationRepository conversations,
@@ -207,7 +209,7 @@ public static class AtlassianEndpoints
         JiraGraphRagRetrievalService graphRagRetrieval,
         LocalJiraFileRepository localFiles,
         INeo4jRuntime neo4j,
-        WingmanChatAgent agent,
+        AgentRuntimeService agent,
         ILoggerFactory loggerFactory,
         HttpContext http,
         CancellationToken ct)
@@ -223,7 +225,7 @@ public static class AtlassianEndpoints
 
         var fullKey = request.JiraKey.Trim().ToUpperInvariant();
 
-        if (await projects.GetAsync(request.ProjectId, ct) is null)
+        if (await projects.GetAsync(projectId, ct) is null)
         {
             http.Response.StatusCode = StatusCodes.Status404NotFound;
             await http.Response.WriteAsJsonAsync(new { error = "找不到指定的專案。" }, ct);
@@ -247,7 +249,7 @@ public static class AtlassianEndpoints
             issue = localIssue;
             logger.LogInformation(
                 "以本機檔案模式載入 JIRA 議題。Key={Key}, ProjectId={ProjectId}",
-                fullKey, request.ProjectId);
+                fullKey, projectId);
         }
         else
         {
@@ -283,14 +285,16 @@ public static class AtlassianEndpoints
 
         // ── 建立追蹤紀錄 ─────────────────────────────────────────────────────
         var runId = await analysisRuns.CreateAsync(
-            request.ProjectId, fullKey, issue.Preview.Summary, issue.Preview.Updated, ct);
+            projectId, fullKey, issue.Preview.Summary, issue.Preview.Updated, ct);
 
         // ── 建立新對話 ───────────────────────────────────────────────────────
         var profile = await providers.GetProfileAsync(request.ProviderProfileId, ct);
         var resolvedModelId = !string.IsNullOrWhiteSpace(request.ModelId)
             ? request.ModelId : profile.ModelId;
-        var conversation = await conversations.CreateAsync(
-            profile.Id, ConversationScope.Project, request.ProjectId, ct);
+        var conversation = await conversations.CreateProjectAsync(
+            projectId,
+            profile.Id,
+            ct);
         await conversations.SetTitleAsync(
             conversation.Id,
             JiraPromptBuilder.BuildConversationTitle(fullKey, issue.Preview.Summary),
@@ -320,7 +324,7 @@ public static class AtlassianEndpoints
 
             logger.LogInformation(
                 "JIRA 功能識別完成。RunId={RunId}, ProjectId={ProjectId}, JiraKey={JiraKey}, FeatureCount={FeatureCount}",
-                runId, request.ProjectId, fullKey, identifiers.Count);
+                runId, projectId, fullKey, identifiers.Count);
 
             // ── GraphRAG 三階段檢索 ─────────────────────────────────────────────
             JiraGraphRagContext graphRagContext;
@@ -335,7 +339,7 @@ public static class AtlassianEndpoints
             {
                 await WriteSseProgressAsync(http, "搜尋功能 Controller 與程式入口", ct);
                 graphRagContext = await graphRagRetrieval.RetrieveAsync(
-                    request.ProjectId, issue, identifiers, ct);
+                    projectId, issue, identifiers, ct);
 
                 if (graphRagContext.HasResults)
                 {
@@ -353,7 +357,7 @@ public static class AtlassianEndpoints
 
                 logger.LogInformation(
                     "JIRA GraphRAG 完成。RunId={RunId}, ProjectId={ProjectId}, JiraKey={JiraKey}, ConfirmedEntries={Confirmed}, CandidateEntries={Candidates}, Hits={Hits}, Degraded={Degraded}",
-                    runId, request.ProjectId, fullKey,
+                    runId, projectId, fullKey,
                     graphRagContext.ConfirmedEntryPoints.Count,
                     graphRagContext.CandidateEntryPoints.Count,
                     graphRagContext.IncludedHitCount,
@@ -378,14 +382,16 @@ public static class AtlassianEndpoints
             await WriteSseProgressAsync(http, "AI 生成三項分析", ct);
 
             await foreach (var token in agent.RunStreamingAsync(
-                userPrompt,
-                conversation.Messages,
-                profile,
-                resolvedModelId,
-                onUsage: _ => { },
-                attachments: [],
-                includeSkills: false,
-                ct: ct))
+                new AgentExecutionRequest(
+                    userPrompt,
+                    conversation.Messages,
+                    profile,
+                    resolvedModelId,
+                    Attachments: [],
+                    Instructions: systemPrompt,
+                    SkillsPrompt: string.Empty,
+                    Tools: []),
+                ct))
             {
                 fullResponse.Append(token);
 
@@ -425,7 +431,7 @@ public static class AtlassianEndpoints
             logger.LogInformation(
                 "JIRA 分析已取消。RunId={RunId}, ProjectId={ProjectId}, JiraKey={JiraKey}, ConversationId={ConversationId}",
                 runId,
-                request.ProjectId,
+                projectId,
                 fullKey,
                 conversation.Id);
 
@@ -447,7 +453,7 @@ public static class AtlassianEndpoints
                 logger.LogInformation(
                     "JIRA 分析已取消（例外訊息包含 'quota_exceeded'）。RunId={RunId}, ProjectId={ProjectId}, JiraKey={JiraKey}, ConversationId={ConversationId}",
                     runId,
-                    request.ProjectId,
+                    projectId,
                     fullKey,
                     conversation.Id);
 
@@ -473,7 +479,7 @@ public static class AtlassianEndpoints
                     ex,
                     "JIRA 分析失敗。RunId={RunId}, ProjectId={ProjectId}, JiraKey={JiraKey}, ConversationId={ConversationId}",
                     runId,
-                    request.ProjectId,
+                    projectId,
                     fullKey,
                     conversation.Id);
 

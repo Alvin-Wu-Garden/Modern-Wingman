@@ -29,8 +29,8 @@ public static class ProviderEndpoints
         group.MapPut("/{id}/key", SetKey);
         group.MapDelete("/{id}/key", DeleteKey);
         group.MapPut("/reorder", Reorder);
-        // Dedicated endpoint for the Skills library's GitHub PAT.
-        // AI provider credentials are validated and saved atomically by PUT /{id}/key.
+        // Skills Library 專用的 GitHub PAT 驗證端點。
+        // AI Provider 憑證由 PUT /{id}/key 驗證並以原子方式保存。
         group.MapPost("/validate-key", ValidateGitHubAccessToken);
 
         return app;
@@ -52,9 +52,8 @@ public static class ProviderEndpoints
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // The browser can abandon this read when the provider picker is
-            // unmounted or refreshed. Treat that as a client-closed request,
-            // not as an agent-service failure.
+            // Provider 選擇器卸載或重新整理時，瀏覽器可能中止讀取；
+            // 將其視為用戶端關閉請求，不記為 Agent Service 失敗。
             return Results.StatusCode(499);
         }
 
@@ -74,7 +73,6 @@ public static class ProviderEndpoints
                 p.ModelId,
                 p.ProviderType,
                 p.BaseUrl,
-                HasEnvVar = settingStore.HasEnvVar(p.Id),
                 HasStoredKey = settingMap.TryGetValue(p.Id, out var setting)
                     && !string.IsNullOrWhiteSpace(setting.ProtectedApiKey),
                 StoredBaseUrl = setting?.BaseUrl,
@@ -107,7 +105,6 @@ public static class ProviderEndpoints
         if (profile is null) return Results.NotFound();
 
         var dbSetting = await settingStore.GetAsync(id, ct);
-        var hasEnvVar = settingStore.HasEnvVar(id);
         var hasStoredKey = !string.IsNullOrWhiteSpace(dbSetting?.ProtectedApiKey);
 
         CopilotRuntimeStatusDto? runtimeStatus = null;
@@ -127,7 +124,6 @@ public static class ProviderEndpoints
         return Results.Ok(new ProviderKeyStatusDto(
             id,
             profile.DisplayName,
-            hasEnvVar,
             hasStoredKey,
             StoredBaseUrl: dbSetting?.BaseUrl,
             SortOrder: dbSetting?.SortOrder ?? 0,

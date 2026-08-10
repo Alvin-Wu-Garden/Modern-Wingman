@@ -156,7 +156,7 @@ apps/agent-service/
 │  │  │  ├─ Persistence/
 │  │  │  ├─ ArtifactStorage/
 │  │  │  └─ TargetAdapters/
-│  │  └─ AgentFramework/
+│  │  └─ AgentRuntime/
 │  │     └─ Plugins/
 │  │        └─ MafPluginRuntimeAdapter.cs
 │  └─ Host/

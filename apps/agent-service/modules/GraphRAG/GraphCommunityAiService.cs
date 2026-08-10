@@ -102,7 +102,7 @@ public sealed class GraphCommunityAiService(
         {
             logger.LogWarning(
                 exception,
-                "Community AI 排程失敗，保留 deterministic template。Project={ProjectId}, Community={CommunityId}",
+                "Community AI 排程失敗，保留確定性模板。ProjectId={ProjectId}, CommunityId={CommunityId}",
                 projectId,
                 report.CommunityId);
         }
@@ -174,7 +174,7 @@ public sealed class GraphCommunityAiService(
                     token);
                 if (!updated)
                     logger.LogInformation(
-                        "Community AI 結果已過期，未覆寫新版本。Project={ProjectId}, Community={CommunityId}",
+                        "Community AI 結果已過期，未覆寫新版本。ProjectId={ProjectId}, CommunityId={CommunityId}",
                         projectId,
                         report.CommunityId);
             },

@@ -182,7 +182,7 @@ public static class ProjectEndpoints
             string.IsNullOrWhiteSpace(request.RepositoryUrl) ||
             string.IsNullOrWhiteSpace(request.ProfileId))
         {
-            return Results.BadRequest(new { error = "Profile, repository URL, and destination are required." });
+            return Results.BadRequest(new { error = "必須提供 VCS Profile、Repository URL 與目的地。" });
         }
 
         var sourceType = request.SourceType.Trim().ToLowerInvariant();
@@ -219,8 +219,8 @@ public static class ProjectEndpoints
                     Report);
                 if (!result.Success)
                 {
-                    importProgress.Fail(operationId, redactor.Redact(result.Error ?? "Git clone failed."));
-                    return Results.BadRequest(result with { Error = redactor.Redact(result.Error ?? "Git clone failed.") });
+                    importProgress.Fail(operationId, redactor.Redact(result.Error ?? "Git clone 失敗。"));
+                    return Results.BadRequest(result with { Error = redactor.Redact(result.Error ?? "Git clone 失敗。") });
                 }
                 var status = await git.StatusAsync(destination, ct);
                 revision = status.Output.Split('\n')
@@ -238,8 +238,8 @@ public static class ProjectEndpoints
                     Report);
                 if (!result.Success)
                 {
-                    importProgress.Fail(operationId, redactor.Redact(result.Error ?? "SVN checkout failed."));
-                    return Results.BadRequest(result with { Error = redactor.Redact(result.Error ?? "SVN checkout failed.") });
+                    importProgress.Fail(operationId, redactor.Redact(result.Error ?? "SVN checkout 失敗。"));
+                    return Results.BadRequest(result with { Error = redactor.Redact(result.Error ?? "SVN checkout 失敗。") });
                 }
                 var current = await svn.GetRevisionAsync(request.ProfileId, destination, ct);
                 revision = current.Success ? current.Output.Trim() : result.Revision;

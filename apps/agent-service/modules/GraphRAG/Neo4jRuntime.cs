@@ -443,12 +443,12 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
             _process.OutputDataReceived += (_, args) =>
             {
                 if (!string.IsNullOrWhiteSpace(args.Data))
-                    _logger.LogDebug("Neo4j runtime: {Output}", args.Data);
+                    _logger.LogDebug("Neo4j Runtime 輸出：{Output}", args.Data);
             };
             _process.ErrorDataReceived += (_, args) =>
             {
                 if (!string.IsNullOrWhiteSpace(args.Data))
-                    _logger.LogWarning("Neo4j runtime: {Output}", args.Data);
+                    _logger.LogWarning("Neo4j Runtime 錯誤輸出：{Output}", args.Data);
             };
             _process.BeginOutputReadLine();
             _process.BeginErrorReadLine();

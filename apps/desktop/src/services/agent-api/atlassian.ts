@@ -113,12 +113,20 @@ export async function analyzeJiraIssue(
   },
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(`${AGENT_API_BASE_URL}/api/atlassian/jira/analyze`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-    signal,
-  })
+  const response = await fetch(
+    `${AGENT_API_BASE_URL}/api/projects/${encodeURIComponent(input.projectId)}/analysis/jira`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jiraKey: input.jiraKey,
+        providerProfileId: input.providerProfileId,
+        modelId: input.modelId ?? null,
+        localFileKey: input.localFileKey ?? null,
+      }),
+      signal,
+    },
+  )
 
   if (!response.ok || !response.body) {
     const body = await response.json().catch(() => null) as { error?: string } | null

@@ -81,10 +81,8 @@ public sealed class JiraHttpClient(
             catch (JsonException)
             {
                 logger.LogWarning(
-                    "JIRA validation returned invalid JSON: "
-                    + "serviceType={ServiceType}, "
-                    + "statusCode={StatusCode}, "
-                    + "contentType={ContentType}",
+                    "JIRA 驗證回傳無效 JSON。ServiceType={ServiceType}, "
+                    + "StatusCode={StatusCode}, ContentType={ContentType}",
                     conn.ServiceType,
                     (int)response.StatusCode,
                     response.Content.Headers.ContentType?.MediaType);
@@ -100,7 +98,7 @@ public sealed class JiraHttpClient(
         }
         catch (HttpRequestException ex) when (IsTlsError(ex))
         {
-            logger.LogWarning("JIRA TLS error: serviceType={S}", conn.ServiceType);
+            logger.LogWarning("JIRA TLS 錯誤。ServiceType={ServiceType}", conn.ServiceType);
             return AtlassianResult<string>.Fail(AtlassianErrorCodes.TlsError);
         }
         catch (TaskCanceledException)
@@ -252,7 +250,7 @@ public sealed class JiraHttpClient(
             using var resp = await client.GetAsync(url, ct);
             if (!resp.IsSuccessStatusCode)
             {
-                logger.LogWarning("JIRA comments page {Page} returned {Status}", page, (int)resp.StatusCode);
+                logger.LogWarning("JIRA 留言頁面回傳錯誤。Page={Page}, StatusCode={StatusCode}", page, (int)resp.StatusCode);
                 return null;
             }
 
@@ -261,8 +259,7 @@ public sealed class JiraHttpClient(
             if (IsHtmlResponse(resp, responseBody))
             {
                 logger.LogWarning(
-                    "JIRA comments page returned HTML: "
-                    + "page={Page}, statusCode={StatusCode}",
+                    "JIRA 留言頁面回傳 HTML。Page={Page}, StatusCode={StatusCode}",
                     page,
                     (int)resp.StatusCode);
 
@@ -336,8 +333,7 @@ public sealed class JiraHttpClient(
             catch (JsonException)
             {
                 logger.LogWarning(
-                    "JIRA comments page returned invalid JSON: "
-                    + "page={Page}, statusCode={StatusCode}",
+                    "JIRA 留言頁面回傳無效 JSON。Page={Page}, StatusCode={StatusCode}",
                     page,
                     (int)resp.StatusCode);
 

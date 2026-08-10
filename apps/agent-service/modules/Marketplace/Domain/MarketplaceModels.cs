@@ -1,5 +1,6 @@
 namespace Wingman.Marketplace.Domain;
 
+/// <summary>Marketplace artifact 的類型。</summary>
 public enum MarketplaceArtifactKind
 {
     /// <summary>只用於尚未分類的搜尋候選，不允許匯入或部署。</summary>
@@ -8,6 +9,7 @@ public enum MarketplaceArtifactKind
     McpServer,
 }
 
+/// <summary>Marketplace 探索或匯入流程的狀態。</summary>
 public enum MarketplaceDiscoveryStatus
 {
     Discovered,
@@ -20,6 +22,7 @@ public enum MarketplaceDiscoveryStatus
     Invalid,
 }
 
+/// <summary>Marketplace 資料來源的類型。</summary>
 public enum MarketplaceSourceKind
 {
     GitHubDiscovery,
@@ -27,6 +30,7 @@ public enum MarketplaceSourceKind
     LocalFolder,
 }
 
+/// <summary>artifact 類型分類結果的可信度。</summary>
 public enum MarketplaceClassificationConfidence
 {
     Unknown,
@@ -35,6 +39,7 @@ public enum MarketplaceClassificationConfidence
     Verified,
 }
 
+/// <summary>Marketplace 探索結果及其分類、評分與同步狀態。</summary>
 public sealed record MarketplaceDiscoveryRecord(
     string Id,
     string SourceId,
@@ -67,6 +72,7 @@ public sealed record MarketplaceDiscoveryRecord(
     bool IsFavorite = false,
     bool IsManualSource = false);
 
+/// <summary>Marketplace 探索或匯入來源的描述。</summary>
 public sealed record MarketplaceSource(
     string Id,
     MarketplaceSourceKind Kind,
@@ -76,6 +82,7 @@ public sealed record MarketplaceSource(
     DateTimeOffset CreatedAt,
     DateTimeOffset? LastSyncedAt = null);
 
+/// <summary>一次探索結果的評分快照。</summary>
 public sealed record MarketplaceScoreSnapshot(
     string Id,
     string DiscoveryRecordId,
@@ -86,6 +93,7 @@ public sealed record MarketplaceScoreSnapshot(
     string EvidenceJson,
     DateTimeOffset ComputedAt);
 
+/// <summary>一次 artifact 品質評估的快照。</summary>
 public sealed record MarketplaceArtifactScoreSnapshot(
     string Id,
     string ArtifactId,
@@ -95,6 +103,7 @@ public sealed record MarketplaceArtifactScoreSnapshot(
     string EvidenceJson,
     DateTimeOffset ComputedAt);
 
+/// <summary>Marketplace 同步作業的結果摘要。</summary>
 public sealed record MarketplaceRefreshResult(
     string SyncRunId,
     int NewCount,
@@ -107,6 +116,7 @@ public sealed record MarketplaceRefreshResult(
     bool IsPartial,
     DateTimeOffset CompletedAt);
 
+/// <summary>Marketplace 探索結果的篩選與分頁條件。</summary>
 public sealed record MarketplaceListFilter(
     MarketplaceArtifactKind? Kind = null,
     string? Search = null,
@@ -116,10 +126,12 @@ public sealed record MarketplaceListFilter(
     int Take = 100,
     int Skip = 0);
 
+/// <summary>Marketplace 探索結果的分頁資料。</summary>
 public sealed record MarketplacePage(
     IReadOnlyList<MarketplaceDiscoveryRecord> Items,
     int TotalCount);
 
+/// <summary>解析本機來源後產生的 artifact 候選項目。</summary>
 public sealed record MarketplaceArtifactCandidate(
     string Id,
     string SourceLocation,
@@ -131,6 +143,7 @@ public sealed record MarketplaceArtifactCandidate(
     string? ValidationMessage,
     DateTimeOffset CreatedAt);
 
+/// <summary>已匯入並保存快照的 Marketplace artifact。</summary>
 public sealed record MarketplaceArtifact(
     string Id,
     string CandidateId,
@@ -142,17 +155,20 @@ public sealed record MarketplaceArtifact(
     string? ValidationProfileId,
     DateTimeOffset ImportedAt);
 
+/// <summary>一次 Marketplace 匯入作業的結果。</summary>
 public sealed record MarketplaceImportResult(
     string SourceLocation,
     IReadOnlyList<MarketplaceArtifactCandidate> Candidates,
     IReadOnlyList<MarketplaceArtifact> Artifacts);
 
+/// <summary>artifact 部署的作用範圍。</summary>
 public enum MarketplaceDeploymentScope
 {
     Global,
     Project,
 }
 
+/// <summary>可供 Marketplace 部署的外部 Agent 目標描述。</summary>
 public sealed record MarketplaceTargetDescriptor(
     string Id,
     string DisplayName,
@@ -166,12 +182,14 @@ public sealed record MarketplaceTargetDescriptor(
     bool SupportsGlobalMcp = false,
     bool SupportsProjectMcp = false);
 
+/// <summary>單一 artifact 部署要求。</summary>
 public sealed record MarketplaceDeploymentRequest(
     string ArtifactId,
     string TargetId,
     MarketplaceDeploymentScope Scope,
     string? ProjectPath = null);
 
+/// <summary>單一部署目標的執行結果。</summary>
 public sealed record MarketplaceDeploymentResult(
     string TargetId,
     MarketplaceDeploymentScope Scope,
@@ -179,13 +197,14 @@ public sealed record MarketplaceDeploymentResult(
     string? TargetPath,
     string? Message);
 
+/// <summary>一批部署要求的執行結果。</summary>
 public sealed record MarketplaceDeploymentBatchResult(
     IReadOnlyList<MarketplaceDeploymentResult> Results)
 {
     public bool IsPartialSuccess => Results.Any(result => result.Status == "Deployed") && Results.Any(result => result.Status != "Deployed");
 }
 
-/// <summary>Persisted compatibility outcome for one explicit artifact/target/scope selection.</summary>
+/// <summary>針對明確 artifact、目標與作用範圍選擇所保存的可相容性結果。</summary>
 public sealed record MarketplaceInstallabilityResult(
     string ArtifactId,
     string TargetId,
@@ -195,12 +214,13 @@ public sealed record MarketplaceInstallabilityResult(
     string? Reason,
     DateTimeOffset ComputedAt);
 
-/// <summary>A side-effect-free deployment/configuration plan. The caller must explicitly execute it.</summary>
+/// <summary>不會產生副作用的部署或設定計畫，必須由呼叫端明確執行。</summary>
 public sealed record MarketplaceDeploymentPlan(
     string ArtifactId,
     string Operation,
     IReadOnlyList<MarketplaceInstallabilityResult> Items);
 
+/// <summary>已部署 artifact 的目前狀態。</summary>
 public sealed record MarketplaceDeploymentState(
     string TargetId,
     MarketplaceDeploymentScope Scope,
@@ -210,8 +230,10 @@ public sealed record MarketplaceDeploymentState(
     string Status,
     DateTimeOffset UpdatedAt);
 
+/// <summary>artifact 與其來源位置的對應資料。</summary>
 public sealed record MarketplaceArtifactSource(MarketplaceArtifact Artifact, string SourceLocation);
 
+/// <summary>從 GitHub 儲存庫匯入 artifact 的結果。</summary>
 public sealed record GitHubRepositoryImportResult(
     string CanonicalUrl,
     string RequestedRef,

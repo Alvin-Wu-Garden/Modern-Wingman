@@ -8,7 +8,7 @@ namespace AgentService.Application.Contracts;
 /// 依 ProviderKind 建立 MAF AIAgent 的工廠（Strategy 模式）。
 ///
 /// OCP：新增供應商 = 新增一個 IAgentFactory 實作並註冊 DI，
-/// 呼叫端（WingmanChatAgent）不需修改。
+/// 呼叫端（AgentRuntime）不需修改。
 /// </summary>
 public interface IAgentFactory
 {

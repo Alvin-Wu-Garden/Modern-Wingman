@@ -1,12 +1,11 @@
 using AgentService.Application.Contracts;
 using AgentService.Domain.Models;
-using AgentService.Infrastructure.Skills;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using OpenAI;
 
-namespace AgentService.Infrastructure.AgentFramework;
+namespace AgentService.Infrastructure.AgentRuntime.Factories;
 
 /// <summary>
 /// BYOK 路徑：OpenAI-compatible IChatClient → MAF ChatClientAgent。
@@ -15,7 +14,6 @@ namespace AgentService.Infrastructure.AgentFramework;
 /// </summary>
 public sealed class ByokAgentFactory(
     IApiKeyStore apiKeyStore,
-    ISkillProvider skillProvider,
     ILogger<ByokAgentFactory> logger) : IAgentFactory
 {
     public ProviderKind Kind => ProviderKind.CopilotByok;
@@ -36,10 +34,10 @@ public sealed class ByokAgentFactory(
         });
 
         logger.LogDebug(
-            "ByokAgentFactory 建立 Agent（profile={ProfileId}, model={Model}, skills={SkillCount}）",
+            "ByokAgentFactory 建立 Agent。ProfileId={ProfileId}, Model={Model}, ToolCount={ToolCount}",
             context.Profile.Id,
             context.ModelOverride ?? context.Profile.ModelId,
-            skillProvider.ListSkills().Count);
+            context.Tools.Count);
 
         return agent;
     }

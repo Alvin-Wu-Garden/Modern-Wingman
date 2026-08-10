@@ -116,7 +116,7 @@ public static class VcsProfileEndpoints
     private static string? Validate(SaveVcsProfileRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
-            return "Profile name is required.";
+            return "必須提供 Profile 名稱。";
         if (!Enum.TryParse<VcsType>(request.VcsType, true, out _))
             return "VcsType must be Git or Svn.";
         if (!Uri.TryCreate(request.BaseUrl, UriKind.Absolute, out var uri) ||
@@ -124,7 +124,7 @@ public static class VcsProfileEndpoints
             return "BaseUrl must be an absolute HTTP or HTTPS URL.";
         if (!string.IsNullOrWhiteSpace(request.SecretValue) &&
             string.IsNullOrWhiteSpace(request.Username))
-            return "Username is required when a credential is provided.";
+            return "提供憑證時必須填寫 Username。";
         return null;
     }
 

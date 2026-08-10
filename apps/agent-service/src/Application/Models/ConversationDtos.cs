@@ -11,12 +11,14 @@ public sealed record ConversationDto(
     string Id,
     string Title,
     string? ProviderProfileId,
-    string Scope,
     string? ProjectId,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     List<MessageDto>? Messages = null   // null = list view；非 null = detail view
 );
+
+/// <summary>建立一般或專案對話時使用的共用資料。</summary>
+public sealed record CreateConversationRequest(string? ProviderProfileId = null);
 
 public sealed record SendMessageRequest(
     string UserMessage,
@@ -42,7 +44,6 @@ public sealed record AttachmentReference(
 public sealed record ProviderKeyStatusDto(
     string ProfileId,
     string DisplayName,
-    bool HasEnvVar,
     bool HasStoredKey,
     /// <summary>DB 中的自訂 BaseUrl（僅 custom-byok 使用）。</summary>
     string? StoredBaseUrl = null,
@@ -69,8 +70,8 @@ public sealed record SetApiKeyRequest(string ApiKey, string? BaseUrl = null);
 public sealed record ReorderProvidersRequest(List<string> Order);
 
 /// <summary>
-/// Request used by the Skills library to validate its GitHub PAT.
-/// AI provider credentials use PUT /api/providers/{id}/key instead.
+/// Skills Library 用來驗證 GitHub PAT 的請求。
+/// AI Provider 憑證改用 PUT /api/providers/{id}/key。
 /// </summary>
 public sealed record ValidateGithubAccessTokenRequest(string ApiKey);
 

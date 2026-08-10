@@ -72,7 +72,7 @@ The pre-change baseline is:
 
 ### Batch 1 - standard function tools
 
-#### `apps/agent-service/src/Infrastructure/AgentFramework/WingmanToolAdapter.cs`
+#### `apps/agent-service/src/Infrastructure/AgentRuntime/AgentRuntime.cs`
 
 - Replace `BuildPrompt` and the single router function with `CreateTools`.
 - Return one `AIFunction` per current `ToolDescriptor`.
@@ -84,14 +84,14 @@ The pre-change baseline is:
 - Snapshot descriptors when building an agent so concurrent plugin reconciliation
   cannot mutate the tool list mid-run.
 
-#### `apps/agent-service/src/Infrastructure/AgentFramework/ByokAgentFactory.cs`
+#### `apps/agent-service/src/Infrastructure/AgentRuntime/Factories/ByokAgentFactory.cs`
 
 - Attach the standard Wingman function list directly to `ChatOptions.Tools`.
 - Use the registry's existing `read_skill` function instead of registering a second
   BYOK-only copy.
 - Remove the manually generated Wingman tool catalog from instructions.
 
-#### `apps/agent-service/src/Infrastructure/AgentFramework/CopilotAgentFactory.cs`
+#### `apps/agent-service/src/Infrastructure/AgentRuntime/Factories/CopilotAgentFactory.cs`
 
 - Attach the same standard function list to `SessionConfig.Tools`.
 - Remove the manually generated Wingman tool catalog from the system message.
@@ -149,14 +149,14 @@ The pre-change baseline is:
 - Add verify-fail-at-limit terminal behavior.
 - Assert a second run receives no state from the first.
 
-#### `apps/UnitTests/AgentFrameworkPackageContractTests.cs`
+#### `apps/UnitTests/AgentRuntimePackageContractTests.cs`
 
 - Assert stable workflow APIs used by production code are present: `WorkflowBuilder`,
   `MessageHandlerAttribute`, `InProcessExecution`, and `WorkflowOutputEvent`.
 
 ### Batch 3 - observability and cleanup
 
-#### `apps/agent-service/src/Infrastructure/AgentFramework/AgentFrameworkTelemetry.cs` (new, only if exporter configuration is enabled)
+#### `apps/agent-service/src/Infrastructure/AgentRuntime/AgentRuntimeTelemetry.cs`（若啟用 exporter 設定才新增）
 
 - Centralize the source name and sensitive-data-disabled defaults.
 - Instrument the agent or chat-client layer, not both, to avoid duplicate spans.

@@ -32,13 +32,6 @@ public sealed class ModelProviderProfileConfig
     public string? ProviderType { get; set; }
     public string? BaseUrl { get; set; }
 
-    /// <summary>
-    /// 持有 API Key 的環境變數名稱。
-    /// 例如 "OPENAI_API_KEY"、"ANTHROPIC_API_KEY"、"AZURE_OPENAI_KEY"。
-    /// API Key 永不明文儲存於 config 檔案中。
-    /// </summary>
-    public string? ApiKeyEnvVar { get; set; }
-
     public string? AzureApiVersion { get; set; }
 
     /// <summary>"completions" | "responses"。null = Copilot CLI 預設。</summary>

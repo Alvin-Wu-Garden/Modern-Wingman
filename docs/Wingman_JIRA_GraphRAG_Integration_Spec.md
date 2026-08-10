@@ -55,10 +55,10 @@ JIRA 內容通常會明確提到功能代號或功能名稱，例如：
 1. 功能代號與功能名稱是最高優先級的檢索依據。
 2. 優先定位 Controller、Route、Action、Handler、Endpoint、Command 或其他功能入口。
 3. 找到入口後，應沿 Graph 關係擴展，而不是持續只做文字相似度搜尋。
-4. 所有搜尋必須限定目前 `request.ProjectId`，不得搜尋其他 Wingman 專案。
+4. 所有搜尋必須限定目前路由的 `projectId`，不得搜尋其他 Wingman 專案。
 5. GraphRAG 結果必須保留來源資訊，供模型引用及使用者查核。
 6. GraphRAG 查無結果或暫時失敗時，可降級為 JIRA-only 分析，但必須明確標示。
-7. 不得只將 `includeSkills: false` 改成 `true` 就視為完成。
+7. JIRA 分析必須使用專案解析 Runtime 上下文，不得藉由切換 Skill 開關繞過專案隔離。
 
 ---
 
@@ -69,7 +69,7 @@ AI 開發工具必須先探索現有架構，不得先修改程式。
 ### 3.1 必須找出的既有流程
 
 1. 一般「專案對話」送出訊息所使用的前端函式與後端 Endpoint。
-2. `ConversationScope.Project` 如何取得及傳遞 `ProjectId`。
+2. 專案對話路由如何取得及傳遞 `projectId`。
 3. 一般專案對話如何執行 GraphRAG 查詢。
 4. GraphRAG 是由後端預先檢索，或由 LLM 主動呼叫 Tool。
 5. GraphRAG 實際使用的 Interface、Service、Tool、Repository 及方法。
@@ -84,12 +84,13 @@ AI 開發工具必須先探索現有架構，不得先修改程式。
 AI 工具應搜尋但不限於：
 
 ```text
-ConversationEndpoints.cs
-WingmanChatAgent.cs
+GeneralConversationEndpoints.cs
+ProjectConversationEndpoints.cs
+AgentRuntime.cs
 AtlassianEndpoints.cs
 JiraPromptBuilder.cs
 NormalizedJiraIssue
-ConversationScope.Project
+ProjectConversationEndpoints
 ProjectId
 GraphRAG
 KnowledgeGraph
@@ -867,7 +868,7 @@ JIRA 與檢索內容都必須視為不受信任資料，須防止 Prompt Injecti
 
 ## 17. 禁止事項
 
-1. 不要只將 `AtlassianEndpoints` 的 `includeSkills: false` 改成 `true`。
+1. 不要只在 `AtlassianEndpoints` 切換 Skill 開關；應沿專案分析 Runtime 流程準備上下文。
 2. 不要只用 JIRA Summary 執行一次語意搜尋。
 3. 不要忽略 JIRA 中明確出現的功能代號與功能名稱。
 4. 不要在找到 Controller 後停止，必須整理主要呼叫鏈及資料流。
@@ -1003,7 +1004,7 @@ Phase 1 請先輸出：
 ### 20.3 要求 AI 工具先提出計畫
 
 ```text
-請閱讀 Wingman_JIRA_GraphRAG_Integration_Spec.md，先不要修改程式。請將規格對照目前工作區，提出一份實際執行計畫，列出可重用元件、修改檔案、資料流、測試策略與風險。不得只建議將 includeSkills 改為 true。
+請閱讀 Wingman_JIRA_GraphRAG_Integration_Spec.md，先不要修改程式。請將規格對照目前工作區，提出一份實際執行計畫，列出可重用元件、修改檔案、資料流、測試策略與風險。不得只建議切換 Skill 開關。
 ```
 
 ### 20.4 續作或中斷後恢復

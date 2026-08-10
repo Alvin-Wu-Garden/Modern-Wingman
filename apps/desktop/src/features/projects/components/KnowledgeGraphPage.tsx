@@ -1267,7 +1267,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
           </div>
         </aside>
 
-        <main className="min-w-0 min-h-0 flex flex-col">
+        <main className="min-w-0 min-h-0 flex flex-1 flex-col">
           <div onWheel={onHorizontalWheel} className="min-h-12 shrink-0 overflow-x-auto border-b border-border bg-surface-alt px-3 py-2 flex items-center gap-2">
             <div className="relative min-w-48 max-w-96 flex-1">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-ink-subtle" />

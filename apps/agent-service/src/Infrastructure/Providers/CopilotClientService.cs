@@ -72,7 +72,7 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICo
             _ready = false;
             SetStatus(CopilotRuntimeStatus.Invalid(SanitizeError(ex.Message, githubToken)));
             await StopClientInternalAsync();
-            _logger.LogError("Bundled Copilot runtime 啟動失敗：{Error}",
+            _logger.LogError("內建 Copilot Runtime 啟動失敗：{Error}",
                 SanitizeError(ex.Message, githubToken));
         }
     }
@@ -80,7 +80,7 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICo
     private async Task StartClientInternalAsync(string githubToken, CancellationToken ct = default)
     {
         SetStatus(CopilotRuntimeStatus.Validating());
-        _logger.LogInformation("正在啟動 bundled Copilot runtime (認證模式: PAT)...");
+        _logger.LogInformation("正在啟動內建 Copilot Runtime（認證模式：PAT）…");
 
         // Connection = null → SDK 使用建置時複製到 runtimes/*/native 的 bundled binary。
         // UseLoggedInUser = false 避免讀取本機 OAuth、gh auth 與環境變數憑證。
@@ -94,12 +94,12 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICo
         if (string.IsNullOrWhiteSpace(status.Login))
         {
             _logger.LogInformation(
-                "Bundled Copilot runtime 已完成 PAT 驗證，但 GitHub 未提供帳號名稱。");
+                "內建 Copilot Runtime 已完成 PAT 驗證，但 GitHub 未提供帳號名稱。");
         }
         else
         {
             _logger.LogInformation(
-                "Bundled Copilot runtime 已完成 PAT 驗證（帳號：{Login}）。",
+                "內建 Copilot Runtime 已完成 PAT 驗證（帳號：{Login}）。",
                 status.Login);
         }
     }
@@ -112,7 +112,7 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICo
         await _clientGate.WaitAsync(ct);
         try
         {
-            _logger.LogInformation("Copilot Client 重啟中 (認證模式: {Mode})...",
+            _logger.LogInformation("Copilot Client 重啟中（認證模式：{Mode}）…",
                 string.IsNullOrWhiteSpace(githubToken) ? "未設定" : "PAT");
             await StopClientInternalAsync();
 
@@ -318,12 +318,12 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICo
         _ready = false;
         if (_client is null) return;
 
-        _logger.LogInformation("正在停止 bundled Copilot runtime...");
+        _logger.LogInformation("正在停止內建 Copilot Runtime…");
         try { await _client.StopAsync(); }
         catch
         {
             // 不記錄 SDK 原始例外，避免其訊息意外帶入認證資訊。
-            _logger.LogWarning("停止 bundled Copilot runtime 時發生例外，強制終止。");
+            _logger.LogWarning("停止內建 Copilot Runtime 時發生例外，強制終止。");
             await _client.ForceStopAsync();
         }
         await _client.DisposeAsync();

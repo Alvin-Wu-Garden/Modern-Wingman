@@ -29,7 +29,7 @@ public static class MarketplaceEndpoints
             if (!string.IsNullOrWhiteSpace(kind))
             {
                 if (!Enum.TryParse<MarketplaceArtifactKind>(kind, true, out var value))
-                    return Results.BadRequest(new { error = "Unsupported marketplace artifact kind." });
+                    return Results.BadRequest(new { error = "不支援的 Marketplace Artifact 類型。" });
                 parsedKind = value;
             }
             return Results.Ok(await service.ListAsync(new(parsedKind, search, category, includeStale ?? false, false, take ?? 100, skip ?? 0), ct));

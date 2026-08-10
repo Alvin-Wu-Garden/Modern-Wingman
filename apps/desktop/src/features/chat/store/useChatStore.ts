@@ -1,13 +1,14 @@
 import { create } from 'zustand'
 import {
   createConversation,
+  createProjectConversation,
   deleteConversation,
   getConversation,
   listConversations,
+  listProjectConversations,
   renameConversation,
   sendMessage,
   type AttachmentReference,
-  type ConversationScope,
   type ConversationSummary,
   type MessageItem,
   type AgentActivityEvent,
@@ -35,15 +36,14 @@ interface ChatState {
   lastError: string | null
   lastFailedRequest: FailedRequest | null
 
-  loadConversations: () => Promise<void>
-  openConversation: (id: string) => Promise<void>
+  loadConversations: (projectId?: string | null) => Promise<void>
+  openConversation: (id: string, projectId?: string | null) => Promise<void>
   startNewConversation: (
-    scope?: ConversationScope,
     projectId?: string | null,
     profileId?: string | null,
   ) => Promise<string>
-  deleteConv: (id: string) => Promise<void>
-  renameConv: (id: string, title: string) => Promise<void>
+  deleteConv: (id: string, projectId?: string | null) => Promise<void>
+  renameConv: (id: string, title: string, projectId?: string | null) => Promise<void>
   send: (
     userMessage: string,
     profileId?: string | null,
@@ -72,10 +72,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   lastError: null,
   lastFailedRequest: null,
 
-  loadConversations: async () => {
+  loadConversations: async (projectId = null) => {
     set({ isLoadingList: true })
     try {
-      set({ conversations: await listConversations() })
+      const loaded = projectId
+        ? await listProjectConversations(projectId)
+        : await listConversations()
+      set((state) => {
+        // 一般與專案列表分開載入，但在同一個 store 保留已載入的其他上下文。
+        const retained = projectId
+          ? state.conversations.filter((item) => item.projectId !== projectId)
+          : state.conversations.filter((item) => item.projectId !== null)
+        return { conversations: [...retained, ...loaded] }
+      })
     } catch (error) {
       set({ lastError: errorMessage(error) })
     } finally {
@@ -83,9 +92,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  openConversation: async (id) => {
+  openConversation: async (id, projectId) => {
     if (get().activeConversationId === id) return
-    const conversation = await getConversation(id)
+    const knownConversation = get().conversations.find((item) => item.id === id)
+    const resolvedProjectId = projectId === undefined
+      ? knownConversation?.projectId ?? null
+      : projectId
+    const conversation = await getConversation(id, resolvedProjectId)
     set({
       activeConversationId: id,
       messages: conversation.messages,
@@ -93,12 +106,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     })
   },
 
-  startNewConversation: async (
-    scope = 'general',
-    projectId = null,
-    profileId = null,
-  ) => {
-    const conversation = await createConversation(scope, projectId, profileId)
+  startNewConversation: async (projectId = null, profileId = null) => {
+    const conversation = projectId
+      ? await createProjectConversation(projectId, profileId)
+      : await createConversation(profileId)
     set((state) => ({
       conversations: [conversation, ...state.conversations],
       activeConversationId: conversation.id,
@@ -108,8 +119,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     return conversation.id
   },
 
-  deleteConv: async (id) => {
-    await deleteConversation(id)
+  deleteConv: async (id, projectId) => {
+    const knownConversation = get().conversations.find((item) => item.id === id)
+    const resolvedProjectId = projectId === undefined
+      ? knownConversation?.projectId ?? null
+      : projectId
+    await deleteConversation(id, resolvedProjectId)
     set((state) => {
       const conversations = state.conversations.filter((item) => item.id !== id)
       return {
@@ -121,8 +136,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     })
   },
 
-  renameConv: async (id, title) => {
-    await renameConversation(id, title)
+  renameConv: async (id, title, projectId) => {
+    const knownConversation = get().conversations.find((item) => item.id === id)
+    const resolvedProjectId = projectId === undefined
+      ? knownConversation?.projectId ?? null
+      : projectId
+    await renameConversation(id, title, resolvedProjectId)
     set((state) => ({
       conversations: state.conversations.map((conversation) =>
         conversation.id === id ? { ...conversation, title } : conversation),
@@ -138,6 +157,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { activeConversationId, isStreaming } = get()
     if (!activeConversationId || isStreaming ||
         (!userMessage.trim() && attachments.length === 0)) return
+    const activeConversation = get().conversations.find(
+      (item) => item.id === activeConversationId,
+    )
+    const projectId = activeConversation?.projectId ?? null
 
     const timestamp = Date.now()
     const user: LocalMessage = {
@@ -180,7 +203,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               message.streaming ? { ...message, streaming: false } : message),
             isStreaming: false,
           }))
-          void get().loadConversations()
+          void get().loadConversations(projectId)
         },
         onError: (error) => set((state) => ({
           messages: state.messages.map((message) =>
@@ -215,6 +238,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         })),
       },
       abortController.signal,
+      projectId,
     )
   },
 

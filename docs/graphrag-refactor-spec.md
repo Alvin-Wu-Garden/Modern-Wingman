@@ -1152,7 +1152,7 @@ GraphMixedGoldenTests.cs
 - `ContextAgentTools.cs`
 - `ExplorePlanCodeVerifyWorkflow.cs`
 - `ExplorePlanCodeVerifyExecutors.cs`
-- `WingmanChatAgent.cs`
+- `AgentRuntime.cs`
 - Change Intelligence 的 data adapter 輸出模型
 
 外部 REST route 可維持相同以降低 UI 連動，但 response schema 若含舊 kind，必須升版或同步修改 UI。

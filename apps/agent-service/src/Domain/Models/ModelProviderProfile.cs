@@ -42,12 +42,6 @@ public sealed class ModelProviderProfile
     public string? BaseUrl { get; init; }
 
     /// <summary>
-    /// 持有 API Key 的環境變數名稱，例如 "OPENAI_API_KEY"。
-    /// Key 永遠不直接寫入 config 檔，由執行環境注入（OS 環境變數 / Tauri keychain bridge）。
-    /// </summary>
-    public string? ApiKeyEnvVar { get; init; }
-
-    /// <summary>
     /// Azure OpenAI API 版本，例如 "2024-10-21"。
     /// 只有 ProviderType == "azure" 時才需設定。
     /// </summary>

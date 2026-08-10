@@ -168,11 +168,87 @@ public static class AgentSchemaMigrator
 
             """, ct);
 
+        await EnsureConversationSchemaAsync(db.Database.GetDbConnection(), ct);
         await EnsureProjectDatabaseConfigurationSchemaAsync(db.Database.GetDbConnection(), ct);
 
-        // 目前尚未發布，不需要多版本 schema migration；只需確保目前版本的
-        // Atlassian 連線表存在，且不覆寫既有本機資料。
+        // 目前仍不採用完整版本化 migration；只對必要的舊欄位做可重入清理，
+        // 並確保目前版本的 Atlassian 連線表存在，不覆寫既有本機資料。
         await EnsureAtlassianConnectionTableAsync(db.Database.GetDbConnection(), ct);
+    }
+
+    /// <summary>
+    /// 移除舊版 Conversations.Scope 欄位。
+    /// 對話範圍現在由一般／專案巢狀路由及 ProjectId 決定，資料表不再保存第二套狀態。
+    /// </summary>
+    private static async Task EnsureConversationSchemaAsync(
+        DbConnection connection,
+        CancellationToken ct)
+    {
+        if (connection.State == System.Data.ConnectionState.Closed)
+            await connection.OpenAsync(ct);
+
+        await using var inspect = connection.CreateCommand();
+        inspect.CommandText = "PRAGMA table_info(\"Conversations\");";
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var reader = await inspect.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+                columns.Add(reader.GetString(1));
+        }
+
+        if (!columns.Contains("Scope"))
+            return;
+
+        await using (var disableForeignKeys = connection.CreateCommand())
+        {
+            disableForeignKeys.CommandText = "PRAGMA foreign_keys = OFF;";
+            await disableForeignKeys.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            async Task ExecuteAsync(string sql)
+            {
+                await using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = sql;
+                await command.ExecuteNonQueryAsync(ct);
+            }
+
+            await ExecuteAsync("DROP TABLE IF EXISTS \"Conversations_new\";");
+            await ExecuteAsync("""
+                CREATE TABLE "Conversations_new" (
+                    "Id" TEXT NOT NULL CONSTRAINT "PK_Conversations_new" PRIMARY KEY,
+                    "Title" TEXT NOT NULL,
+                    "ProviderProfileId" TEXT,
+                    "ProjectId" TEXT,
+                    "CreatedAt" TEXT NOT NULL,
+                    "UpdatedAt" TEXT NOT NULL
+                );
+                """);
+            await ExecuteAsync("""
+                INSERT INTO "Conversations_new"
+                    ("Id", "Title", "ProviderProfileId", "ProjectId", "CreatedAt", "UpdatedAt")
+                SELECT "Id", "Title", "ProviderProfileId", "ProjectId", "CreatedAt", "UpdatedAt"
+                FROM "Conversations";
+                """);
+            await ExecuteAsync("DROP TABLE \"Conversations\";");
+            await ExecuteAsync("ALTER TABLE \"Conversations_new\" RENAME TO \"Conversations\";");
+            await ExecuteAsync("CREATE INDEX IF NOT EXISTS \"IX_Conversations_ProjectId_UpdatedAt\" ON \"Conversations\" (\"ProjectId\", \"UpdatedAt\");");
+            await transaction.CommitAsync(ct);
+            await using var enableForeignKeys = connection.CreateCommand();
+            enableForeignKeys.CommandText = "PRAGMA foreign_keys = ON;";
+            await enableForeignKeys.ExecuteNonQueryAsync(ct);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            await using var enableForeignKeys = connection.CreateCommand();
+            enableForeignKeys.CommandText = "PRAGMA foreign_keys = ON;";
+            await enableForeignKeys.ExecuteNonQueryAsync(CancellationToken.None);
+            throw;
+        }
     }
 
     /// <summary>建立目前版本唯一需要額外確認的 Atlassian 連線表。</summary>

@@ -40,7 +40,7 @@ public sealed class SpeechModelManager(
         if (File.Exists(tempPath)) File.Delete(tempPath);
 
         var client = httpClientFactory.CreateClient("speech-download");
-        logger.LogInformation("開始下載語音模型 {ModelId} from {Url}", model.Id, sourceUrl);
+        logger.LogInformation("開始下載語音模型。ModelId={ModelId}, Url={Url}", model.Id, sourceUrl);
 
         try
         {

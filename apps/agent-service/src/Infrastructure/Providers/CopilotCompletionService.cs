@@ -85,7 +85,7 @@ public sealed class CopilotCompletionService(
             }
 
             logger.LogDebug(
-                "LLM completion 完成（provider={ProviderId}, model={ModelId}, {Length} 字元）",
+                "LLM 完成回覆（ProviderId={ProviderId}, ModelId={ModelId}, 長度={Length} 字元）",
                 providerId,
                 modelId ?? "(default)",
                 sb.Length);

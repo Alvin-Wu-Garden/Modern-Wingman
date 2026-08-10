@@ -359,7 +359,7 @@ apps/agent-service/
 │  │  └─ ValueObjects/
 │  │
 │  ├─ Infrastructure/
-│  │  ├─ AgentFramework/
+│  │  ├─ AgentRuntime/
 │  │  │  ├─ Harness/
 │  │  │  ├─ Workflows/
 │  │  │  ├─ Mcp/
@@ -407,8 +407,7 @@ apps/agent-service/
 - `Host/Api` 內的 `.proto` 定義與 protobuf 生成程式碼由 C# 專案自行維護（不放共用 `schemas/`）。
 - `Application/` 放 use cases（每個 Run 對應一個 **MAF Workflow 實例**）。
 - `Domain/` 放核心模型，避免直接耦合 MAF 或資料庫。
-- `Infrastructure/AgentFramework` 作為 MAF 1.9.0 adapter 層，**`Workflows/` 是 Phase 1 必要組成**。
-- `Infrastructure/AgentFramework/Providers` 管理多 provider 初始化（OpenAI / Anthropic / Azure OpenAI / Custom BYOK）。
+- `Infrastructure/AgentRuntime` 作為 MAF adapter 層，Provider Factories 集中管理多 Provider 初始化。
 - `Infrastructure/ToolRuntime` 封裝所有本機工具實作。
 - `Contracts/` 可以和 `packages/contracts` 對齊命名，但 C# 端需有本地 DTO（由 protobuf 生成）。
 
@@ -673,7 +672,7 @@ packages/contracts/
 3. 建立 `packages/contracts`（Tauri IPC payload types）
 4. 確認 desktop 能啟動並顯示首頁
 5. 確認 agent-service gRPC health check 可通（Rust gRPC client 能連線）
-6. 初始化 **MAF Workflow 骨架**（`Infrastructure/AgentFramework/Workflows/`）
+6. 初始化 **Agent Runtime 骨架**（`Infrastructure/AgentRuntime/`）
 7. 設定多 Provider 初始化（OpenAI provider 作為預設可注入）
 
 ## Phase 2：打通第一條鏈路
@@ -863,7 +862,7 @@ packages/contracts/
 2. `packages/skills` 預留 workflow presets
 3. `packages/mcp-presets` 預留 provider-specific config
 4. `infra/observability` 預留 OTel collector 設定
-5. `apps/agent-service/Infrastructure/AgentFramework/Workflows` 預留 subagents / background jobs
+5. `apps/agent-service/Infrastructure/AgentRuntime` 預留受控背景工作
 
 ---
 

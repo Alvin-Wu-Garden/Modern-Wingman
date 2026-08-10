@@ -75,7 +75,7 @@ export function ChatPage() {
   }, [activeProjectId, isStreaming, startSummaryPolling, stopSummaryPolling])
 
   const generalConversations = useMemo(
-    () => conversations.filter((conversation) => conversation.scope === 'general'),
+    () => conversations.filter((conversation) => conversation.projectId === null),
     [conversations],
   )
   const activeConversation = conversations.find(
@@ -83,12 +83,12 @@ export function ChatPage() {
   )
 
   const newGeneralConversation = async () => {
-    await startNewConversation('general')
+    await startNewConversation()
     setActiveView('chat')
   }
 
   const openGeneralConversation = async (id: string) => {
-    await openConversation(id)
+    await openConversation(id, null)
     setActiveView('chat')
   }
 
@@ -235,13 +235,13 @@ export function ChatPage() {
         </div>
       )}
 
-      {activeView === 'chat' && activeConversation?.scope === 'general' && (
+      {activeView === 'chat' && activeConversation?.projectId === null && (
         <ConversationPane
           title={activeConversation.title}
           emptyText="輸入任何想聊的內容。"
           onNewConversation={newGeneralConversation}
           onDeleteConversation={async () => {
-            await deleteConv(activeConversation.id)
+            await deleteConv(activeConversation.id, null)
             setActiveView('home')
           }}
         />

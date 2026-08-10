@@ -55,7 +55,7 @@ BYOK validator 已使用供應商模型端點驗證：
 
 驗證成功的 key 最後由 `ProviderSettingStore.SetValidatedCredentialAsync` 使用 DPAPI 保護，寫入 `wingman.db` 的 `ProviderSettings.ProtectedApiKey`；API 不回傳明文。[ProviderSettingStore.cs:87](../apps/agent-service/src/Infrastructure/Persistence/ProviderSettingStore.cs#L87) [ProviderSettingEntity.cs:28](../apps/agent-service/src/Domain/Models/ProviderSettingEntity.cs#L28)
 
-`GET /api/providers/{id}/key-status` 目前回傳 `hasStoredKey` 與 `hasEnvVar`。[ProviderEndpoints.cs:68](../apps/agent-service/src/Host/RestEndpoints/ProviderEndpoints.cs#L68)
+`GET /api/providers/{id}/key-status` 目前回傳 `hasStoredKey`；Provider 金鑰只接受設定頁驗證後的本機加密值。[ProviderEndpoints.cs:68](../apps/agent-service/src/Host/RestEndpoints/ProviderEndpoints.cs#L68)
 
 ### 2. 對話與 JIRA 共用選擇器
 
@@ -70,7 +70,7 @@ JIRA 分析預覽也掛載同一個 `ProviderModelPicker`，並將選擇結果�
 `ProviderModelPicker` 已為每個 profile 呼叫 `getProviderKeyStatus`，也已有 `isVerifiedProvider`：
 
 ```ts
-return status.hasStoredKey || status.hasEnvVar
+return status.hasStoredKey
 ```
 
 [ProviderModelPicker.tsx:24](../apps/desktop/src/features/chat/components/ProviderModelPicker.tsx#L24)
@@ -121,11 +121,9 @@ GET /api/providers/{id}/models
 
 不要把 `/api/providers` 本身改成只列 configured profiles：設定頁也使用這個 API，而且必須看得到尚未設定的 provider 才能輸入 key。篩選應只發生在共用 picker。
 
-#### 環境變數的界線
+#### Provider 金鑰來源
 
-`hasEnvVar` 目前只代表環境變數存在；它沒有經過「設定頁驗證並儲存」流程。若嚴格依本次文字需求，第一版應只接受 `hasStoredKey`。
-
-若產品仍要支援以環境變數啟用 provider，後續應另外加入「啟動時／查詢時驗證成功」的可信狀態，而不是直接把 `hasEnvVar` 當成已驗證。這不應塞進本次最小 UI 調整。
+Provider 金鑰只可在設定頁輸入，經後端向實際服務驗證後，以 DPAPI 加密保存於本機資料庫；Runtime、模型清單與對話流程都不讀取環境變數金鑰。
 
 ### B. 後端：模型清單一律取自目前憑證的 live endpoint
 

@@ -4,13 +4,10 @@
  */
 export const AGENT_API_BASE_URL = 'http://localhost:5002'
 
-export type ConversationScope = 'general' | 'project'
-
 export interface ConversationSummary {
   id: string
   title: string
   providerProfileId: string | null
-  scope: ConversationScope
   projectId: string | null
   createdAt: string
   updatedAt: string
@@ -58,8 +55,6 @@ export interface ProviderInfo {
   providerType: string | null
   baseUrl: string | null
   sortOrder: number
-  /** 後端一次回傳的本機憑證狀態，供選擇器避免逐一查詢。 */
-  hasEnvVar?: boolean
   hasStoredKey?: boolean
   storedBaseUrl?: string | null
   runtimeStatus?: CopilotRuntimeStatus | null
@@ -68,7 +63,6 @@ export interface ProviderInfo {
 export interface ProviderKeyStatus {
   profileId: string
   displayName: string
-  hasEnvVar: boolean
   hasStoredKey: boolean
   storedBaseUrl: string | null
   sortOrder: number
@@ -91,17 +85,24 @@ export async function listConversations(): Promise<ConversationSummary[]> {
   return response.json()
 }
 
+/** 載入指定專案的對話；專案上下文由路由決定，不再透過 scope request 欄位傳遞。 */
+export async function listProjectConversations(
+  projectId: string,
+): Promise<ConversationSummary[]> {
+  const response = await fetch(
+    `${AGENT_API_BASE_URL}/api/projects/${encodeURIComponent(projectId)}/conversations`,
+  )
+  if (!response.ok) throw new Error(`無法載入專案對話：HTTP ${response.status}`)
+  return response.json()
+}
+
 export async function createConversation(
-  scope: ConversationScope,
-  projectId?: string | null,
   providerProfileId?: string | null,
 ): Promise<ConversationSummary> {
   const response = await fetch(`${AGENT_API_BASE_URL}/api/conversations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      scope,
-      projectId: scope === 'project' ? projectId ?? null : null,
       providerProfileId: providerProfileId ?? null,
     }),
   })
@@ -112,25 +113,62 @@ export async function createConversation(
   return response.json()
 }
 
-export async function getConversation(id: string): Promise<ConversationDetail> {
-  const response = await fetch(`${AGENT_API_BASE_URL}/api/conversations/${id}`)
+/** 建立指定專案的對話；projectId 僅存在 URL，不放入 request body。 */
+export async function createProjectConversation(
+  projectId: string,
+  providerProfileId?: string | null,
+): Promise<ConversationSummary> {
+  const response = await fetch(
+    `${AGENT_API_BASE_URL}/api/projects/${encodeURIComponent(projectId)}/conversations`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ providerProfileId: providerProfileId ?? null }),
+    },
+  )
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: string } | null
+    throw new Error(body?.error ?? `無法建立專案對話：HTTP ${response.status}`)
+  }
+  return response.json()
+}
+
+const conversationPath = (id: string | null, projectId?: string | null) => {
+  const prefix = projectId
+    ? `/api/projects/${encodeURIComponent(projectId)}/conversations`
+    : '/api/conversations'
+  return id ? `${prefix}/${encodeURIComponent(id)}` : prefix
+}
+
+export async function getConversation(
+  id: string,
+  projectId?: string | null,
+): Promise<ConversationDetail> {
+  const response = await fetch(`${AGENT_API_BASE_URL}${conversationPath(id, projectId)}`)
   if (!response.ok) throw new Error(`無法載入對話：HTTP ${response.status}`)
   return response.json()
 }
 
-export async function deleteConversation(id: string): Promise<void> {
-  const response = await fetch(`${AGENT_API_BASE_URL}/api/conversations/${id}`, {
+export async function deleteConversation(id: string, projectId?: string | null): Promise<void> {
+  const response = await fetch(`${AGENT_API_BASE_URL}${conversationPath(id, projectId)}`, {
     method: 'DELETE',
   })
   if (!response.ok) throw new Error(`無法刪除對話：HTTP ${response.status}`)
 }
 
-export async function renameConversation(id: string, title: string): Promise<void> {
-  const response = await fetch(`${AGENT_API_BASE_URL}/api/conversations/${id}/title`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title }),
-  })
+export async function renameConversation(
+  id: string,
+  title: string,
+  projectId?: string | null,
+): Promise<void> {
+  const response = await fetch(
+    `${AGENT_API_BASE_URL}${conversationPath(id, projectId)}/title`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    },
+  )
   if (!response.ok) throw new Error(`無法重新命名對話：HTTP ${response.status}`)
 }
 
@@ -150,10 +188,11 @@ export async function sendMessage(
     onActivity?: (activity: AgentActivityEvent) => void
   },
   signal?: AbortSignal,
+  projectId?: string | null,
 ): Promise<void> {
   try {
     const response = await fetch(
-      `${AGENT_API_BASE_URL}/api/conversations/${conversationId}/messages`,
+      `${AGENT_API_BASE_URL}${conversationPath(conversationId, projectId)}/messages`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

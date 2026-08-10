@@ -1,8 +1,6 @@
 using AgentService.Application.Contracts;
 using AgentService.Domain.Models;
-using AgentService.Infrastructure.Providers;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
 
 namespace AgentService.Infrastructure.Persistence;
 
@@ -15,16 +13,13 @@ namespace AgentService.Infrastructure.Persistence;
 public sealed class ProviderSettingStore : IProviderSettingStore
 {
     private readonly IDbContextFactory<AppDbContext> _dbFactory;
-    private readonly AgentServiceOptions _options;
     private readonly ISecretProtector _secretProtector;
 
     public ProviderSettingStore(
         IDbContextFactory<AppDbContext> dbFactory,
-        IOptions<AgentServiceOptions> options,
         ISecretProtector secretProtector)
     {
         _dbFactory = dbFactory;
-        _options = options.Value;
         _secretProtector = secretProtector;
     }
 
@@ -45,26 +40,11 @@ public sealed class ProviderSettingStore : IProviderSettingStore
         return await db.ProviderSettings.FindAsync([profileId], ct);
     }
 
-    // ── API Key（環境變數優先）───────────────────────────────────────────────
-
-    public bool HasEnvVar(string profileId)
-    {
-        var envVar = GetEnvVarName(profileId);
-        if (envVar is null) return false;
-        return !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(envVar));
-    }
+    // ── API Key（只使用設定頁保存的資料庫密文）───────────────────────────────
 
     public string? GetApiKey(string profileId)
     {
-        // 1. 環境變數優先
-        var envVar = GetEnvVarName(profileId);
-        if (envVar is not null)
-        {
-            var envVal = Environment.GetEnvironmentVariable(envVar);
-            if (!string.IsNullOrWhiteSpace(envVal)) return envVal;
-        }
-
-        // 2. DB 儲存值（同步讀取，避免 GetAsync 引入 async 複雜度在 non-async call path）
+        // 同步讀取是為了維持 IApiKeyStore 的同步呼叫契約；每次都建立獨立 DbContext。
         using var db = _dbFactory.CreateDbContext();
         var entity = db.ProviderSettings.Find(profileId);
         if (entity?.ProtectedApiKey is null || entity.EncryptionScheme is null)
@@ -141,14 +121,6 @@ public sealed class ProviderSettingStore : IProviderSettingStore
             entity.UpdatedAt = DateTimeOffset.UtcNow;
         }
         await db.SaveChangesAsync(ct);
-    }
-
-    // ── 私有輔助 ──────────────────────────────────────────────────────────────
-
-    private string? GetEnvVarName(string profileId)
-    {
-        var config = _options.ModelProviders.FirstOrDefault(p => p.Id == profileId);
-        return config?.ApiKeyEnvVar;
     }
 
     private static async Task<int> NextSortOrderAsync(AppDbContext db, CancellationToken ct)

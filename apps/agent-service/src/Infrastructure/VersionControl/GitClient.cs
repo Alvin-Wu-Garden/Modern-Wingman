@@ -18,7 +18,7 @@ public sealed class GitClient(
         try
         {
             await ListRemoteBranchesAsync(profileId, repositoryUrl, ct);
-            return new(true, "Connection successful.");
+            return new(true, "連線成功。");
         }
         catch (Exception ex) when (ex is InvalidOperationException or UriFormatException)
         {

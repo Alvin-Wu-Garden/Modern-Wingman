@@ -5,10 +5,12 @@ using Wingman.Marketplace.Domain;
 
 namespace Wingman.Marketplace.Application;
 
+/// <summary>依候選項目的中繼資料分類 Marketplace artifact 類型與類別。</summary>
 public sealed class MarketplaceDiscoveryClassifier
 {
     public const string ProfileId = "wingman-marketplace-classifier/2026-07";
 
+    /// <summary>分類單一探索候選項目，並回傳分類可信度與相關類別。</summary>
     public (MarketplaceArtifactKind Kind, MarketplaceClassificationConfidence Confidence, string Category, IReadOnlyList<string> SecondaryCategories) Classify(DiscoveryCandidate candidate)
     {
         var text = string.Join(' ', new[]
@@ -56,10 +58,12 @@ public sealed class MarketplaceDiscoveryClassifier
     };
 }
 
+/// <summary>依探索候選項目的中繼資料計算發現分數。</summary>
 public sealed class MarketplaceDiscoveryScorer
 {
     public const string ProfileId = "wingman-marketplace-discovery-score/2026-07";
 
+    /// <summary>計算候選項目的探索分數並建立評分快照。</summary>
     public MarketplaceScoreSnapshot Score(string discoveryRecordId, DiscoveryCandidate candidate, DateTimeOffset now)
     {
         var components = new Dictionary<string, double>(StringComparer.Ordinal)
@@ -83,6 +87,7 @@ public sealed class MarketplaceDiscoveryScorer
             now);
     }
 
+    /// <summary>依候選項目的關鍵中繼資料產生穩定指紋。</summary>
     public static string MetadataFingerprint(DiscoveryCandidate candidate)
     {
         var source = string.Join('|', candidate.GitHubNodeId, candidate.CanonicalUrl, candidate.Name,
@@ -112,11 +117,12 @@ public sealed class MarketplaceDiscoveryScorer
     }
 }
 
-/// <summary>Static artifact evidence only; this score never claims runtime success or malware safety.</summary>
+/// <summary>只根據 artifact 靜態證據評分，不宣稱執行成功或具備惡意程式安全性。</summary>
 public sealed class MarketplaceArtifactQualityScorer
 {
     public const string ProfileId = "wingman-marketplace-artifact-score/2026-07";
 
+    /// <summary>依 artifact 快照內容計算品質分數並建立評分快照。</summary>
     public MarketplaceArtifactScoreSnapshot Score(MarketplaceArtifact artifact)
     {
         var files = Directory.Exists(artifact.SnapshotPath)

@@ -17,7 +17,7 @@ public sealed class CopilotApiKeyValidator(ICopilotCredentialRuntime runtime) : 
 }
 
 /// <summary>
-/// Validates BYOK credentials from the backend so the WebView never contacts AI providers directly.
+/// 由後端驗證 BYOK 憑證，避免 WebView 直接連線 AI Provider。
 /// </summary>
 public sealed class HttpProviderApiKeyValidator(
     IHttpClientFactory httpClientFactory,
@@ -53,7 +53,7 @@ public sealed class HttpProviderApiKeyValidator(
         catch (Exception ex) when (ex is HttpRequestException or UriFormatException or InvalidOperationException)
         {
             logger.LogWarning(
-                "Provider API Key validation failed: profile={ProfileId}, errorType={ErrorType}",
+                "Provider API Key 驗證失敗。ProfileId={ProfileId}, ExceptionType={ErrorType}",
                 profile.Id,
                 ex.GetType().Name);
             return ApiKeyValidationResult.Invalid($"無法連線至 {profile.DisplayName} 驗證 API Key。");
@@ -63,7 +63,7 @@ public sealed class HttpProviderApiKeyValidator(
 }
 
 /// <summary>
-/// Builds the authenticated models request shared by credential validation and model discovery.
+/// 建立供憑證驗證與模型探索共用的已驗證請求。
 /// </summary>
 public static class ProviderModelsRequestFactory
 {
@@ -81,7 +81,7 @@ public static class ProviderModelsRequestFactory
             "azure" => CreateAzureRequest(baseUrl, profile.AzureApiVersion, apiKey),
             "openai" => CreateBearerRequest(baseUrl, apiKey),
             _ => throw new InvalidOperationException(
-                $"Provider profile '{profile.Id}' has an unsupported provider type."),
+                $"Provider Profile「{profile.Id}」的類型不受支援。"),
         };
     }
 

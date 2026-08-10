@@ -63,9 +63,8 @@ export function ProviderModelPicker({
 
     void (async () => {
       try {
-        // Provider profiles are a small local SQLite read. Let the request
-        // finish when this component is unmounted; the cancelled flag still
-        // prevents a late response from updating an unmounted component.
+        // Provider Profile 只需讀取本機 SQLite；元件卸載時讓請求自然完成，
+        // 由 cancelled 旗標阻止延遲回應更新已卸載的元件。
         const loadedProviders = await listProviders()
         if (cancelled) return
 
@@ -99,7 +98,7 @@ export function ProviderModelPicker({
     }
   }, [onModelChange, onProviderChange, providersLoaded, selectedProviderId])
 
-  /* Close dropdowns when clicking outside */
+  /* 點擊外部時關閉下拉選單。 */
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (providerRef.current && !providerRef.current.contains(e.target as Node)) setProviderOpen(false)
@@ -109,7 +108,7 @@ export function ProviderModelPicker({
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  /* Load models when provider changes — backend handles all provider types */
+  /* 供應商變更時載入模型；所有 Provider 類型皆由後端處理。 */
   useEffect(() => {
     if (!providersLoaded || !selectedProviderId) {
       setModelGroups([])
@@ -161,7 +160,7 @@ export function ProviderModelPicker({
 
   return (
     <div className="flex min-w-0 items-center gap-1.5">
-      {/* Provider picker */}
+      {/* Provider 選擇器 */}
       <div ref={providerRef} className="relative min-w-0">
         <button
           type="button"
@@ -215,7 +214,7 @@ export function ProviderModelPicker({
         )}
       </div>
 
-      {/* Model picker — shown for all providers that have models */}
+      {/* 模型選擇器；有可用模型的 Provider 都會顯示 */}
       {selectedProvider && (
         <div ref={modelRef} className="relative min-w-0">
           <button

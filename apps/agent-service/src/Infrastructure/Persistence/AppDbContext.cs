@@ -27,11 +27,10 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         {
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Title).HasMaxLength(200);
-            entity.Property(x => x.Scope).HasConversion<string>().HasMaxLength(20);
             entity.Property(x => x.ProjectId).HasMaxLength(64);
             entity.Property(x => x.CreatedAt).HasConversion<string>();
             entity.Property(x => x.UpdatedAt).HasConversion<string>();
-            entity.HasIndex(x => new { x.Scope, x.ProjectId, x.UpdatedAt });
+            entity.HasIndex(x => new { x.ProjectId, x.UpdatedAt });
         });
 
         builder.Entity<MessageEntity>(entity =>

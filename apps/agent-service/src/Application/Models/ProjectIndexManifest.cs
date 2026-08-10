@@ -20,8 +20,8 @@ public sealed record IndexedFileManifest(
     string? DeclarationHash = null);
 
 /// <summary>
-/// An immutable description of one indexing attempt.  A failed attempt is kept for
-/// diagnostics, but is never promoted over the last complete graph version.
+/// 一次索引嘗試的不可變描述。失敗嘗試會保留供診斷，
+/// 但永遠不會覆蓋上一個完整的圖譜版本。
 /// </summary>
 public sealed record ProjectIndexManifest(
     string ProjectId,

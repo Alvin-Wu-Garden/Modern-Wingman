@@ -37,7 +37,7 @@ public sealed class ProviderCredentialService(
         catch (Exception ex)
         {
             logger.LogWarning(
-                "Provider credential validation failed unexpectedly: profile={ProfileId}, errorType={ErrorType}",
+                "Provider 憑證驗證發生未預期錯誤。ProfileId={ProfileId}, ExceptionType={ErrorType}",
                 profile.Id,
                 ex.GetType().Name);
             return ApiKeyValidationResult.Invalid("驗證 API Key 時發生錯誤。");
@@ -61,7 +61,7 @@ public sealed class ProviderCredentialService(
         catch (Exception ex)
         {
             logger.LogWarning(
-                "Validated Copilot PAT could not activate bundled runtime: errorType={ErrorType}",
+                "已驗證的 Copilot PAT 無法啟用內建 Runtime。ExceptionType={ErrorType}",
                 ex.GetType().Name);
 
             if (string.IsNullOrWhiteSpace(previousKey))

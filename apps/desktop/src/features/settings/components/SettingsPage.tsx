@@ -232,7 +232,6 @@ function SortableProviderRow(props: ProviderRowProps) {
 
   const isCopilotDefault = props.provider.kind === 'CopilotDefault'
   const isCustom = props.provider.id === 'custom-byok'
-  const hasEnvVar = props.status?.hasEnvVar ?? false
   const hasStoredKey = props.status?.hasStoredKey ?? false
   const copilotStatus = props.status?.runtimeStatus
   const isGithub = props.provider.providerType === 'github' || props.provider.id.includes('github')
@@ -250,7 +249,7 @@ function SortableProviderRow(props: ProviderRowProps) {
   const iconCls = 'w-3.5 h-3.5 shrink-0'
   let HeaderIcon: React.ReactNode
   const validation = props.validation
-  if (hasStoredKey || hasEnvVar || (typeof validation === 'object' && validation.valid)) {
+  if (hasStoredKey || (typeof validation === 'object' && validation.valid)) {
     HeaderIcon = <Check className={`${iconCls} text-brand-green`} />
   } else if (typeof validation === 'object' && !validation.valid) {
     HeaderIcon = <X className={`${iconCls} text-red-400`} />
@@ -281,12 +280,7 @@ function SortableProviderRow(props: ProviderRowProps) {
         {HeaderIcon}
         <ProviderBrandIcon provider={props.provider} />
         <span className="text-sm font-medium text-ink flex-1">{props.provider.displayName}</span>
-        {!isCopilotDefault && hasEnvVar && (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-brand/10 text-brand font-medium">
-            環境變數
-          </span>
-        )}
-        {!isCopilotDefault && !hasEnvVar && hasStoredKey && (
+        {!isCopilotDefault && hasStoredKey && (
           <span className="text-xs px-2 py-0.5 rounded-full bg-brand-green/10 text-brand-green font-medium">
             已儲存
           </span>
@@ -304,7 +298,7 @@ function SortableProviderRow(props: ProviderRowProps) {
       {/* 可收合的內容區 */}
       {expanded && (
         <div className="px-4 pb-4 space-y-3 border-t border-border/50 pt-3">
-      {isCustom && !hasEnvVar && (
+      {isCustom && (
         <div>
           <label className="block text-xs text-ink-subtle mb-1">Base URL</label>
           <input
@@ -325,20 +319,7 @@ function SortableProviderRow(props: ProviderRowProps) {
             需在 Account permissions 勾選 <code className="font-mono bg-surface-alt px-1 rounded">Models</code>。
           </p>
         )}
-          {hasEnvVar ? (
-            <div className="relative">
-              <input
-                type="password"
-                value="••••••••••••••••••••"
-                disabled
-                className="w-full rounded-xl border border-border bg-surface-alt px-3 py-2 text-sm text-ink-subtle cursor-not-allowed opacity-60"
-              />
-              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-ink-subtle">
-                由環境變數提供
-              </span>
-            </div>
-          ) : (
-            <div className="space-y-1">
+          <div className="space-y-1">
               <div className="flex gap-2">
                 <div className="relative flex-1">
                   {showStoredDots ? (
@@ -388,8 +369,7 @@ function SortableProviderRow(props: ProviderRowProps) {
                 )}
               </div>
               <ValidationBadge state={props.validation} isGithub={isCopilotDefault || isGithub} />
-            </div>
-          )}
+          </div>
         </div>
         {isCopilotDefault && (
           <div className="rounded-lg bg-surface-alt/70 px-3 py-2 text-xs text-ink-secondary leading-relaxed space-y-1">
@@ -460,7 +440,6 @@ export function SettingsPage() {
         list.map((provider) => [provider.id, {
           profileId: provider.id,
           displayName: provider.displayName,
-          hasEnvVar: provider.hasEnvVar ?? false,
           hasStoredKey: provider.hasStoredKey ?? false,
           storedBaseUrl: provider.storedBaseUrl ?? null,
           sortOrder: provider.sortOrder,
@@ -474,7 +453,7 @@ export function SettingsPage() {
       )
       setKeyStatuses(statuses)
       setBaseUrlInputs((prev) => ({ ...baseUrls, ...prev }))
-    } catch { /* service not ready */ }
+    } catch { /* Agent Service 尚未就緒。 */ }
   }, [])
 
   useEffect(() => {

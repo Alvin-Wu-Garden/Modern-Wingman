@@ -103,7 +103,7 @@ public static class ProjectDatabaseEndpoints
                 ct))!));
     }
 
-    /// <summary>Provider-specific PUT 別名，讓 SQL Server 與 SQLite 可各自保存。</summary>
+    /// <summary>依 Provider 分流的 PUT 別名，讓 SQL Server 與 SQLite 可各自保存。</summary>
     private static Task<IResult> SaveProvider(
         string projectId,
         string provider,

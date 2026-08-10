@@ -99,11 +99,16 @@ export function ProjectsPage() {
     return () => window.removeEventListener('click', close)
   }, [menu])
 
+  useEffect(() => {
+    if (!activeProjectId) return
+    // 專案對話使用專案路由載入，避免與一般對話共用同一個 API 查詢。
+    void loadConversations(activeProjectId)
+  }, [activeProjectId, loadConversations])
+
   const activeProject = projects.find((project) => project.id === activeProjectId)
   const projectConversations = useMemo(
     () => conversations.filter(
       (conversation) =>
-        conversation.scope === 'project' &&
         conversation.projectId === activeProjectId,
     ),
     [activeProjectId, conversations],
@@ -111,7 +116,6 @@ export function ProjectsPage() {
   const activeConversation = conversations.find(
     (conversation) =>
       conversation.id === activeConversationId &&
-      conversation.scope === 'project' &&
       conversation.projectId === activeProjectId,
   )
 
@@ -153,14 +157,15 @@ export function ProjectsPage() {
 
   const newProjectConversation = async () => {
     if (!activeProject) return
-    await startNewConversation('project', activeProject.id)
+    await startNewConversation(activeProject.id)
   }
 
   const handleJiraConversationCreated = async (
     conversationId: string,
   ) => {
-    await loadConversations()
-    await openConversation(conversationId)
+    if (!activeProjectId) return
+    await loadConversations(activeProjectId)
+    await openConversation(conversationId, activeProjectId)
   } 
   /**
    * Neo4j 圖譜清除可能需要數秒；保留專案列並顯示刪除狀態，
@@ -281,7 +286,7 @@ export function ProjectsPage() {
                 <button
                   key={conversation.id}
                   type="button"
-                  onClick={() => void openConversation(conversation.id)}
+                  onClick={() => void openConversation(conversation.id, activeProjectId)}
                   className={cn(
                     'mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs',
                     conversation.id === activeConversationId
@@ -378,7 +383,7 @@ export function ProjectsPage() {
                 title={activeConversation.title}
                 emptyText="詢問此專案的功能、資料流、bug 或新需求。"
                 onNewConversation={newProjectConversation}
-                onDeleteConversation={() => deleteConv(activeConversation.id)}
+                onDeleteConversation={() => deleteConv(activeConversation.id, activeProjectId)}
               />
             ) : (
               <div className="flex flex-1 items-center justify-center">

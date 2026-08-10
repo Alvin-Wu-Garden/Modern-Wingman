@@ -902,8 +902,8 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             // GDS 是 optional discovery 能力。外掛缺失、版本不相容或記憶體估算拒絕時，
             // 必須安全退回 deterministic label propagation，不能讓 canonical publish 失敗。
             _logger.LogInformation(
-                "Neo4j GDS Leiden 不可用，將使用 deterministic secondary community fallback。" +
-                " Project={ProjectId}, ExceptionType={ExceptionType}",
+                "Neo4j GDS Leiden 不可用，將使用確定性的次級 Community 降級流程。" +
+                " ProjectId={ProjectId}, ExceptionType={ExceptionType}",
                 projectId,
                 exception.GetType().Name);
             return null;
@@ -927,8 +927,8 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                     exception is not OperationCanceledException)
                 {
                     _logger.LogWarning(
-                        "清理暫存 GDS projection 失敗；不影響 active domain graph。" +
-                        " Project={ProjectId}, ExceptionType={ExceptionType}",
+                        "清理暫存 GDS projection 失敗；不影響目前的 domain graph。" +
+                        " ProjectId={ProjectId}, ExceptionType={ExceptionType}",
                         projectId,
                         exception.GetType().Name);
                 }

@@ -1,8 +1,8 @@
 namespace AgentService.Application.Models;
 
 /// <summary>
-/// Result of validating a provider API key against the real provider endpoint.
-/// Only valid credentials are eligible for persistence.
+/// 向實際 Provider Endpoint 驗證 API Key 的結果。
+/// 只有驗證成功的憑證可以保存至本機資料庫。
 /// </summary>
 public sealed record ApiKeyValidationResult(string Status, string? Message = null)
 {
