@@ -1121,13 +1121,16 @@ public sealed class GraphIndexWatcherService(
     /// <summary>合併短時間異動並觸發一次完整 authority rebuild。</summary>
     private void Schedule(string projectId, string path)
     {
+        // 原始碼工具索引涵蓋 JSON、YAML、Markdown 等不一定會進入 Graph
+        // incremental pipeline 的檔案；先失效 source snapshot，再決定是否
+        // 需要排程 Graph rebuild，避免這些檔案在 30 秒 TTL 內持續回傳舊內容。
+        ProjectAnalysisTools.InvalidateFileCatalog(path);
         if (!WatchedExtensions.Contains(Path.GetExtension(path)))
         {
             return;
         }
-        // 原始碼工具共用的目錄與內容快取只失效異動檔案，下一次查詢再惰性重建；
+        // 原始碼工具共用的目錄、倒排與 Roslyn snapshot 會在下一次查詢惰性重建；
         // 這不會觸發同步索引，也不會讓當前問答等待完整 Catch-up。
-        ProjectAnalysisTools.InvalidateFileCatalog(path);
         if (_debounces.TryRemove(projectId, out var previous))
         {
             previous.Cancel();

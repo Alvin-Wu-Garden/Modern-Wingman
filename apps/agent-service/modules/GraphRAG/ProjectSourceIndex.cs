@@ -39,7 +39,6 @@ internal sealed class ProjectSourceIndex
     private static readonly ConcurrentDictionary<string, Lazy<Task<ProjectSourceIndex>>> Indexes = new(
         StringComparer.OrdinalIgnoreCase);
 
-    private readonly string _rootPath;
     private readonly IReadOnlyList<IndexedFile> _files;
     private readonly IReadOnlyDictionary<string, int> _fileNumbers;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<int>> _trigramPostings;
@@ -49,12 +48,10 @@ internal sealed class ProjectSourceIndex
     private Dictionary<string, IReadOnlyList<SymbolOccurrence>>? _symbols;
 
     private ProjectSourceIndex(
-        string rootPath,
         IReadOnlyList<IndexedFile> files,
         IReadOnlyDictionary<string, int> fileNumbers,
         IReadOnlyDictionary<string, IReadOnlyList<int>> trigramPostings)
     {
-        _rootPath = rootPath;
         _files = files;
         _fileNumbers = fileNumbers;
         _trigramPostings = trigramPostings;
@@ -139,25 +136,25 @@ internal sealed class ProjectSourceIndex
     /// 只取得已完成且仍有效的索引，不觸發全專案建立工作。
     /// 讀取單一檔案區段時優先使用此方法，避免一次讀入整個專案。
     /// </summary>
-    public static bool TryGetExisting(string rootPath, out ProjectSourceIndex? index)
+    public static async Task<ProjectSourceIndex?> GetExistingAsync(
+        string rootPath,
+        CancellationToken cancellationToken = default)
     {
         rootPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
-        index = null;
         if (!Indexes.TryGetValue(rootPath, out var lazy) || !lazy.IsValueCreated)
-            return false;
+            return null;
         var task = lazy.Value;
         if (!task.IsCompletedSuccessfully)
-            return false;
-        var value = task.Result;
+            return null;
+        var value = await task.WaitAsync(cancellationToken).ConfigureAwait(false);
         if (DateTime.UtcNow - value.CreatedAtUtc > IndexLifetime)
         {
             Indexes.TryRemove(new KeyValuePair<string, Lazy<Task<ProjectSourceIndex>>>(
                 rootPath,
                 lazy));
-            return false;
+            return null;
         }
-        index = value;
-        return true;
+        return value;
     }
 
     /// <summary>
@@ -502,7 +499,6 @@ internal sealed class ProjectSourceIndex
         }
 
         return new ProjectSourceIndex(
-            rootPath,
             files,
             fileNumbers,
             postings.ToDictionary(

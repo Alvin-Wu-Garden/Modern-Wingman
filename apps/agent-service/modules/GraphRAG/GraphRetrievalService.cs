@@ -103,7 +103,6 @@ public sealed class GraphRetrievalService
     private readonly GraphRetrievalOptions _options;
     private readonly ILogger<GraphRetrievalService> _logger;
     private readonly ILlmCompletionService? _llm;
-    private readonly SemaphoreSlim _queryConcurrency = new(4, 4);
 
     /// <summary>建立 FBL Graph 檢索服務。</summary>
     public GraphRetrievalService(
@@ -548,21 +547,12 @@ public sealed class GraphRetrievalService
                 .Select(query => query.Text)),
             selectedQueries.Max(query => query.Priority),
             selectedQueries.Any(query => query.IsLlmGenerated));
-        await _queryConcurrency.WaitAsync(cancellationToken);
-        IReadOnlyList<WeightedSearchHit> resultSets;
-        try
-        {
-            resultSets = await SearchOneQueryAsync(
-                projectId,
-                graphVersion,
-                mergedQuery,
-                Math.Clamp(Math.Max(effectiveLimit * 4, 20), 3, 100),
-                cancellationToken);
-        }
-        finally
-        {
-            _queryConcurrency.Release();
-        }
+        var resultSets = await SearchOneQueryAsync(
+            projectId,
+            graphVersion,
+            mergedQuery,
+            Math.Clamp(Math.Max(effectiveLimit * 4, 20), 3, 100),
+            cancellationToken);
 
         return resultSets
             .GroupBy(hit => hit.Hit.Node.Key, StringComparer.Ordinal)

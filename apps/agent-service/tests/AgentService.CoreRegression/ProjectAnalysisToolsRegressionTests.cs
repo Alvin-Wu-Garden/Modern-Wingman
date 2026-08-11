@@ -348,6 +348,43 @@ public sealed class ProjectAnalysisToolsRegressionTests
     }
 
     [Fact]
+    public async Task ProjectGraphTools_精準名稱優先於泛用高分節點()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            var generic = GraphNode.Create(
+                GraphNodeKind.CodeClass,
+                "class:GenericTradeController",
+                new Dictionary<string, object?> { ["name"] = "GenericTradeController" });
+            var exact = GraphNode.Create(
+                GraphNodeKind.CodeClass,
+                "class:BondTradeController",
+                new Dictionary<string, object?> { ["name"] = "BondTradeController" });
+            var store = DispatchProxy.Create<IGraphStore, SearchGraphStoreProxy>();
+            var proxy = (SearchGraphStoreProxy)(object)store;
+            proxy.Hits =
+            [
+                new GraphSearchHit(generic, 999),
+                new GraphSearchHit(exact, 0.01),
+            ];
+            var tools = new ProjectAnalysisTools(
+                "test-project",
+                root,
+                store,
+                graphVersion: "graph-v1");
+
+            var result = await tools.SearchGraphAsync("BondTradeController", 1);
+
+            Assert.Equal("class:BondTradeController", result.Hits[0].Id);
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
     public async Task BuildAnswerPromptAsync_Deterministic零命中時_應只執行新增Rewrite查詢()
     {
         var rewrittenNode = GraphNode.Create(

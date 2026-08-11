@@ -367,12 +367,27 @@ public sealed class ProjectAnalysisTools
         IReadOnlyList<GraphSearchHit> hits;
         try
         {
+            // Neo4j 會先依 NodeKind 做 bounded diversification；多取一小批候選後
+            // 在工具邊界重新做精準名稱排序，避免泛用高 BM25 節點蓋過使用者明確
+            // 指定的 Controller、Service 或資料表名稱。
+            var candidateLimit = Math.Clamp(
+                limit * 4,
+                limit,
+                MaximumGraphSearchResults * 4);
+            var luceneQuery = GraphRetrievalService.BuildViewerLuceneQuery(query);
             hits = await _graphStore.SearchAsync(
                 _projectId,
-                GraphRetrievalService.BuildViewerLuceneQuery(query),
-                limit,
+                luceneQuery,
+                candidateLimit,
                 _graphVersion,
                 cancellationToken);
+        }
+        catch (ArgumentException)
+        {
+            return new GraphSearchToolResult(
+                query.Trim(),
+                [],
+                "搜尋文字沒有可用的識別碼；請改用具體的類別、方法、路由、資料表或欄位名稱。 ");
         }
         catch (GraphStoreException exception)
         {
@@ -384,9 +399,16 @@ public sealed class ProjectAnalysisTools
                 DescribeGraphStoreFailure(exception));
         }
 
+        var orderedHits = hits
+            .OrderByDescending(hit => ExactGraphNameBoost(hit, query))
+            .ThenByDescending(hit => hit.Score)
+            .ThenBy(hit => hit.Node.Key, StringComparer.Ordinal)
+            .Take(limit)
+            .ToArray();
+
         return new GraphSearchToolResult(
             query.Trim(),
-            hits.Select(hit => new GraphNodeToolItem(
+            orderedHits.Select(hit => new GraphNodeToolItem(
                     hit.Node.Key,
                     hit.Node.Kind.ToString(),
                     GetNodeText(hit.Node, "role") ?? hit.Node.Kind.ToString(),
@@ -396,7 +418,7 @@ public sealed class ProjectAnalysisTools
                     GetNodeEndLine(hit.Node),
                     hit.Score))
                 .ToList(),
-            hits.Count == 0
+            orderedHits.Length == 0
                 ? "Graph 沒有命中；請改用 search_project_text 尋找原始字串或符號。"
                 : "如需上下游關係，請將實際 nodeId 傳給 trace_project_graph_paths。"
         );
@@ -614,7 +636,9 @@ public sealed class ProjectAnalysisTools
                 $"檔案大小超過 {MaximumReadFileBytes / (1024 * 1024)} MB 的讀取上限。 ");
 
         // 只有本輪先前已建立索引時才重用；直接讀取單一檔案不應被迫掃描整個專案。
-        ProjectSourceIndex.TryGetExisting(_rootPath, out var index);
+        var index = await ProjectSourceIndex
+            .GetExistingAsync(_rootPath, cancellationToken)
+            .ConfigureAwait(false);
         var indexedRange = index?.ReadFileRange(fullPath, startLine, lineCount);
         if (indexedRange is not null)
         {
@@ -746,6 +770,37 @@ public sealed class ProjectAnalysisTools
                 "本輪 Graph 快照不存在；請改用原始碼工具。",
             _ => "Graph 查詢失敗；請改用原始碼工具，不要重試相同 Graph 查詢。",
         };
+
+    /// <summary>為 Graph 工具命中的顯示名稱與穩定 key 計算精準名稱優先分數。</summary>
+    private static int ExactGraphNameBoost(GraphSearchHit hit, string query)
+    {
+        var requested = query.Trim();
+        var normalizedRequested = NormalizeGraphName(requested);
+        var names = new[]
+        {
+            GetNodeText(hit.Node, "name"),
+            GetNodeText(hit.Node, "display_name"),
+            hit.Node.Key,
+        }.Where(value => !string.IsNullOrWhiteSpace(value));
+
+        var boost = 0;
+        foreach (var name in names)
+        {
+            if (name!.Equals(requested, StringComparison.OrdinalIgnoreCase))
+                boost = Math.Max(boost, 1_000);
+            else if (NormalizeGraphName(name).Equals(
+                         normalizedRequested,
+                         StringComparison.OrdinalIgnoreCase))
+                boost = Math.Max(boost, 900);
+            else if (name.Contains(requested, StringComparison.OrdinalIgnoreCase))
+                boost = Math.Max(boost, 500);
+        }
+
+        return boost;
+    }
+
+    private static string NormalizeGraphName(string value) =>
+        string.Concat(value.Where(char.IsLetterOrDigit));
 
     /// <summary>將大小寫不同但語意相同的 literal 搜尋統一成快取 key。</summary>
     private static string NormalizeSearchQueryForCache(string query) =>
