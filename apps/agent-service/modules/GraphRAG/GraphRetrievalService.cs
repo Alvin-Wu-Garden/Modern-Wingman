@@ -167,6 +167,7 @@ public sealed class GraphRetrievalService
 
             var seeds = await SearchSeedsAsync(
                 projectId,
+                graphVersion,
                 question,
                 providerProfileId,
                 modelId,
@@ -183,7 +184,11 @@ public sealed class GraphRetrievalService
                 return BuildMissingSeedPrompt(question, graphVersion);
             }
 
-            var context = await ExpandAsync(projectId, seeds, cancellationToken);
+            var context = await ExpandAsync(
+                projectId,
+                graphVersion,
+                seeds,
+                cancellationToken);
             var prompt = BuildContextPack(question, rootPath, graphVersion, seeds, context);
             if (retrievalActivityId is not null)
                 await activity!.CompleteAsync(
@@ -208,7 +213,7 @@ public sealed class GraphRetrievalService
 
     /// <summary>
     /// 執行不呼叫 LLM 的確定性 seed 診斷，供驗收與診斷端點確認 Query Plan 是否命中。
-    /// 這個方法不展開 Graph，也不改變 active graph；它只回傳多路查詢合併後的候選節點。
+    /// 這個方法不展開 Graph，也不改變 active graph；它只回傳 bounded 合併查詢後的候選節點。
     /// </summary>
     public async Task<IReadOnlyList<GraphSearchHit>> SearchSeedCandidatesAsync(
         string projectId,
@@ -218,9 +223,15 @@ public sealed class GraphRetrievalService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(question);
+        var graphVersion = await _store.GetActiveManifestAsync(
+            projectId,
+            cancellationToken);
+        if (string.IsNullOrWhiteSpace(graphVersion))
+            return [];
         var plan = BuildQueryPlan(question, _options.MaximumQueryVariants);
         return await SearchQueryPlanAsync(
             projectId,
+            graphVersion,
             question,
             plan.Queries,
             cancellationToken,
@@ -287,17 +298,28 @@ public sealed class GraphRetrievalService
         string question,
         CancellationToken cancellationToken = default)
     {
-        var seeds = await SearchSeedCandidatesAsync(
+        var graphVersion = await _store.GetActiveManifestAsync(
             projectId,
-            question,
-            _options.SeedLimit,
             cancellationToken);
-        if (seeds.Count == 0)
-        {
+        if (string.IsNullOrWhiteSpace(graphVersion))
             return new LegacyGraphRetrievalContext([], []);
-        }
 
-        var subgraph = await ExpandAsync(projectId, seeds, cancellationToken);
+        var plan = BuildQueryPlan(question, _options.MaximumQueryVariants);
+        var seeds = await SearchQueryPlanAsync(
+            projectId,
+            graphVersion,
+            question,
+            plan.Queries,
+            cancellationToken,
+            _options.SeedLimit);
+        if (seeds.Count == 0)
+            return new LegacyGraphRetrievalContext([], []);
+
+        var subgraph = await ExpandAsync(
+            projectId,
+            graphVersion,
+            seeds,
+            cancellationToken);
         var seedScores = seeds.ToDictionary(
             hit => hit.Node.Key,
             hit => hit.Score,
@@ -411,12 +433,13 @@ public sealed class GraphRetrievalService
     }
 
     /// <summary>
-    /// 先以完整問題、精確識別碼、技術名稱與 FBL 別名執行多路 BM25；
+    /// 先以完整問題、精確識別碼、技術名稱與 FBL 別名建立單一 bounded BM25 查詢；
     /// 確定性查詢零命中或僅有低覆蓋候選時，才使用一次受限的 LLM Query Rewrite。
     /// 原始問題永遠保留，LLM 只提供候選搜尋詞，不得直接產生 nodeId 或 Cypher。
     /// </summary>
     private async Task<IReadOnlyList<GraphSearchHit>> SearchSeedsAsync(
         string projectId,
+        string graphVersion,
         string question,
         string? providerProfileId,
         string? modelId,
@@ -427,6 +450,7 @@ public sealed class GraphRetrievalService
         var plan = BuildQueryPlan(question, _options.MaximumQueryVariants);
         var deterministic = await SearchQueryPlanAsync(
             projectId,
+            graphVersion,
             question,
             plan.Queries,
             cancellationToken);
@@ -475,6 +499,7 @@ public sealed class GraphRetrievalService
         // 完整重放一次。兩批結果在記憶體合併後再做最終排序。
         var rewritten = await SearchQueryPlanAsync(
             projectId,
+            graphVersion,
             question,
             rewriteQueries,
             cancellationToken);
@@ -492,9 +517,10 @@ public sealed class GraphRetrievalService
             .ToArray();
     }
 
-    /// <summary>執行一組有優先順序的 Graph 查詢，並合併相同節點的最佳候選。</summary>
+    /// <summary>將有限查詢變體合併成一次 Graph 查詢，並合併相同節點的最佳候選。</summary>
     private async Task<IReadOnlyList<GraphSearchHit>> SearchQueryPlanAsync(
         string projectId,
+        string? graphVersion,
         string question,
         IReadOnlyList<RepositorySearchQuery> queries,
         CancellationToken cancellationToken,
@@ -513,35 +539,39 @@ public sealed class GraphRetrievalService
             resultLimit ?? _options.SeedLimit,
             1,
             30);
-        var perQuery = Math.Clamp(effectiveLimit / 2, 3, 8);
-        // 同一輪查詢變體最多四個同時進入 Neo4j；保留全部候選與原有排序，
-        // 只限制資料庫連線尖峰，避免多個使用者同時問答時形成無上限 Task.WhenAll。
-        var resultSets = await Task.WhenAll(selectedQueries.Select(async query =>
+        // 將同一輪的 deterministic／rewrite 候選合併成一個 bounded Lucene
+        // 查詢，避免每個 alias、PascalCase 分詞都各自 round-trip Neo4j。
+        // 候選順序仍依 priority 排列，精準名稱與意圖 boost 會在記憶體中保留。
+        var mergedQuery = new RepositorySearchQuery(
+            string.Join(' ', selectedQueries
+                .OrderByDescending(query => query.Priority)
+                .Select(query => query.Text)),
+            selectedQueries.Max(query => query.Priority),
+            selectedQueries.Any(query => query.IsLlmGenerated));
+        await _queryConcurrency.WaitAsync(cancellationToken);
+        IReadOnlyList<WeightedSearchHit> resultSets;
+        try
         {
-            await _queryConcurrency.WaitAsync(cancellationToken);
-            try
-            {
-                return await SearchOneQueryAsync(
-                    projectId,
-                    query,
-                    perQuery,
-                    cancellationToken);
-            }
-            finally
-            {
-                _queryConcurrency.Release();
-            }
-        }));
+            resultSets = await SearchOneQueryAsync(
+                projectId,
+                graphVersion,
+                mergedQuery,
+                Math.Clamp(Math.Max(effectiveLimit * 4, 20), 3, 100),
+                cancellationToken);
+        }
+        finally
+        {
+            _queryConcurrency.Release();
+        }
 
         return resultSets
-            .SelectMany(values => values)
             .GroupBy(hit => hit.Hit.Node.Key, StringComparer.Ordinal)
             .Select(group => group
-                .OrderByDescending(ExactNameMatchBoost)
+                .OrderByDescending(item => ExactNameMatchBoost(item, question))
                 .ThenByDescending(item => item.Query.Priority)
                 .ThenByDescending(item => item.Hit.Score)
                 .First())
-            .OrderByDescending(ExactNameMatchBoost)
+            .OrderByDescending(item => ExactNameMatchBoost(item, question))
             .ThenByDescending(item => IntentBoost(question, item.Hit.Node))
             .ThenByDescending(item => item.Query.Priority)
             .ThenByDescending(item => item.Hit.Score)
@@ -552,11 +582,13 @@ public sealed class GraphRetrievalService
     }
 
     /// <summary>
-    /// 執行單一查詢並隔離個別 full-text 解析錯誤；一個候選失敗不得讓其他查詢整批失敗。
+    /// 執行合併後的 bounded full-text 查詢；基礎設施錯誤必須向上傳遞，
+    /// 不可被誤轉為 no-hit。
     /// 使用者取消仍會正常向上傳遞，避免背景工作被吞掉。
     /// </summary>
     private async Task<IReadOnlyList<WeightedSearchHit>> SearchOneQueryAsync(
         string projectId,
+        string? graphVersion,
         RepositorySearchQuery query,
         int limit,
         CancellationToken cancellationToken)
@@ -565,8 +597,9 @@ public sealed class GraphRetrievalService
         {
             var hits = await _store.SearchAsync(
                 projectId,
-                BuildGraphSearchLuceneQuery(query.Text),
+                BuildGraphSearchLuceneQuery(query.Text, maximumTerms: 20),
                 limit,
+                graphVersion,
                 cancellationToken);
             return hits
                 .Select(hit => new WeightedSearchHit(hit, query))
@@ -576,13 +609,15 @@ public sealed class GraphRetrievalService
         {
             throw;
         }
+        // 基礎設施錯誤不可被轉成空集合；否則上層會誤判為 no-hit，
+        // 進而啟動不必要的 LLM rewrite 並掩蓋索引／連線問題。
         catch (Exception exception)
         {
-            _logger.LogDebug(
+            _logger.LogWarning(
                 exception,
-                "GraphRAG 單一查詢失敗，忽略候選並繼續其它查詢：{Query}",
+                "GraphRAG 單一合併查詢失敗，停止本輪檢索：{Query}",
                 query.Text);
-            return [];
+            throw;
         }
     }
 
@@ -919,6 +954,7 @@ public sealed class GraphRetrievalService
     /// </summary>
     private async Task<RetrievalSubgraph> ExpandAsync(
         string projectId,
+        string graphVersion,
         IReadOnlyList<GraphSearchHit> seeds,
         CancellationToken cancellationToken)
     {
@@ -936,6 +972,7 @@ public sealed class GraphRetrievalService
                 projectId,
                 frontier,
                 _options.NeighborsPerNode,
+                graphVersion,
                 cancellationToken);
             var next = new List<string>();
             foreach (var centerKey in frontier.OrderBy(value => value, StringComparer.Ordinal))
@@ -1181,6 +1218,38 @@ public sealed class GraphRetrievalService
         {
             return 100;
         }
+        return 0;
+    }
+
+    /// <summary>
+    /// 合併查詢後仍保留原始問題的精準名稱排序；避免泛用 BM25 高分節點
+    /// 蓋過使用者明確指定的 PascalCase／路由／資料庫識別碼。
+    /// </summary>
+    private static int ExactNameMatchBoost(
+        WeightedSearchHit item,
+        string question)
+    {
+        var direct = ExactNameMatchBoost(item);
+        if (direct > 0)
+            return direct;
+
+        var names = new[]
+        {
+            DisplayName(item.Hit.Node),
+            item.Hit.Node.Key,
+        };
+        var identifiers = TechnicalTokenPattern.Matches(question)
+            .Select(match => match.Value)
+            .Where(value => value.Length >= 4);
+        if (identifiers.Any(identifier => names.Any(name =>
+                name.Equals(identifier, StringComparison.OrdinalIgnoreCase) ||
+                NormalizeComparableName(name).Equals(
+                    NormalizeComparableName(identifier),
+                    StringComparison.OrdinalIgnoreCase))))
+        {
+            return 400;
+        }
+
         return 0;
     }
 

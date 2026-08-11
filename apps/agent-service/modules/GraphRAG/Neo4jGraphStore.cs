@@ -85,8 +85,11 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await _driver.VerifyConnectivityAsync();
-            cancellationToken.ThrowIfCancellationRequested();
+            // 探測逾時必須真正傳入 driver；只在前後檢查 token 仍可能讓
+            // VerifyConnectivity 在網路斷線時長時間卡住整個準備階段。
+            // Driver 5.x 沒有 cancellationToken 參數，使用 WaitAsync 讓目前
+            // request 的逾時可以停止等待；底層連線工作會由 driver 自行收尾。
+            await _driver.VerifyConnectivityAsync().WaitAsync(cancellationToken);
             return true;
         }
         catch (OperationCanceledException)
@@ -579,75 +582,149 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         string projectId,
         string query,
         int limit,
+        CancellationToken cancellationToken = default) =>
+        await SearchAsync(
+            projectId,
+            query,
+            limit,
+            graphVersion: null,
+            cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<GraphSearchHit>> SearchAsync(
+        string projectId,
+        string query,
+        int limit,
+        string? graphVersion,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
         limit = Math.Clamp(limit, 1, 100);
-        if (_driver is null) return [];
+        if (_driver is null)
+        {
+            // 未建立 driver 是基礎設施不可用，不是「沒有命中」；若回傳空集合，
+            // Agent 會誤判查詢成功並浪費額外的 rewrite／工具呼叫。
+            throw new GraphStoreException(
+                GraphStoreFailureKind.Unavailable,
+                "Neo4j 尚未建立連線，無法執行 Graph 檢索。");
+        }
+        if (graphVersion is not null && string.IsNullOrWhiteSpace(graphVersion))
+            throw new GraphStoreException(
+                GraphStoreFailureKind.SnapshotNotFound,
+                "Graph 檢索要求的 graphVersion 不可為空。 ");
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
-        return await session.ExecuteReadAsync(async transaction =>
+        try
         {
-            var manifestCursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                RETURN p.activeManifestVersion AS graphVersion
-                """,
-                new { projectId });
-            if (!await manifestCursor.FetchAsync())
-                return [];
-            var graphVersion = manifestCursor.Current["graphVersion"].As<string?>();
-            if (string.IsNullOrWhiteSpace(graphVersion))
-                return [];
-
-            // Neo4j full-text index 會同時包含其他專案及 retained versions。
-            // 固定 global LIMIT 會讓目標 active scope 永遠沒有機會進入候選。
-            // 這裡按 Lucene score 順序逐頁讀取，直到取得足夠 active 候選或
-            // global hit 已耗盡；頁面大小固定，記憶體只保存目標 scope。
-            var candidates = new List<GraphSearchHit>();
-            var requiredCandidates = Math.Min(
-                MaximumScopedSearchCandidates,
-                Math.Max(limit * 20, 100));
-            var skip = 0;
-            while (candidates.Count < requiredCandidates)
+            return await session.ExecuteReadAsync(async transaction =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var cursor = await transaction.RunAsync(
-                    """
-                    CALL db.index.fulltext.queryNodes(
-                        'graph_entity_search_v4',
-                        $query,
-                        {skip: $skip, limit: $pageSize})
-                    YIELD node, score
-                    RETURN node, score
-                    """,
-                    new
-                    {
-                        query,
-                        skip,
-                        pageSize = FullTextPageSize,
-                    });
-                var pageCount = 0;
-                while (await cursor.FetchAsync())
+                var snapshotVersion = graphVersion;
+                if (snapshotVersion is null)
                 {
-                    pageCount++;
-                    var neo4jNode = cursor.Current["node"].As<INode>();
-                    if (!IsActiveSearchScope(
-                            neo4jNode,
-                            projectId,
-                            graphVersion))
-                        continue;
-                    candidates.Add(new GraphSearchHit(
-                        MapNode(neo4jNode),
-                        cursor.Current["score"].As<double>()));
+                    var manifestCursor = await transaction.RunAsync(
+                        """
+                        MATCH (p:ProjectGraph {projectId: $projectId})
+                        RETURN p.activeManifestVersion AS graphVersion
+                        """,
+                        new { projectId });
+                    if (!await manifestCursor.FetchAsync())
+                        return (IReadOnlyList<GraphSearchHit>)[];
+                    snapshotVersion = manifestCursor.Current["graphVersion"].As<string?>();
+                    if (string.IsNullOrWhiteSpace(snapshotVersion))
+                        return (IReadOnlyList<GraphSearchHit>)[];
                 }
-                skip += pageCount;
-                if (pageCount < FullTextPageSize)
-                    break;
-            }
-            return DiversifySearchHits(candidates, limit);
-        });
+
+                // Neo4j full-text index 會同時包含其他專案及 retained versions。
+                // 固定 global LIMIT 會讓目標 snapshot 永遠沒有機會進入候選，
+                // 因此按 score 分頁；graphVersion 由呼叫端固定傳入，不再每頁重讀 active。
+                var candidates = new List<GraphSearchHit>();
+                var requiredCandidates = Math.Min(
+                    MaximumScopedSearchCandidates,
+                    Math.Max(limit * 20, 100));
+                var skip = 0;
+                while (candidates.Count < requiredCandidates)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var cursor = await transaction.RunAsync(
+                        """
+                        CALL db.index.fulltext.queryNodes(
+                            'graph_entity_search_v4',
+                            $query,
+                            {skip: $skip, limit: $pageSize})
+                        YIELD node, score
+                        RETURN node, score
+                        """,
+                        new
+                        {
+                            query,
+                            skip,
+                            pageSize = FullTextPageSize,
+                        });
+                    var pageCount = 0;
+                    while (await cursor.FetchAsync())
+                    {
+                        pageCount++;
+                        var neo4jNode = cursor.Current["node"].As<INode>();
+                        if (!IsActiveSearchScope(
+                                neo4jNode,
+                                projectId,
+                                snapshotVersion))
+                            continue;
+                        candidates.Add(new GraphSearchHit(
+                            MapNode(neo4jNode),
+                            cursor.Current["score"].As<double>()));
+                    }
+                    skip += pageCount;
+                    if (pageCount < FullTextPageSize)
+                        break;
+                }
+                return DiversifySearchHits(candidates, limit);
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (ServiceUnavailableException exception)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.Unavailable,
+                "Neo4j 無法提供 Graph 檢索，請確認服務是否已啟動。",
+                exception);
+        }
+        catch (ClientException exception) when (IsFullTextSchemaFailure(exception))
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.SchemaNotReady,
+                "Neo4j Graph full-text index 尚未建立或未 ONLINE，請先執行 EnsureSchemaAsync。",
+                exception);
+        }
+        catch (ClientException exception)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.QueryFailed,
+                "Neo4j Graph 檢索查詢失敗。",
+                exception);
+        }
+        catch (Exception exception)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.QueryFailed,
+                "Neo4j Graph 檢索查詢失敗。",
+                exception);
+        }
+    }
+
+    /// <summary>辨識 full-text index 不存在／尚未完成時的 Neo4j 錯誤。</summary>
+    private static bool IsFullTextSchemaFailure(ClientException exception)
+    {
+        var text = exception.Message;
+        return text.Contains("graph_entity_search_v4", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("fulltext", StringComparison.OrdinalIgnoreCase) &&
+               (text.Contains("index", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("does not exist", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

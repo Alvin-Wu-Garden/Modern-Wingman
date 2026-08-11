@@ -51,6 +51,37 @@ public sealed class GraphRagNeo4jOptions
 /// <param name="Score">Neo4j full-text score。</param>
 public sealed record GraphSearchHit(AuthorityGraphNode Node, double Score);
 
+/// <summary>Graph 檢索失敗的可辨識類型，避免把基礎設施錯誤誤報成查無結果。</summary>
+public enum GraphStoreFailureKind
+{
+    /// <summary>Neo4j 無法連線或服務未啟動。</summary>
+    Unavailable,
+
+    /// <summary>必要的 constraint／full-text index 尚未建立或不可用。</summary>
+    SchemaNotReady,
+
+    /// <summary>要求的 immutable graph snapshot 不存在。</summary>
+    SnapshotNotFound,
+
+    /// <summary>Neo4j 查詢執行失敗。</summary>
+    QueryFailed,
+}
+
+/// <summary>攜帶穩定失敗類型的 Graph Store 例外。</summary>
+public sealed class GraphStoreException : Exception
+{
+    /// <summary>建立 Graph Store 例外。</summary>
+    public GraphStoreException(
+        GraphStoreFailureKind failureKind,
+        string message,
+        Exception? innerException = null)
+        : base(message, innerException) =>
+        FailureKind = failureKind;
+
+    /// <summary>可供 API／診斷使用的穩定錯誤類型。</summary>
+    public GraphStoreFailureKind FailureKind { get; }
+}
+
 /// <summary>一個中心節點的一階關係，供 relation-aware BFS 使用。</summary>
 /// <param name="Node">鄰接 node。</param>
 /// <param name="Relationship">連接中心與鄰接 node 的 authority relationship。</param>
@@ -348,12 +379,36 @@ public interface IGraphStore
         int limit,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 在指定 immutable graphVersion 搜尋。正式問答必須使用此多載，
+    /// 避免同一輪的每個 query variant 重讀 active manifest。
+    /// 舊實作以預設轉呼叫保留相容性。
+    /// </summary>
+    Task<IReadOnlyList<GraphSearchHit>> SearchAsync(
+        string projectId,
+        string query,
+        int limit,
+        string? graphVersion,
+        CancellationToken cancellationToken = default) =>
+        SearchAsync(projectId, query, limit, cancellationToken);
+
     /// <summary>取得 active graph 的一階鄰接關係；多 hop budget 由 retrieval service 控制。</summary>
     Task<IReadOnlyList<GraphNeighbor>> GetNeighborsAsync(
         string projectId,
         string nodeId,
         int limit,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 在指定 immutable graphVersion 取得鄰接關係；未指定時沿用 active graph。
+    /// </summary>
+    Task<IReadOnlyList<GraphNeighbor>> GetNeighborsAsync(
+        string projectId,
+        string nodeId,
+        int limit,
+        string? graphVersion,
+        CancellationToken cancellationToken = default) =>
+        GetNeighborsAsync(projectId, nodeId, limit, cancellationToken);
 
     /// <summary>
     /// 批次取得多個 active graph 節點的一階鄰接關係。
@@ -391,6 +446,19 @@ public interface IGraphStore
             item => item.Neighbors,
             StringComparer.Ordinal);
     }
+
+    /// <summary>
+    /// 在指定 immutable graphVersion 批次取得鄰接關係；正式問答使用此多載
+    /// 以固定整輪 BFS 的 snapshot。舊 store 會退回既有 active 查詢。
+    /// </summary>
+    Task<IReadOnlyDictionary<string, IReadOnlyList<GraphNeighbor>>>
+        GetNeighborsBatchAsync(
+            string projectId,
+            IReadOnlyList<string> nodeIds,
+            int limitPerNode,
+            string? graphVersion,
+            CancellationToken cancellationToken = default) =>
+        GetNeighborsBatchAsync(projectId, nodeIds, limitPerNode, cancellationToken);
 
     /// <summary>依 active graph degree 取得入口與核心節點，供 Repo Map 使用。</summary>
     Task<IReadOnlyList<GraphSearchHit>> GetCentralNodesAsync(

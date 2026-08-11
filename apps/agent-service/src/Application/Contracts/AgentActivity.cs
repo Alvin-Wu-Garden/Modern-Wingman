@@ -145,8 +145,9 @@ public sealed class AgentActivityReporter
         string label,
         string? tool,
         string? detail,
-        long? elapsedMs) =>
-        _publishAsync(new AgentActivityEvent(
+        long? elapsedMs)
+    {
+        var activity = new AgentActivityEvent(
             Type: type,
             RunId: RunId,
             ActivityId: activityId,
@@ -156,7 +157,25 @@ public sealed class AgentActivityReporter
             Detail: detail,
             ElapsedMs: elapsedMs,
             Sequence: Interlocked.Increment(ref _sequence),
-            Timestamp: DateTimeOffset.UtcNow));
+            Timestamp: DateTimeOffset.UtcNow);
+
+        // SSE 用戶端中途斷線時，事件回呼可能拋出例外。進度事件是旁路資訊，
+        // 不得讓專案工具的 in-flight 任務卡住或把原本成功的查詢變成失敗。
+        return PublishSafelyAsync(activity);
+    }
+
+    private async Task PublishSafelyAsync(AgentActivityEvent activity)
+    {
+        try
+        {
+            // 回呼通常只是寫入無界 Channel；逾時可避免傳輸層永久阻塞工具。
+            await _publishAsync(activity).WaitAsync(TimeSpan.FromSeconds(1));
+        }
+        catch (Exception)
+        {
+            // 進度事件不可影響主要回答；前端斷線或通道關閉時安全忽略即可。
+        }
+    }
 
     private sealed record ActivityState(
         string Type,

@@ -58,6 +58,103 @@ public sealed class ProjectAnalysisToolsRegressionTests
     }
 
     [Fact]
+    public async Task SearchTextAsync_共用倒排索引且watcher失效後可看見新內容()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            var target = Path.Combine(root, "Controllers", "BondTradeController.cs");
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            await File.WriteAllTextAsync(
+                target,
+                "public sealed class BondTradeController { }\n");
+            for (var index = 0; index < 40; index++)
+            {
+                await File.WriteAllTextAsync(
+                    Path.Combine(root, $"Other{index}.cs"),
+                    $"public sealed class Other{index} {{ }}\n");
+            }
+
+            var tools = CreateTools(root);
+            var first = await tools.SearchTextAsync(
+                "BondTradeController",
+                ".cs",
+                10);
+
+            Assert.Single(first.Matches);
+            // 三字元倒排索引應把逐行掃描縮小到實際命中的檔案。
+            Assert.Equal(1, first.FilesScanned);
+
+            await File.WriteAllTextAsync(
+                target,
+                "public sealed class BondTradeController { string FreshMarker = \"fresh-marker\"; }\n");
+            ProjectAnalysisTools.InvalidateFileCatalog(target);
+
+            var second = await tools.SearchTextAsync(
+                "fresh-marker",
+                ".cs",
+                10);
+            Assert.Single(second.Matches);
+            Assert.Equal("Controllers/BondTradeController.cs", second.Matches[0].FilePath);
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public async Task ReadFileRangeAsync_高行號超過安全上限時_應拒絕昂貴掃描()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(root, "source.cs"), "line\n");
+            var tools = CreateTools(root);
+
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+                tools.ReadFileRangeAsync("source.cs", 100_001, 10));
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public async Task FindCSharpSymbolAsync_重用專案語法索引並保留定義分類()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "Services.cs"),
+                "public sealed class SettlementService { public void Save() { } }\n");
+            var tools = CreateTools(root);
+
+            var type = await tools.FindCSharpSymbolAsync(
+                "SettlementService",
+                includeReferences: false,
+                maxResults: 10);
+            var method = await tools.FindCSharpSymbolAsync(
+                "SettlementService.Save",
+                includeReferences: false,
+                maxResults: 10);
+
+            Assert.Contains(type.Matches, match =>
+                match.Classification == "type-definition" &&
+                match.FilePath == "Services.cs");
+            Assert.Contains(method.Matches, match =>
+                match.Classification == "method-definition" &&
+                match.Container?.StartsWith("SettlementService", StringComparison.Ordinal) == true);
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
     public async Task CreateTools_工具總預算用盡時_應回傳結構化狀態而非拋出例外()
     {
         var root = CreateTestRoot();
@@ -217,9 +314,37 @@ public sealed class ProjectAnalysisToolsRegressionTests
             10);
 
         Assert.Equal(exact.Key, results[0].Node.Key);
+        var graphVersions = ((SearchGraphStoreProxy)(object)store).GraphVersions;
+        Assert.Single(graphVersions);
+        Assert.Equal("graph-v1", graphVersions[0]);
         Assert.All(
             ((SearchGraphStoreProxy)(object)store).Queries,
             query => Assert.DoesNotContain(":/", query));
+    }
+
+    [Fact]
+    public async Task ProjectGraphTools_使用本輪固定GraphVersion()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            var store = DispatchProxy.Create<IGraphStore, SearchGraphStoreProxy>();
+            var proxy = (SearchGraphStoreProxy)(object)store;
+            var tools = new ProjectAnalysisTools(
+                "test-project",
+                root,
+                store,
+                graphVersion: "graph-v1");
+
+            await tools.SearchGraphAsync("BondTradeController", 5);
+
+            Assert.Single(proxy.GraphVersions);
+            Assert.Equal("graph-v1", proxy.GraphVersions[0]);
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
     }
 
     [Fact]
@@ -362,12 +487,16 @@ public sealed class ProjectAnalysisToolsRegressionTests
     {
         public IReadOnlyList<GraphSearchHit> Hits { get; set; } = [];
         public List<string> Queries { get; } = [];
+        public List<string?> GraphVersions { get; } = [];
 
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
+            if (targetMethod?.Name == nameof(IGraphStore.GetActiveManifestAsync))
+                return Task.FromResult<string?>("graph-v1");
             if (targetMethod?.Name == nameof(IGraphStore.SearchAsync))
             {
                 Queries.Add((string)args![1]!);
+                GraphVersions.Add(args.Length >= 4 ? args[3] as string : null);
                 return Task.FromResult(Hits);
             }
             throw new InvalidOperationException(
