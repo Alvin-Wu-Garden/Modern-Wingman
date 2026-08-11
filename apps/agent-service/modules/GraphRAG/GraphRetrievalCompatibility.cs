@@ -64,7 +64,10 @@ internal static class LegacyGraphMappings
         FblAuthority.GraphNodeKind.ClientScript => LegacyGraphNodeKind.EntryPoint,
         FblAuthority.GraphNodeKind.ReactEntry => LegacyGraphNodeKind.EntryPoint,
         FblAuthority.GraphNodeKind.CodeClass => LegacyGraphNodeKind.Code,
-        FblAuthority.GraphNodeKind.DatabaseObject => LegacyGraphNodeKind.Data,
+        FblAuthority.GraphNodeKind.Database or
+        FblAuthority.GraphNodeKind.DatabaseObject or
+        FblAuthority.GraphNodeKind.DatabaseColumn or
+        FblAuthority.GraphNodeKind.StoredProcedureParameter => LegacyGraphNodeKind.Data,
         FblAuthority.GraphNodeKind.CustomReportTemplate => LegacyGraphNodeKind.Data,
         FblAuthority.GraphNodeKind.CustomReportDataSource => LegacyGraphNodeKind.Data,
         FblAuthority.GraphNodeKind.CustomParameterDataSource => LegacyGraphNodeKind.Data,

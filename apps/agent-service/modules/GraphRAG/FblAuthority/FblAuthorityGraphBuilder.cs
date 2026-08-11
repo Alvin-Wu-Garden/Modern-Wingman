@@ -67,14 +67,22 @@ public sealed class FblAuthorityGraphBuilder
         var menus = await request.SqlSource
             .LoadMenusAsync(cancellationToken)
             .ConfigureAwait(false);
-        var extraction = new ExtractionResult(
-            new MenuInventoryExtractor().Extract(
+        var inventory = menus.Count > 0
+            ? new MenuInventoryExtractor().Extract(
                 menus,
                 rootPath,
                 request.SourceCommit,
                 request.DatabaseSnapshotId,
                 request.Provider,
-                databaseName),
+                databaseName)
+            : CreateEmptyInventory(
+                rootPath,
+                request.SourceCommit,
+                request.DatabaseSnapshotId,
+                request.Provider,
+                databaseName);
+        var extraction = new ExtractionResult(
+            inventory,
             Array.Empty<PreflightIssue>());
 
         // C#、MVC View 與瀏覽器端 JavaScript／TypeScript 各建立一次記憶體索引，後續 resolver 只查索引。
@@ -90,10 +98,23 @@ public sealed class FblAuthorityGraphBuilder
         extraction = new StandardWebEntryResolver(csharpIndex, viewIndex, browserScriptIndex)
             .Resolve(extraction.Document);
 
-        // 資料庫目錄供 Plugin、CustomReport 與後端 DD mapping 共用，整個 run 只載入一次。
-        var databaseObjects = await request.SqlSource
-            .LoadDatabaseObjectsAsync(cancellationToken)
-            .ConfigureAwait(false);
+        // 通用 SQL Server metadata 與 FBL overlay 共用同一組 user-configured 唯讀來源；
+        // 支援 optional capability 的正式來源只掃描 sys catalog 一次，測試替身仍可只提供舊物件清單。
+        IReadOnlyList<DatabaseObjectCatalogItem> databaseObjects;
+        if (request.SqlSource is IGenericDatabaseMetadataSource metadataSource)
+        {
+            var metadata = await metadataSource
+                .LoadDatabaseMetadataAsync(cancellationToken)
+                .ConfigureAwait(false);
+            databaseObjects = metadata.Objects;
+            extraction = new DatabaseMetadataGraphResolver().Resolve(extraction, metadata);
+        }
+        else
+        {
+            databaseObjects = await request.SqlSource
+                .LoadDatabaseObjectsAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
         extraction = await new PluginReportResolver(csharpIndex, rootPath)
             .ResolveAsync(extraction, cancellationToken)
             .ConfigureAwait(false);
@@ -116,6 +137,16 @@ public sealed class FblAuthorityGraphBuilder
         extraction = new FileTransformResolver(csharpIndex).Resolve(extraction);
         extraction = new BackendDependencyResolver(csharpIndex, databaseObjects).Resolve(extraction);
 
+        // FBL domain overlay 完成後，再加入 ParallelExtractor 方法論的 Roslyn semantic graph，
+        // 讓既有 CodeClass／WebAction 能直接連到精準的 Type／Method；此階段只讀原始碼，
+        // 不接觸使用者資料庫連線或 Neo4j 發布流程。
+        var semantic = await new RoslynSemanticGraphExtractor()
+            .ExtendAsync(extraction.Document, rootPath, cancellationToken)
+            .ConfigureAwait(false);
+        extraction = new ExtractionResult(
+            semantic.Document,
+            extraction.Issues.Concat(semantic.Issues).ToArray());
+
         // 所有 resolver 完成後才標記 CompleteExtraction，避免半成品被上層誤發布。
         var completedDocument = GraphDocumentBuilder
             .FromDocument(extraction.Document, GraphBuildStage.CompleteExtraction)
@@ -134,5 +165,28 @@ public sealed class FblAuthorityGraphBuilder
         }).Validate(completedDocument, issues);
 
         return new FblAuthorityBuildResult(completedDocument, diagnostics);
+    }
+
+    /// <summary>
+    /// Generic SQL Server 沒有 tblMenuMap 時建立空的 FBL overlay 起點；
+    /// 不建立不存在的 tblMenuMap 節點，但仍保留相同 provider/database scope 與完整發布階段。
+    /// </summary>
+    private static GraphDocument CreateEmptyInventory(
+        string rootPath,
+        string? sourceCommit,
+        string? databaseSnapshotIdentity,
+        string provider,
+        string databaseName)
+    {
+        var metadata = new GraphRunMetadata(
+            $"{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffZ}-{Guid.NewGuid():N}",
+            DateTimeOffset.UtcNow,
+            rootPath,
+            databaseName,
+            GraphBuildStage.MenuInventory,
+            sourceCommit,
+            databaseSnapshotIdentity,
+            provider);
+        return new GraphDocumentBuilder(metadata).Build();
     }
 }

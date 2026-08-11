@@ -68,7 +68,7 @@ public sealed record GraphIndexRun(
 /// </summary>
 public sealed class GraphIndexingService
 {
-    private const string IndexerVersion = "fbl-authority-v1";
+    private const string IndexerVersion = ProjectGraphVersions.Indexer;
     private const long TransientIndexMemoryCollectionThresholdBytes = 1L * 1024 * 1024 * 1024;
     private static readonly IReadOnlySet<string> SupportedExtensions = new HashSet<string>(
         [
@@ -453,7 +453,7 @@ public sealed class GraphIndexingService
                 Status = IndexManifestStatus.Fresh,
                 NodeCount = resultDocument.Nodes.Count,
                 EdgeCount = resultDocument.Relationships.Count,
-                GraphSchemaVersion = "fbl-authority-14x35",
+                GraphSchemaVersion = ProjectGraphVersions.CanonicalSchema,
                 IndexMode = "full",
                 RequiresRetry = false,
             };
@@ -540,7 +540,7 @@ public sealed class GraphIndexingService
                 previousNodeCount,
                 previousEdgeCount,
                 SafeError(exception),
-                "fbl-authority-14x35",
+                ProjectGraphVersions.CanonicalSchema,
                 null,
                 "full",
                 true);
@@ -748,7 +748,7 @@ public sealed class GraphIndexingService
             startedAt,
             null,
             status,
-            GraphSchemaVersion: "fbl-authority-14x35",
+            GraphSchemaVersion: ProjectGraphVersions.CanonicalSchema,
             AnalysisSnapshotHash: databaseFingerprint,
             IndexMode: "full",
             RequiresRetry: false);

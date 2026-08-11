@@ -202,7 +202,7 @@ public static class FblAuthorityCommunityBuilder
         IReadOnlyDictionary<string, string> attributes)
     {
         var cacheMaterial = string.Join('\n',
-            "fbl-community-v1",
+            ProjectGraphVersions.Community,
             communityId,
             title,
             summary,

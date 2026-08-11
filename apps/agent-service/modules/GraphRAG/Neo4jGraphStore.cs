@@ -14,6 +14,7 @@ using AuthorityGraphEvidence = AgentService.Modules.GraphRAG.FblAuthority.GraphE
 using AuthorityGraphNodeKind = AgentService.Modules.GraphRAG.FblAuthority.GraphNodeKind;
 using AuthorityGraphRelationshipKind = AgentService.Modules.GraphRAG.FblAuthority.GraphRelationshipKind;
 using AuthorityGraphSchema = AgentService.Modules.GraphRAG.FblAuthority.GraphSchema;
+using ProjectGraphVersions = AgentService.Modules.GraphRAG.FblAuthority.ProjectGraphVersions;
 
 namespace AgentService.Modules.GraphRAG;
 
@@ -218,14 +219,19 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                     (:GraphEntity {projectId: $projectId, graphVersion: $previousVersion})
                 WITH p, nodeCount, count(oldRel) AS edgeCount
                 SET p.activeManifestVersion = $previousVersion,
-                    p.schemaVersion = 'fbl-authority-1',
+                    p.schemaVersion = $schemaVersion,
                     p.nodeCount = nodeCount,
                     p.edgeCount = edgeCount,
                     p.previousManifestVersion = NULL,
                     p.promotedAt = datetime()
                 RETURN count(p) AS restored
                 """,
-                new { projectId, previousVersion });
+                new
+                {
+                    projectId,
+                    previousVersion,
+                    schemaVersion = ProjectGraphVersions.StorageSchema,
+                });
             return (await cursor.SingleAsync())["restored"].As<int>();
         });
         if (restored != 1)
@@ -1197,7 +1203,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 {
                     projectId = snapshot.ProjectId,
                     graphVersion = snapshot.GraphVersion,
-                    schemaVersion = "fbl-authority-1",
+                    schemaVersion = ProjectGraphVersions.StorageSchema,
                     canonicalDigest = snapshot.ContentDigest,
                     nodeCount = snapshot.Document.Nodes.Count,
                     edgeCount = snapshot.Document.Relationships.Count,
@@ -1800,7 +1806,11 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     /// <summary>取得節點供 UI 與全文索引顯示的穩定短名稱。</summary>
     private static string DisplayName(AuthorityGraphNode node)
     {
-        foreach (var key in new[] { "name", "display_name", "qualified_name", "path", "object_name", "menu_id" })
+        foreach (var key in new[]
+                 {
+                     "name", "display_name", "full_name", "signature", "qualified_name",
+                     "file_path", "project_file", "solution_file", "path", "object_name", "menu_id",
+                 })
         {
             if (AuthorityStringProperty(node.Properties, key) is { Length: > 0 } value)
                 return value;
@@ -1830,7 +1840,9 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     /// <summary>以 authority node kind 提供 UI 使用的語言提示，不改變 graph schema。</summary>
     private static string AuthorityLanguage(AuthorityGraphNodeKind kind) => kind switch
     {
-        AuthorityGraphNodeKind.CodeClass or AuthorityGraphNodeKind.WebAction => "csharp",
+        AuthorityGraphNodeKind.SourceFile or AuthorityGraphNodeKind.CodeType
+            or AuthorityGraphNodeKind.CodeMethod or AuthorityGraphNodeKind.CodeChunk
+            or AuthorityGraphNodeKind.CodeClass or AuthorityGraphNodeKind.WebAction => "csharp",
         AuthorityGraphNodeKind.ClientScript or AuthorityGraphNodeKind.ReactEntry => "javascript",
         AuthorityGraphNodeKind.ViewPage => "view",
         AuthorityGraphNodeKind.DatabaseObject or AuthorityGraphNodeKind.CustomReportDataSource

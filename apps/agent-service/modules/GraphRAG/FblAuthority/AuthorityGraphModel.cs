@@ -9,6 +9,39 @@ namespace AgentService.Modules.GraphRAG.FblAuthority;
 /// </summary>
 public enum GraphNodeKind
 {
+    /// <summary>Roslyn 實際載入的方案檔；一個索引版本可包含一個主要方案。</summary>
+    Solution,
+
+    /// <summary>方案中可編譯的 C# 專案。</summary>
+    Project,
+
+    /// <summary>實際納入 Roslyn 專案的原始碼檔案。</summary>
+    SourceFile,
+
+    /// <summary>C# 原始碼宣告或匯入的命名空間。</summary>
+    Namespace,
+
+    /// <summary>Roslyn 語意模型解析出的 class、interface、struct、record 或 enum。</summary>
+    CodeType,
+
+    /// <summary>Roslyn 語意模型解析出的方法、建構式、解構式或運算子。</summary>
+    CodeMethod,
+
+    /// <summary>型別或方法的來源位置邊界；預設只保存行號與雜湊，不保存完整程式碼。</summary>
+    CodeChunk,
+
+    /// <summary>呼叫或繼承關係指向、但不屬於目前方案的外部型別或方法。</summary>
+    ExternalSymbol,
+
+    /// <summary>使用者在專案設定中選擇並通過連線驗證的資料庫。</summary>
+    Database,
+
+    /// <summary>SQL Server 系統目錄中實際存在的資料表或檢視表欄位。</summary>
+    DatabaseColumn,
+
+    /// <summary>Stored Procedure 或 Function 的輸入／輸出參數。</summary>
+    StoredProcedureParameter,
+
     /// <summary>tblMenuMap 中符合中心 SQL 的功能菜單。</summary>
     Menu,
 
@@ -58,6 +91,69 @@ public enum GraphNodeKind
 /// </summary>
 public enum GraphRelationshipKind
 {
+    /// <summary>Solution 包含可編譯的 Project。</summary>
+    ContainsProject,
+
+    /// <summary>Project 直接參考另一個 Project。</summary>
+    ReferencesProject,
+
+    /// <summary>Project 包含實際納入編譯的 SourceFile。</summary>
+    ContainsFile,
+
+    /// <summary>SourceFile 宣告 Namespace。</summary>
+    DeclaresNamespace,
+
+    /// <summary>SourceFile 以 using 匯入 Namespace。</summary>
+    ImportsNamespace,
+
+    /// <summary>SourceFile 宣告 CodeType。</summary>
+    DeclaresType,
+
+    /// <summary>Namespace 或外層 CodeType 包含 CodeType。</summary>
+    ContainsType,
+
+    /// <summary>CodeType 宣告 CodeMethod。</summary>
+    DeclaresMethod,
+
+    /// <summary>CodeMethod 以 Roslyn symbol binding 呼叫另一個方法。</summary>
+    CallsMethod,
+
+    /// <summary>CodeMethod 明確建立某個 CodeType 實例。</summary>
+    Instantiates,
+
+    /// <summary>CodeType 繼承另一個 CodeType。</summary>
+    DerivesFrom,
+
+    /// <summary>CodeType 實作介面型別。</summary>
+    ImplementsType,
+
+    /// <summary>CodeMethod 覆寫基底方法。</summary>
+    OverridesMethod,
+
+    /// <summary>CodeMethod 明確或隱含實作介面方法。</summary>
+    ImplementsMethod,
+
+    /// <summary>CodeType 或 CodeMethod 具有來源位置 CodeChunk。</summary>
+    HasChunk,
+
+    /// <summary>既有 FBL CodeClass 對應至 Roslyn CodeType。</summary>
+    RepresentsType,
+
+    /// <summary>既有 MVC WebAction 對應至 Roslyn CodeMethod。</summary>
+    ImplementedByMethod,
+
+    /// <summary>Database 包含目前使用者設定範圍內的 DatabaseObject。</summary>
+    ContainsDatabaseObject,
+
+    /// <summary>DatabaseObject 具有實際 DatabaseColumn。</summary>
+    HasColumn,
+
+    /// <summary>Stored Procedure 或 Function 具有參數。</summary>
+    HasParameter,
+
+    /// <summary>外鍵來源 DatabaseColumn 指向目標 DatabaseColumn。</summary>
+    ForeignKeyTo,
+
     /// <summary>Menu 的中心資料列定義於 tblMenuMap。</summary>
     DefinedIn,
 
@@ -281,11 +377,33 @@ public enum PreflightSeverity
     Error,
 }
 
+/// <summary>集中定義抽取器、canonical schema、Neo4j envelope 與 community cache 版本。</summary>
+public static class ProjectGraphVersions
+{
+    /// <summary>輸入 fingerprint 使用的抽取器版本；變更會強制所有專案重新索引。</summary>
+    public const string Indexer = "project-semantic-v2";
+
+    /// <summary>Graph manifest 使用的強型別 canonical schema 版本。</summary>
+    public const string CanonicalSchema = "project-graph-25x56-v2";
+
+    /// <summary>Neo4j ProjectGraph envelope 保存的 schema 版本。</summary>
+    public const string StorageSchema = "project-graph-v2";
+
+    /// <summary>Community deterministic template 與摘要 cache 版本。</summary>
+    public const string Community = "project-community-v2";
+}
+
 /// <summary>定義 Preflight 可輸出的受控原因代碼。</summary>
 public enum PreflightReasonCode
 {
     /// <summary>GraphDocument 尚未完成全部功能解析。</summary>
     ExtractionIncomplete,
+
+    /// <summary>Roslyn semantic solution 已成功抽取並併入權威圖。</summary>
+    SemanticExtractionCompleted,
+
+    /// <summary>MSBuild solution 無法完整載入，已降級至 repository syntax／semantic fallback。</summary>
+    SemanticExtractionDegraded,
 
     /// <summary>中心 Menu 查詢結果不符合當次驗收條件。</summary>
     MenuCountMismatch,
@@ -362,6 +480,17 @@ public static class GraphSchema
     /// <summary>取得 Neo4j 使用的節點 Label。</summary>
     public static string GetNodeLabel(GraphNodeKind kind) => kind switch
     {
+        GraphNodeKind.Solution => "Solution",
+        GraphNodeKind.Project => "Project",
+        GraphNodeKind.SourceFile => "SourceFile",
+        GraphNodeKind.Namespace => "Namespace",
+        GraphNodeKind.CodeType => "CodeType",
+        GraphNodeKind.CodeMethod => "CodeMethod",
+        GraphNodeKind.CodeChunk => "CodeChunk",
+        GraphNodeKind.ExternalSymbol => "ExternalSymbol",
+        GraphNodeKind.Database => "Database",
+        GraphNodeKind.DatabaseColumn => "DatabaseColumn",
+        GraphNodeKind.StoredProcedureParameter => "StoredProcedureParameter",
         GraphNodeKind.Menu => "Menu",
         GraphNodeKind.Endpoint => "Endpoint",
         GraphNodeKind.WebAction => "WebAction",
@@ -382,6 +511,17 @@ public static class GraphSchema
     /// <summary>取得穩定 Key 應使用的固定前綴。</summary>
     public static string GetKeyPrefix(GraphNodeKind kind) => kind switch
     {
+        GraphNodeKind.Solution => "solution:",
+        GraphNodeKind.Project => "project:",
+        GraphNodeKind.SourceFile => "source-file:",
+        GraphNodeKind.Namespace => "namespace:",
+        GraphNodeKind.CodeType => "code-type:",
+        GraphNodeKind.CodeMethod => "code-method:",
+        GraphNodeKind.CodeChunk => "code-chunk:",
+        GraphNodeKind.ExternalSymbol => "external-symbol:",
+        GraphNodeKind.Database => "database:",
+        GraphNodeKind.DatabaseColumn => "database-column:",
+        GraphNodeKind.StoredProcedureParameter => "stored-procedure-parameter:",
         GraphNodeKind.Menu => "menu:",
         GraphNodeKind.Endpoint => "endpoint:",
         GraphNodeKind.WebAction => "web-action:",
@@ -402,6 +542,27 @@ public static class GraphSchema
     /// <summary>取得 Neo4j 使用的大寫底線關係名稱。</summary>
     public static string GetRelationshipType(GraphRelationshipKind kind) => kind switch
     {
+        GraphRelationshipKind.ContainsProject => "CONTAINS_PROJECT",
+        GraphRelationshipKind.ReferencesProject => "REFERENCES_PROJECT",
+        GraphRelationshipKind.ContainsFile => "CONTAINS_FILE",
+        GraphRelationshipKind.DeclaresNamespace => "DECLARES_NAMESPACE",
+        GraphRelationshipKind.ImportsNamespace => "IMPORTS_NAMESPACE",
+        GraphRelationshipKind.DeclaresType => "DECLARES_TYPE",
+        GraphRelationshipKind.ContainsType => "CONTAINS_TYPE",
+        GraphRelationshipKind.DeclaresMethod => "DECLARES_METHOD",
+        GraphRelationshipKind.CallsMethod => "CALLS_METHOD",
+        GraphRelationshipKind.Instantiates => "INSTANTIATES",
+        GraphRelationshipKind.DerivesFrom => "DERIVES_FROM",
+        GraphRelationshipKind.ImplementsType => "IMPLEMENTS_TYPE",
+        GraphRelationshipKind.OverridesMethod => "OVERRIDES_METHOD",
+        GraphRelationshipKind.ImplementsMethod => "IMPLEMENTS_METHOD",
+        GraphRelationshipKind.HasChunk => "HAS_CHUNK",
+        GraphRelationshipKind.RepresentsType => "REPRESENTS_TYPE",
+        GraphRelationshipKind.ImplementedByMethod => "IMPLEMENTED_BY_METHOD",
+        GraphRelationshipKind.ContainsDatabaseObject => "CONTAINS_DATABASE_OBJECT",
+        GraphRelationshipKind.HasColumn => "HAS_COLUMN",
+        GraphRelationshipKind.HasParameter => "HAS_PARAMETER",
+        GraphRelationshipKind.ForeignKeyTo => "FOREIGN_KEY_TO",
         GraphRelationshipKind.DefinedIn => "DEFINED_IN",
         GraphRelationshipKind.Opens => "OPENS",
         GraphRelationshipKind.RoutesTo => "ROUTES_TO",
@@ -472,6 +633,27 @@ public static class GraphRelationshipTopology
         GraphNodeKind sourceKind,
         GraphNodeKind targetKind) => relationshipKind switch
         {
+            GraphRelationshipKind.ContainsProject => sourceKind == GraphNodeKind.Solution && targetKind == GraphNodeKind.Project,
+            GraphRelationshipKind.ReferencesProject => sourceKind == GraphNodeKind.Project && targetKind == GraphNodeKind.Project,
+            GraphRelationshipKind.ContainsFile => sourceKind == GraphNodeKind.Project && targetKind == GraphNodeKind.SourceFile,
+            GraphRelationshipKind.DeclaresNamespace => sourceKind == GraphNodeKind.SourceFile && targetKind == GraphNodeKind.Namespace,
+            GraphRelationshipKind.ImportsNamespace => sourceKind == GraphNodeKind.SourceFile && targetKind == GraphNodeKind.Namespace,
+            GraphRelationshipKind.DeclaresType => sourceKind == GraphNodeKind.SourceFile && targetKind == GraphNodeKind.CodeType,
+            GraphRelationshipKind.ContainsType => IsTypeContainer(sourceKind) && targetKind == GraphNodeKind.CodeType,
+            GraphRelationshipKind.DeclaresMethod => sourceKind == GraphNodeKind.CodeType && targetKind == GraphNodeKind.CodeMethod,
+            GraphRelationshipKind.CallsMethod => sourceKind == GraphNodeKind.CodeMethod && IsMethodTarget(targetKind),
+            GraphRelationshipKind.Instantiates => sourceKind == GraphNodeKind.CodeMethod && IsTypeTarget(targetKind),
+            GraphRelationshipKind.DerivesFrom => sourceKind == GraphNodeKind.CodeType && IsTypeTarget(targetKind),
+            GraphRelationshipKind.ImplementsType => sourceKind == GraphNodeKind.CodeType && IsTypeTarget(targetKind),
+            GraphRelationshipKind.OverridesMethod => sourceKind == GraphNodeKind.CodeMethod && IsMethodTarget(targetKind),
+            GraphRelationshipKind.ImplementsMethod => sourceKind == GraphNodeKind.CodeMethod && IsMethodTarget(targetKind),
+            GraphRelationshipKind.HasChunk => IsChunkOwner(sourceKind) && targetKind == GraphNodeKind.CodeChunk,
+            GraphRelationshipKind.RepresentsType => sourceKind == GraphNodeKind.CodeClass && targetKind == GraphNodeKind.CodeType,
+            GraphRelationshipKind.ImplementedByMethod => sourceKind == GraphNodeKind.WebAction && targetKind == GraphNodeKind.CodeMethod,
+            GraphRelationshipKind.ContainsDatabaseObject => sourceKind == GraphNodeKind.Database && targetKind == GraphNodeKind.DatabaseObject,
+            GraphRelationshipKind.HasColumn => sourceKind == GraphNodeKind.DatabaseObject && targetKind == GraphNodeKind.DatabaseColumn,
+            GraphRelationshipKind.HasParameter => sourceKind == GraphNodeKind.DatabaseObject && targetKind == GraphNodeKind.StoredProcedureParameter,
+            GraphRelationshipKind.ForeignKeyTo => sourceKind == GraphNodeKind.DatabaseColumn && targetKind == GraphNodeKind.DatabaseColumn,
             GraphRelationshipKind.DefinedIn => sourceKind == GraphNodeKind.Menu && targetKind == GraphNodeKind.DatabaseObject,
             GraphRelationshipKind.Opens => sourceKind == GraphNodeKind.Menu && targetKind == GraphNodeKind.Endpoint,
             GraphRelationshipKind.RoutesTo => sourceKind == GraphNodeKind.Endpoint && targetKind == GraphNodeKind.WebAction,
@@ -509,6 +691,22 @@ public static class GraphRelationshipTopology
             GraphRelationshipKind.LoadsPluginReport => IsPluginReportOwner(sourceKind) && targetKind == GraphNodeKind.CodeClass,
             _ => false,
         };
+
+    /// <summary>Namespace 或外層型別可包含型別。</summary>
+    private static bool IsTypeContainer(GraphNodeKind kind) =>
+        kind is GraphNodeKind.Namespace or GraphNodeKind.CodeType;
+
+    /// <summary>方法關係可指向目前方案的方法或外部方法。</summary>
+    private static bool IsMethodTarget(GraphNodeKind kind) =>
+        kind is GraphNodeKind.CodeMethod or GraphNodeKind.ExternalSymbol;
+
+    /// <summary>型別關係可指向目前方案型別或外部型別。</summary>
+    private static bool IsTypeTarget(GraphNodeKind kind) =>
+        kind is GraphNodeKind.CodeType or GraphNodeKind.ExternalSymbol;
+
+    /// <summary>只有型別與方法具有可檢索的來源邊界。</summary>
+    private static bool IsChunkOwner(GraphNodeKind kind) =>
+        kind is GraphNodeKind.CodeType or GraphNodeKind.CodeMethod;
 
     /// <summary>判斷是否為 Category 或 ConfirmSource 節點。</summary>
     private static bool IsCategoryOrConfirmSource(GraphNodeKind kind) =>
@@ -724,6 +922,8 @@ public sealed class GraphDocumentBuilder
         IReadOnlyDictionary<string, object?>? properties = null)
     {
         // Builder 先阻止同一 Key 被誤用成另一種實體，詳細合法性仍交由 Preflight 驗證。
+        // partial type、跨專案 symbol stub 與後續 FBL overlay 會重複補充同一節點，
+        // 因此必須確定性合併屬性，不能像舊版一樣直接丟棄後續資訊。
         if (_nodes.TryGetValue(key, out var existingNode))
         {
             if (existingNode.Kind != kind)
@@ -732,7 +932,10 @@ public sealed class GraphDocumentBuilder
                     $"節點 Key '{key}' 已定義為 {existingNode.Kind}，不能再定義為 {kind}。");
             }
 
-            return existingNode;
+            var mergedProperties = MergeProperties(existingNode.Properties, properties);
+            var mergedNode = existingNode with { Properties = mergedProperties };
+            _nodes[key] = mergedNode;
+            return mergedNode;
         }
 
         var node = GraphNode.Create(kind, key, properties);
@@ -752,11 +955,129 @@ public sealed class GraphDocumentBuilder
         var relationship = GraphRelationship.Create(kind, sourceKey, targetKey, evidence, properties);
         if (_relationships.TryGetValue(relationship.Id, out var existingRelationship))
         {
-            return existingRelationship;
+            // CALLS_METHOD 等語意關係可能在多個 call site 重複出現；保留單一穩定 edge，
+            // 並累加次數及最多二十個來源位置，避免 Neo4j 邊數無限制膨脹。
+            var mergedProperties = MergeRelationshipProperties(
+                existingRelationship.Properties,
+                properties,
+                existingRelationship.Evidence,
+                evidence);
+            var mergedRelationship = existingRelationship with { Properties = mergedProperties };
+            _relationships[relationship.Id] = mergedRelationship;
+            return mergedRelationship;
         }
 
         _relationships.Add(relationship.Id, relationship);
         return relationship;
+    }
+
+    /// <summary>合併同一節點的 partial declaration 與後續 domain overlay 屬性。</summary>
+    private static IReadOnlyDictionary<string, object?> MergeProperties(
+        IReadOnlyDictionary<string, object?> existing,
+        IReadOnlyDictionary<string, object?>? incoming)
+    {
+        if (incoming is null || incoming.Count == 0)
+        {
+            return existing;
+        }
+
+        var merged = new Dictionary<string, object?>(existing, StringComparer.Ordinal);
+        foreach (var (key, value) in incoming)
+        {
+            if (value is null)
+            {
+                continue;
+            }
+
+            if (!merged.TryGetValue(key, out var current) || current is null ||
+                current is string currentText && string.IsNullOrWhiteSpace(currentText))
+            {
+                merged[key] = value;
+                continue;
+            }
+
+            if (current is IEnumerable<string> currentValues && value is IEnumerable<string> incomingValues)
+            {
+                merged[key] = currentValues
+                    .Concat(incomingValues)
+                    .Where(item => !string.IsNullOrWhiteSpace(item))
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(item => item, StringComparer.Ordinal)
+                    .ToArray();
+                continue;
+            }
+
+            // Other 只是語意抽取器的預設角色；FBL overlay 的具體角色必須能覆寫它。
+            if (string.Equals(key, "role", StringComparison.Ordinal) &&
+                string.Equals(current.ToString(), CodeClassRole.Other.ToString(), StringComparison.Ordinal) &&
+                !string.Equals(value.ToString(), CodeClassRole.Other.ToString(), StringComparison.Ordinal))
+            {
+                merged[key] = value;
+            }
+        }
+
+        return merged;
+    }
+
+    /// <summary>合併重複 edge 的 occurrence count 與有界來源位置。</summary>
+    private static IReadOnlyDictionary<string, object?> MergeRelationshipProperties(
+        IReadOnlyDictionary<string, object?> existing,
+        IReadOnlyDictionary<string, object?>? incoming,
+        GraphEvidence existingEvidence,
+        GraphEvidence incomingEvidence)
+    {
+        var merged = new Dictionary<string, object?>(
+            MergeProperties(existing, incoming),
+            StringComparer.Ordinal);
+        var existingCount = ReadPositiveInt(existing.GetValueOrDefault("occurrence_count")) ?? 1;
+        var incomingCount = ReadPositiveInt(incoming?.GetValueOrDefault("occurrence_count")) ?? 1;
+        merged["occurrence_count"] = checked(existingCount + incomingCount);
+
+        var locations = ReadLocations(existing.GetValueOrDefault("locations"))
+            .Concat(ReadLocations(incoming?.GetValueOrDefault("locations")))
+            .Concat(FormatEvidenceLocation(existingEvidence))
+            .Concat(FormatEvidenceLocation(incomingEvidence))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .Take(20)
+            .ToArray();
+        if (locations.Length > 0)
+        {
+            merged["locations"] = locations;
+        }
+
+        return merged;
+    }
+
+    /// <summary>將可轉換的正整數屬性讀成 occurrence count。</summary>
+    private static int? ReadPositiveInt(object? value) =>
+        value is not null && int.TryParse(value.ToString(), out var number) && number > 0
+            ? number
+            : null;
+
+    /// <summary>將位置屬性正規化為字串集合。</summary>
+    private static IEnumerable<string> ReadLocations(object? value) => value switch
+    {
+        string text when !string.IsNullOrWhiteSpace(text) => [text],
+        IEnumerable<string> values => values,
+        _ => Array.Empty<string>(),
+    };
+
+    /// <summary>由主要 evidence 產生可合併的 repository-relative 位置。</summary>
+    private static IEnumerable<string> FormatEvidenceLocation(GraphEvidence evidence)
+    {
+        if (string.IsNullOrWhiteSpace(evidence.SourceFile))
+        {
+            return Array.Empty<string>();
+        }
+
+        return
+        [
+            evidence.SourceLine is > 0
+                ? $"{evidence.SourceFile}:{evidence.SourceLine.Value}"
+                : evidence.SourceFile,
+        ];
     }
 
     /// <summary>依穩定 Key 排序並建立不可變的單次發布文件。</summary>

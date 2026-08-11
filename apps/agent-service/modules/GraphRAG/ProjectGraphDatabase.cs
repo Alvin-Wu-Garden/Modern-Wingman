@@ -350,6 +350,10 @@ public sealed class SqliteGraphDocumentBuilder
                 });
         }
 
-        return builder.Build();
+        // SQLite-only 與沒有 DB 的專案也必須具有與 SQL Server 相同的 Solution／Project／
+        // Type／Method semantic graph，不能再退化成只有 CodeClass 名稱的最小圖。
+        var semantic = await new RoslynSemanticGraphExtractor()
+            .ExtendAsync(builder.Build(), rootPath, cancellationToken);
+        return semantic.Document;
     }
 }

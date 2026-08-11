@@ -22,7 +22,9 @@ public sealed class ProjectAnalysisTools
     private const int MaximumGraphPaths = 80;
     private const int MaximumReadLines = 2_000;
     private const long MaximumSearchFileBytes = 4 * 1024 * 1024;
-    private const int MaximumToolCalls = 32;
+    // 必須與 ProjectConversationPreparationService 的 Agent 指令一致。
+    // 相同參數的快取命中不計次；只有真正執行 I/O 的工具呼叫才會消耗預算。
+    private const int MaximumToolCalls = 8;
     private const int MaximumGraphSearchCalls = 4;
     private const int MaximumGraphPathCalls = 6;
     private const int MaximumTextSearchCalls = 8;
@@ -120,29 +122,35 @@ public sealed class ProjectAnalysisTools
     /// 工具包裝器只回報開始、完成與失敗狀態，不會把完整工具輸出直接送到前端。
     /// </summary>
     /// <returns>只包含查詢能力的 MAF 工具集合。</returns>
-    public IReadOnlyList<AIFunction> CreateTools() =>
-    [
-        AIFunctionFactory.Create(
-            (Func<string, int, CancellationToken, Task<GraphSearchToolResult>>)SearchGraphWithActivityAsync,
-            "search_project_graph",
-            "以自然語言、業務名稱、程式符號或資料表名稱搜尋目前專案的知識圖譜。先用此工具取得精確 nodeId，再視需要追蹤鏈路。"),
-        AIFunctionFactory.Create(
-            (Func<string, int, int, CancellationToken, Task<GraphPathToolResult>>)TraceGraphPathsWithActivityAsync,
-            "trace_project_graph_paths",
-            "從已知 nodeId 逐層查詢目前專案 Graph 的上下游關係，回傳有界的最短鏈路。必須使用 search_project_graph 實際回傳的 nodeId。"),
-        AIFunctionFactory.Create(
+    public IReadOnlyList<AIFunction> CreateTools(bool includeGraphTools = true)
+    {
+        var tools = new List<AIFunction>(includeGraphTools ? 5 : 3);
+        if (includeGraphTools)
+        {
+            tools.Add(AIFunctionFactory.Create(
+                (Func<string, int, CancellationToken, Task<GraphSearchToolResult>>)SearchGraphWithActivityAsync,
+                "search_project_graph",
+                "以自然語言、業務名稱、程式符號或資料表名稱搜尋目前專案的知識圖譜。先用此工具取得精確 nodeId，再視需要追蹤鏈路。"));
+            tools.Add(AIFunctionFactory.Create(
+                (Func<string, int, int, CancellationToken, Task<GraphPathToolResult>>)TraceGraphPathsWithActivityAsync,
+                "trace_project_graph_paths",
+                "從已知 nodeId 逐層查詢目前專案 Graph 的上下游關係，回傳有界的最短鏈路。必須使用 search_project_graph 實際回傳的 nodeId。"));
+        }
+
+        tools.Add(AIFunctionFactory.Create(
             (Func<string, string?, int, CancellationToken, Task<TextSearchToolResult>>)SearchTextWithActivityAsync,
             "search_project_text",
-            "在目前專案的 C#、JavaScript、TypeScript、ASPX、SQL 與設定文件中執行不分大小寫的純文字搜尋。適合找錯誤訊息、URL、欄位或動態呼叫。"),
-        AIFunctionFactory.Create(
+            "在目前專案的 C#、JavaScript、TypeScript、ASPX、SQL 與設定文件中執行不分大小寫的純文字搜尋。適合找錯誤訊息、URL、欄位或動態呼叫。"));
+        tools.Add(AIFunctionFactory.Create(
             (Func<string, int, int, CancellationToken, Task<FileRangeToolResult>>)ReadFileRangeWithActivityAsync,
             "read_project_file_range",
-            "讀取目前專案內指定檔案的一段內容並附行號。filePath 可使用搜尋結果的相對路徑；每次最多讀取 2000 行。"),
-        AIFunctionFactory.Create(
+            "讀取目前專案內指定檔案的一段內容並附行號。filePath 可使用搜尋結果的相對路徑；每次最多讀取 2000 行。"));
+        tools.Add(AIFunctionFactory.Create(
             (Func<string, bool, int, CancellationToken, Task<CSharpSymbolToolResult>>)FindCSharpSymbolWithActivityAsync,
             "find_csharp_symbol",
-            "以不需要成功建置專案的 C# 語法解析，尋找 class、method、property、field 等定義及 identifier 引用。適合從符號名稱定位候選檔案。"),
-    ];
+            "以不需要成功建置專案的 C# 語法解析，尋找 class、method、property、field 等定義及 identifier 引用。適合從符號名稱定位候選檔案。"));
+        return tools;
+    }
 
     private Task<GraphSearchToolResult> SearchGraphWithActivityAsync(
         string query,
@@ -155,7 +163,12 @@ public sealed class ProjectAnalysisTools
             ToolCategory.GraphSearch,
             $"{query.Trim()}|{Math.Clamp(limit, 1, MaximumGraphSearchResults)}",
             () => SearchGraphAsync(query, limit, cancellationToken),
-            result => $"找到 {result.Hits.Count} 個節點");
+            result => $"找到 {result.Hits.Count} 個節點",
+            budget => new GraphSearchToolResult(
+                query.Trim(),
+                [],
+                budget.NextAction,
+                budget));
 
     private Task<GraphPathToolResult> TraceGraphPathsWithActivityAsync(
         string nodeId,
@@ -169,7 +182,13 @@ public sealed class ProjectAnalysisTools
             ToolCategory.GraphPath,
             $"{nodeId.Trim()}|{Math.Clamp(maxDepth, 1, 4)}|{Math.Clamp(maxPaths, 1, MaximumGraphPaths)}",
             () => TraceGraphPathsAsync(nodeId, maxDepth, maxPaths, cancellationToken),
-            result => $"找到 {result.Paths.Count} 條鏈路");
+            result => $"找到 {result.Paths.Count} 條鏈路",
+            budget => new GraphPathToolResult(
+                nodeId.Trim(),
+                [],
+                false,
+                budget.Message,
+                budget));
 
     private Task<TextSearchToolResult> SearchTextWithActivityAsync(
         string query,
@@ -183,7 +202,14 @@ public sealed class ProjectAnalysisTools
             ToolCategory.TextSearch,
             $"{query.Trim()}|{NormalizeExtension(extension) ?? "*"}|{Math.Clamp(maxResults, 1, MaximumTextSearchResults)}",
             () => SearchTextAsync(query, extension, maxResults, cancellationToken),
-            result => $"找到 {result.Matches.Count} 筆文字命中");
+            result => $"找到 {result.Matches.Count} 筆文字命中",
+            budget => new TextSearchToolResult(
+                query.Trim(),
+                [],
+                0,
+                0,
+                false,
+                budget));
 
     private Task<FileRangeToolResult> ReadFileRangeWithActivityAsync(
         string filePath,
@@ -197,7 +223,13 @@ public sealed class ProjectAnalysisTools
             ToolCategory.FileRead,
             $"{filePath.Trim()}|{Math.Max(1, startLine)}|{Math.Clamp(lineCount, 1, MaximumReadLines)}",
             () => ReadFileRangeAsync(filePath, startLine, lineCount, cancellationToken),
-            result => $"讀取 {result.Lines.Count} 行");
+            result => $"讀取 {result.Lines.Count} 行",
+            budget => new FileRangeToolResult(
+                filePath.Trim(),
+                Math.Max(1, startLine),
+                [],
+                false,
+                budget));
 
     private Task<CSharpSymbolToolResult> FindCSharpSymbolWithActivityAsync(
         string symbol,
@@ -211,7 +243,14 @@ public sealed class ProjectAnalysisTools
             ToolCategory.SymbolSearch,
             $"{symbol.Trim()}|{includeReferences}|{Math.Clamp(maxResults, 1, 100)}",
             () => FindCSharpSymbolAsync(symbol, includeReferences, maxResults, cancellationToken),
-            result => $"找到 {result.Matches.Count} 筆符號候選");
+            result => $"找到 {result.Matches.Count} 筆符號候選",
+            budget => new CSharpSymbolToolResult(
+                symbol.Trim(),
+                [],
+                0,
+                false,
+                budget.Message,
+                budget));
 
     /// <summary>
     /// 執行單一唯讀工具並回報其生命週期；工具本身的輸出仍只回傳給 Agent。
@@ -223,11 +262,13 @@ public sealed class ProjectAnalysisTools
         ToolCategory category,
         string cacheKeySuffix,
         Func<Task<T>> operation,
-        Func<T, string> completedDetail)
+        Func<T, string> completedDetail,
+        Func<ToolBudgetStatus, T> budgetExhaustedResult)
     {
         var cacheKey = $"{tool}|{cacheKeySuffix}";
         Task<object>? sharedTask = null;
         TaskCompletionSource<object>? ownerCompletion = null;
+        ToolBudgetStatus? exhaustedBudget = null;
         lock (_toolCacheGate)
         {
             if (_toolCache.TryGetValue(cacheKey, out var cached))
@@ -250,24 +291,41 @@ public sealed class ProjectAnalysisTools
                 if (_totalToolCalls >= MaximumToolCalls ||
                     _toolCounts.GetValueOrDefault(category) >= categoryLimit)
                 {
-                    throw new InvalidOperationException(
-                        $"本輪已達 {tool} 唯讀工具上限；請先整理目前證據與資訊缺口。 ");
+                    var categoryUsed = _toolCounts.GetValueOrDefault(category);
+                    var scope = _totalToolCalls >= MaximumToolCalls
+                        ? "total"
+                        : "category";
+                    exhaustedBudget = new ToolBudgetStatus(
+                        "budget_exhausted",
+                        true,
+                        scope,
+                        _totalToolCalls,
+                        MaximumToolCalls,
+                        categoryUsed,
+                        categoryLimit,
+                        $"本輪已達 {tool} 唯讀工具上限。",
+                        "不要再呼叫工具；請整理目前證據、標示合理推論與尚未確認的資訊缺口，然後直接回答使用者。");
                 }
-
-                _totalToolCalls++;
-                _toolCounts[category] = _toolCounts.GetValueOrDefault(category) + 1;
-                ownerCompletion = new TaskCompletionSource<object>(
-                    TaskCreationOptions.RunContinuationsAsynchronously);
-                sharedTask = ownerCompletion.Task;
-                // 沒有重複呼叫者時仍需觀察失敗 Task，避免取消／例外在背景造成未觀察例外。
-                _ = sharedTask.ContinueWith(
-                    task => _ = task.Exception,
-                    CancellationToken.None,
-                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default);
-                _toolInFlight[cacheKey] = sharedTask;
+                else
+                {
+                    _totalToolCalls++;
+                    _toolCounts[category] = _toolCounts.GetValueOrDefault(category) + 1;
+                    ownerCompletion = new TaskCompletionSource<object>(
+                        TaskCreationOptions.RunContinuationsAsynchronously);
+                    sharedTask = ownerCompletion.Task;
+                    // 沒有重複呼叫者時仍需觀察失敗 Task，避免取消／例外在背景造成未觀察例外。
+                    _ = sharedTask.ContinueWith(
+                        task => _ = task.Exception,
+                        CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
+                    _toolInFlight[cacheKey] = sharedTask;
+                }
             }
         }
+
+        if (exhaustedBudget is not null)
+            return budgetExhaustedResult(exhaustedBudget);
 
         if (ownerCompletion is null)
             return (T)(await sharedTask!.WaitAsync(cancellationToken).ConfigureAwait(false));
@@ -334,7 +392,7 @@ public sealed class ProjectAnalysisTools
         limit = Math.Clamp(limit, 1, MaximumGraphSearchResults);
         var hits = await _graphStore.SearchAsync(
             _projectId,
-            query.Trim(),
+            GraphRetrievalService.BuildViewerLuceneQuery(query),
             limit,
             cancellationToken);
 
@@ -347,7 +405,7 @@ public sealed class ProjectAnalysisTools
                     GetNodeText(hit.Node, "name") ?? hit.Node.Key,
                     GetNodeFilePath(hit.Node),
                     GetNodeLine(hit.Node),
-                    GetNodeLine(hit.Node),
+                    GetNodeEndLine(hit.Node),
                     hit.Score))
                 .ToList(),
             hits.Count == 0
@@ -935,7 +993,7 @@ public sealed class ProjectAnalysisTools
     /// </summary>
     private static string? GetNodeFilePath(FblAuthority.GraphNode node)
     {
-        var path = GetNodeText(node, "path");
+        var path = GetNodeText(node, "file_path") ?? GetNodeText(node, "path");
         if (!string.IsNullOrWhiteSpace(path))
             return path;
         if (!node.Properties.TryGetValue("source_files", out var sourceFiles) ||
@@ -990,6 +1048,19 @@ public sealed class ProjectAnalysisTools
         return null;
     }
 
+    /// <summary>讀取語意節點的結束行；未提供時使用開始行。</summary>
+    private static int? GetNodeEndLine(FblAuthority.GraphNode node)
+    {
+        if (node.Properties.TryGetValue("end_line", out var value) && value is not null)
+        {
+            if (value is int line)
+                return line;
+            if (int.TryParse(value.ToString(), out line))
+                return line;
+        }
+        return GetNodeLine(node);
+    }
+
     private sealed record GraphTraversalState(
         string NodeId,
         IReadOnlyList<GraphPathStepToolItem> Steps,
@@ -999,7 +1070,8 @@ public sealed class ProjectAnalysisTools
     public sealed record GraphSearchToolResult(
         string Query,
         IReadOnlyList<GraphNodeToolItem> Hits,
-        string NextAction);
+        string NextAction,
+        ToolBudgetStatus? Budget = null);
 
     /// <summary>Graph 搜尋命中的精簡節點，避免把整個 node metadata 塞進模型。</summary>
     public sealed record GraphNodeToolItem(
@@ -1017,7 +1089,8 @@ public sealed class ProjectAnalysisTools
         string StartNodeId,
         IReadOnlyList<GraphPathToolItem> Paths,
         bool WasTruncated,
-        string Note);
+        string Note,
+        ToolBudgetStatus? Budget = null);
 
     /// <summary>從起點到一個受影響節點的最短路徑。</summary>
     public sealed record GraphPathToolItem(
@@ -1046,7 +1119,8 @@ public sealed class ProjectAnalysisTools
         IReadOnlyList<TextSearchToolItem> Matches,
         int FilesScanned,
         int FilesSkipped,
-        bool WasTruncated);
+        bool WasTruncated,
+        ToolBudgetStatus? Budget = null);
 
     /// <summary>一筆帶有位置的專案文字命中。</summary>
     public sealed record TextSearchToolItem(
@@ -1060,7 +1134,8 @@ public sealed class ProjectAnalysisTools
         string FilePath,
         int RequestedStartLine,
         IReadOnlyList<FileLineToolItem> Lines,
-        bool HasMore);
+        bool HasMore,
+        ToolBudgetStatus? Budget = null);
 
     /// <summary>帶有一基行號的原始碼文字。</summary>
     public sealed record FileLineToolItem(int Line, string Text);
@@ -1071,7 +1146,23 @@ public sealed class ProjectAnalysisTools
         IReadOnlyList<CSharpSymbolToolItem> Matches,
         int FilesScanned,
         bool WasTruncated,
-        string Note);
+        string Note,
+        ToolBudgetStatus? Budget = null);
+
+    /// <summary>
+    /// 工具預算用盡時回傳給模型的結構化狀態。這不是執行例外；模型應停止呼叫工具，
+    /// 使用已取得的證據完成回答，並誠實列出尚未確認的部分。
+    /// </summary>
+    public sealed record ToolBudgetStatus(
+        string Status,
+        bool Exhausted,
+        string Scope,
+        int TotalUsed,
+        int TotalLimit,
+        int CategoryUsed,
+        int CategoryLimit,
+        string Message,
+        string NextAction);
 
     /// <summary>一筆 C# 定義或語法層引用。</summary>
     public sealed record CSharpSymbolToolItem(
