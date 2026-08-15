@@ -8,4 +8,3 @@ sealed record ProjectMapSnapshot(
     IReadOnlyDictionary<string, string> AssemblyToProjectId,
     IReadOnlyDictionary<string, List<string>> PathToProjectIds,
     IReadOnlyDictionary<string, Project> ProjectById);
-

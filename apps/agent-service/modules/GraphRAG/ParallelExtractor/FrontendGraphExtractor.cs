@@ -518,68 +518,68 @@ sealed class FrontendGraphExtractor
         {
             case "class_declaration":
             case "class":
-            {
-                var name = GetTypeScriptName(GetTypeScriptField(node, "name"));
-                if (!string.IsNullOrWhiteSpace(name) && IsComponentName(name!))
                 {
-                    currentComponentId = AddComponentAt(graph, file, assetId, name!, "React", "ClassComponent", node.StartPosition.Row + 1, node.EndPosition.Row + 1);
+                    var name = GetTypeScriptName(GetTypeScriptField(node, "name"));
+                    if (!string.IsNullOrWhiteSpace(name) && IsComponentName(name!))
+                    {
+                        currentComponentId = AddComponentAt(graph, file, assetId, name!, "React", "ClassComponent", node.StartPosition.Row + 1, node.EndPosition.Row + 1);
+                    }
+                    break;
                 }
-                break;
-            }
             case "function_declaration":
             case "function":
-            {
-                var name = GetTypeScriptName(GetTypeScriptField(node, "name"));
-                if (!string.IsNullOrWhiteSpace(name))
                 {
-                    if (currentComponentId is null && IsComponentName(name!))
+                    var name = GetTypeScriptName(GetTypeScriptField(node, "name"));
+                    if (!string.IsNullOrWhiteSpace(name))
                     {
-                        currentComponentId = AddComponentAt(graph, file, assetId, name!, "React", "FunctionComponent", node.StartPosition.Row + 1, node.EndPosition.Row + 1);
-                    }
+                        if (currentComponentId is null && IsComponentName(name!))
+                        {
+                            currentComponentId = AddComponentAt(graph, file, assetId, name!, "React", "FunctionComponent", node.StartPosition.Row + 1, node.EndPosition.Row + 1);
+                        }
 
-                    currentFunctionId = AddFunctionAt(graph, file, assetId, name!, currentComponentId, node.StartPosition.Row + 1, node.EndPosition.Row + 1);
+                        currentFunctionId = AddFunctionAt(graph, file, assetId, name!, currentComponentId, node.StartPosition.Row + 1, node.EndPosition.Row + 1);
+                    }
+                    break;
                 }
-                break;
-            }
             case "method_definition":
-            {
-                var name = GetTypeScriptName(GetTypeScriptField(node, "name"));
-                if (!string.IsNullOrWhiteSpace(name))
                 {
-                    currentFunctionId = AddFunctionAt(graph, file, assetId, name!, currentComponentId, node.StartPosition.Row + 1, node.EndPosition.Row + 1);
-                }
-                break;
-            }
-            case "variable_declarator":
-            {
-                var name = GetTypeScriptName(GetTypeScriptField(node, "name"));
-                var value = GetTypeScriptField(node, "value");
-                if (!string.IsNullOrWhiteSpace(name) && value is not null && IsTypeScriptFunction(value))
-                {
-                    if (currentComponentId is null && IsComponentName(name!))
+                    var name = GetTypeScriptName(GetTypeScriptField(node, "name"));
+                    if (!string.IsNullOrWhiteSpace(name))
                     {
-                        currentComponentId = AddComponentAt(graph, file, assetId, name!, "React", "FunctionComponent", value.StartPosition.Row + 1, value.EndPosition.Row + 1);
+                        currentFunctionId = AddFunctionAt(graph, file, assetId, name!, currentComponentId, node.StartPosition.Row + 1, node.EndPosition.Row + 1);
                     }
-
-                    currentFunctionId = AddFunctionAt(graph, file, assetId, name!, currentComponentId, value.StartPosition.Row + 1, value.EndPosition.Row + 1);
+                    break;
                 }
-                break;
-            }
+            case "variable_declarator":
+                {
+                    var name = GetTypeScriptName(GetTypeScriptField(node, "name"));
+                    var value = GetTypeScriptField(node, "value");
+                    if (!string.IsNullOrWhiteSpace(name) && value is not null && IsTypeScriptFunction(value))
+                    {
+                        if (currentComponentId is null && IsComponentName(name!))
+                        {
+                            currentComponentId = AddComponentAt(graph, file, assetId, name!, "React", "FunctionComponent", value.StartPosition.Row + 1, value.EndPosition.Row + 1);
+                        }
+
+                        currentFunctionId = AddFunctionAt(graph, file, assetId, name!, currentComponentId, value.StartPosition.Row + 1, value.EndPosition.Row + 1);
+                    }
+                    break;
+                }
             case "jsx_opening_element":
             case "jsx_self_closing_element":
-            {
-                var name = GetTypeScriptName(GetTypeScriptField(node, "name"));
-                if (!string.IsNullOrWhiteSpace(name) && currentComponentId is not null)
                 {
-                    AddTypeScriptUiElement(graph, file, currentComponentId, name!, node.StartPosition.Row + 1, node.EndPosition.Row + 1);
+                    var name = GetTypeScriptName(GetTypeScriptField(node, "name"));
+                    if (!string.IsNullOrWhiteSpace(name) && currentComponentId is not null)
+                    {
+                        AddTypeScriptUiElement(graph, file, currentComponentId, name!, node.StartPosition.Row + 1, node.EndPosition.Row + 1);
+                    }
+                    break;
                 }
-                break;
-            }
             case "call_expression":
-            {
-                AddTypeScriptApiCall(graph, file, assetId, currentComponentId, currentFunctionId, node);
-                break;
-            }
+                {
+                    AddTypeScriptApiCall(graph, file, assetId, currentComponentId, currentFunctionId, node);
+                    break;
+                }
         }
 
         foreach (var child in node.NamedChildren)
@@ -1444,5 +1444,3 @@ sealed class FrontendGraphExtractor
     private static int CountRelationships(CodeGraphData graph, string type)
         => graph.Relationships.Count(relationship => relationship.Type.Equals(type, StringComparison.Ordinal));
 }
-
-
