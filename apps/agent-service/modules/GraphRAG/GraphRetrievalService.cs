@@ -1101,25 +1101,22 @@ public sealed class GraphRetrievalService
     /// <summary>將直接 Evidence 轉成不超過 500 字元的單行說明。</summary>
     private static string? EvidenceLine(AuthorityGraphRelationship relationship)
     {
-        var evidence = relationship.Evidence;
-        var location = evidence.SourceFile;
-        if (evidence.SourceLine is > 0)
+        var location = PropertyText(relationship.Properties, "sourceFile")
+            ?? PropertyText(relationship.Properties, "filePath");
+        var sourceLine = PropertyInt(relationship.Properties, "sourceLine")
+            ?? PropertyInt(relationship.Properties, "line");
+        if (sourceLine is > 0)
         {
-            location = $"{location ?? "source"}:{evidence.SourceLine}";
+            location = $"{location ?? "source"}:{sourceLine}";
         }
-        location ??= evidence.DatabaseObject ?? evidence.XmlPath;
-        if (string.IsNullOrWhiteSpace(location) && string.IsNullOrWhiteSpace(evidence.SourceText))
+        var reference = PropertyText(relationship.Properties, "reference")
+            ?? PropertyText(relationship.Properties, "confidence");
+        if (string.IsNullOrWhiteSpace(location) && string.IsNullOrWhiteSpace(reference))
         {
             return null;
         }
-
-        var text = evidence.SourceText?.Replace('\r', ' ').Replace('\n', ' ').Trim();
-        if (text?.Length > 300)
-        {
-            text = text[..300] + "…";
-        }
-        return $"{GraphSchema.GetRelationshipType(relationship.Kind)}；來源 {location ?? evidence.SourceKind.ToString()}" +
-               (string.IsNullOrWhiteSpace(text) ? string.Empty : $"；{text}");
+        return $"{GraphSchema.GetRelationshipType(relationship.Kind)}；來源 {location ?? "ParallelExtractor"}" +
+               (string.IsNullOrWhiteSpace(reference) ? string.Empty : $"；{reference}");
     }
 
     /// <summary>依節點 kind 與常見 FBL 屬性產生對人可讀名稱。</summary>
@@ -1139,10 +1136,10 @@ public sealed class GraphRetrievalService
     /// <summary>讓功能入口與使用者明確詢問的資料類型優先成為種子。</summary>
     private static int IntentBoost(string question, AuthorityGraphNode node)
     {
-        var boost = node.Kind == AuthorityGraphNodeKind.Menu ? 10 : 0;
+        var boost = node.Kind == AuthorityGraphNodeKind.MenuItem ? 10 : 0;
         if (question.Contains("報表", StringComparison.OrdinalIgnoreCase) &&
-            node.Kind is AuthorityGraphNodeKind.CustomReportTemplate or
-                AuthorityGraphNodeKind.CustomReportDataSource or
+            node.Kind is AuthorityGraphNodeKind.ReportTemplate or
+                AuthorityGraphNodeKind.ReportDataSource or
                 AuthorityGraphNodeKind.CustomParameterDataSource)
         {
             boost += 8;
@@ -1157,7 +1154,7 @@ public sealed class GraphRetrievalService
         }
         if ((question.Contains("呼叫", StringComparison.OrdinalIgnoreCase) ||
              question.Contains("方法", StringComparison.OrdinalIgnoreCase)) &&
-            node.Kind == AuthorityGraphNodeKind.CodeMethod)
+            node.Kind == AuthorityGraphNodeKind.Method)
         {
             boost += 8;
         }
@@ -1249,34 +1246,41 @@ public sealed class GraphRetrievalService
     /// <summary>讓 FBL 的主要可執行與資料鏈優先於描述性邊。</summary>
     private static int RelationshipWeight(GraphRelationshipKind kind) => kind switch
     {
-        GraphRelationshipKind.Opens or
-        GraphRelationshipKind.RoutesTo or
-        GraphRelationshipKind.ImplementedBy or
-        GraphRelationshipKind.ImplementedByMethod or
         GraphRelationshipKind.Calls or
-        GraphRelationshipKind.CallsMethod or
         GraphRelationshipKind.Instantiates or
         GraphRelationshipKind.DerivesFrom or
-        GraphRelationshipKind.ImplementsType or
-        GraphRelationshipKind.OverridesMethod or
+        GraphRelationshipKind.Implements or
+        GraphRelationshipKind.Overrides or
         GraphRelationshipKind.ImplementsMethod or
-        GraphRelationshipKind.Uses or
-        GraphRelationshipKind.ReadsVia or
-        GraphRelationshipKind.WritesVia or
-        GraphRelationshipKind.MapsTo or
-        GraphRelationshipKind.ReadsData or
-        GraphRelationshipKind.Executes or
-        GraphRelationshipKind.Queries or
+        GraphRelationshipKind.Reads or
+        GraphRelationshipKind.Writes or
+        GraphRelationshipKind.ExecutesStoredProcedure or
+        GraphRelationshipKind.CallsStoredProcedure or
+        GraphRelationshipKind.CallsUdf or
         GraphRelationshipKind.ForeignKeyTo or
-        GraphRelationshipKind.LoadsPluginReport or
-        GraphRelationshipKind.OpensCustomReport => 100,
-        GraphRelationshipKind.Renders or
-        GraphRelationshipKind.Loads or
-        GraphRelationshipKind.DependsOn or
-        GraphRelationshipKind.RequiresData or
-        GraphRelationshipKind.ConfirmedBy => 80,
+        GraphRelationshipKind.LinksToPluginReport or
+        GraphRelationshipKind.LinksToCustomReport or
+        GraphRelationshipKind.NavigatesToAction or
+        GraphRelationshipKind.NavigatesToController => 100,
+        GraphRelationshipKind.RendersView or
+        GraphRelationshipKind.ReturnsView or
+        GraphRelationshipKind.ContainsObject or
+        GraphRelationshipKind.ContainsFrontendAsset => 80,
         _ => 50,
     };
+
+    private static string? PropertyText(
+        IReadOnlyDictionary<string, object?> properties,
+        string key) =>
+        properties.TryGetValue(key, out var value) ? value?.ToString() : null;
+
+    private static int? PropertyInt(
+        IReadOnlyDictionary<string, object?> properties,
+        string key) =>
+        properties.TryGetValue(key, out var value) && value is not null &&
+        int.TryParse(value.ToString(), out var parsed)
+            ? parsed
+            : null;
 
     /// <summary>Graph 尚未發布時仍保留 Agent 使用原始碼工具回答的能力。</summary>
     private static string BuildMissingGraphPrompt(string question) =>

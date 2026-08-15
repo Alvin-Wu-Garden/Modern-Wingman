@@ -35,7 +35,7 @@ public sealed partial class Neo4jGraphStore
             var delete = await transaction.RunAsync(
                 """
                 MATCH (c:GraphCommunity {
-                    projectId: $projectId,
+                    wingmanProjectId: $projectId,
                     graphVersion: $graphVersion
                 })
                 DELETE c
@@ -55,9 +55,7 @@ public sealed partial class Neo4jGraphStore
                     template.Summary,
                     template.SummaryState,
                     template.RetryCount,
-                    memberIdsJson = JsonSerializer.Serialize(
-                        template.MemberIds,
-                        JsonOptions),
+                    memberIds = template.MemberIds,
                     template.MemberCount,
                     topTablesJson = JsonSerializer.Serialize(
                         template.TopTables,
@@ -76,7 +74,7 @@ public sealed partial class Neo4jGraphStore
                     """
                     UNWIND $rows AS row
                     CREATE (c:GraphCommunity {
-                        projectId: $projectId,
+                        wingmanProjectId: $projectId,
                         graphVersion: $graphVersion,
                         communityId: row.CommunityId,
                         tier: row.Tier,
@@ -86,7 +84,7 @@ public sealed partial class Neo4jGraphStore
                         summary: row.Summary,
                         summaryState: row.SummaryState,
                         retryCount: row.RetryCount,
-                        memberIdsJson: row.memberIdsJson,
+                        memberIds: row.memberIds,
                         memberCount: row.MemberCount,
                         topTablesJson: row.topTablesJson,
                         topEntryPointsJson: row.topEntryPointsJson,
@@ -109,21 +107,22 @@ public sealed partial class Neo4jGraphStore
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         if (_driver is null) return [];
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null) return [];
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         return await session.ExecuteReadAsync(async transaction =>
         {
             var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (c:GraphCommunity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 RETURN c
                 ORDER BY c.tier, c.parentCommunityId, c.communityId
                 """,
-                new { projectId });
+                new { projectId, graphVersion });
             return await ReadCommunityTemplatesAsync(cursor);
         });
     }
@@ -159,44 +158,25 @@ public sealed partial class Neo4jGraphStore
             var cursor = await transaction.RunAsync(
                 """
                 MATCH (n:GraphEntity {
-                    projectId: $projectId,
+                    wingmanProjectId: $projectId,
                     graphVersion: $graphVersion
                 })
-                OPTIONAL MATCH (c:GraphCommunity {
-                    projectId: $projectId,
-                    graphVersion: $graphVersion,
-                    communityId: n.communityId
+                OPTIONAL MATCH (n)-[r]-(:GraphEntity {
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
-                RETURN
-                    sum(CASE
-                        WHEN n.kind = 'Feature'
-                         AND n.role IN [
-                            'menu-feature',
-                            'custom-report',
-                            'approval-feature',
-                            'schedule',
-                            'batch-report'
-                         ]
-                         AND coalesce(n.state, '') <> 'inactive'
-                        THEN 1 ELSE 0 END) AS eligibleAnchors,
-                    sum(CASE
-                        WHEN coalesce(n.degree, 0) > 0
-                         AND n.kind IN ['Feature', 'EntryPoint', 'Code']
-                        THEN 1 ELSE 0 END) AS connectedEligible,
-                    sum(CASE
-                        WHEN coalesce(n.degree, 0) > 0
-                         AND n.kind IN ['Feature', 'EntryPoint', 'Code']
-                         AND n.communityId IS NOT NULL
-                         AND trim(n.communityId) <> ''
-                         AND c IS NOT NULL
-                        THEN 1 ELSE 0 END) AS connectedAssigned
+                WITH n, count(r) AS degree
+                RETURN sum(CASE WHEN degree > 0 THEN 1 ELSE 0 END) AS connectedEligible
                 """,
                 new { projectId, graphVersion });
             var row = await cursor.SingleAsync();
+            var assigned = templates.SelectMany(item => item.MemberIds)
+                .Distinct(StringComparer.Ordinal)
+                .Count();
             return (
-                EligibleAnchors: row["eligibleAnchors"].As<int>(),
+                EligibleAnchors: row["connectedEligible"].As<int>(),
                 ConnectedEligible: row["connectedEligible"].As<int>(),
-                ConnectedAssigned: row["connectedAssigned"].As<int>());
+                ConnectedAssigned: assigned);
         });
 
         // Digest 僅依 tier/community/member IDs；相同 snapshot/config 的輸入順序
@@ -260,23 +240,24 @@ public sealed partial class Neo4jGraphStore
             .ToList();
         limit = Math.Clamp(limit, 1, 20);
         if (_driver is null || ids.Count == 0) return [];
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null) return [];
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         return await session.ExecuteReadAsync(async transaction =>
         {
             var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (c:GraphCommunity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 WHERE c.communityId IN $communityIds
                 RETURN c
                 ORDER BY c.tier, c.communityId
                 LIMIT $limit
                 """,
-                new { projectId, communityIds = ids, limit });
+                new { projectId, graphVersion, communityIds = ids, limit });
             return await ReadCommunityTemplatesAsync(cursor);
         });
     }
@@ -354,6 +335,8 @@ public sealed partial class Neo4jGraphStore
                 "未知 Community summary state。");
         retryCount = Math.Clamp(retryCount, 0, 2);
         if (_driver is null) return false;
+        var activeVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (!string.Equals(activeVersion, graphVersion, StringComparison.Ordinal)) return false;
 
         await using var session = OpenWriteSession();
         cancellationToken.ThrowIfCancellationRequested();
@@ -361,14 +344,12 @@ public sealed partial class Neo4jGraphStore
         {
             var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (c:GraphCommunity {
-                    projectId: $projectId,
+                    wingmanProjectId: $projectId,
                     graphVersion: $graphVersion,
                     communityId: $communityId,
                     cacheKey: $expectedCacheKey
                 })
-                WHERE p.activeManifestVersion = $graphVersion
                 SET c.summary = $summary,
                     c.summaryState = $summaryState,
                     c.retryCount = $retryCount,
@@ -406,22 +387,12 @@ public sealed partial class Neo4jGraphStore
         if (tier is not ("C0" or "C1" or "C2"))
             throw new ArgumentOutOfRangeException(nameof(tier));
         if (_driver is null) return [];
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null) return [];
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         return await session.ExecuteReadAsync(async transaction =>
         {
-            var manifestCursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                RETURN p.activeManifestVersion AS graphVersion
-                """,
-                new { projectId });
-            if (!await manifestCursor.FetchAsync())
-                return [];
-            var graphVersion = manifestCursor.Current["graphVersion"].As<string?>();
-            if (string.IsNullOrWhiteSpace(graphVersion))
-                return [];
-
             // Community full-text 與 Entity full-text 相同，index 包含所有專案與
             // retained versions。逐頁掃描 global score，直到 active scope 有足夠
             // 候選，避免固定 5000 筆在大型安裝環境仍被其他版本截斷。
@@ -504,7 +475,9 @@ public sealed partial class Neo4jGraphStore
             RequiredString(properties, "summary"),
             RequiredString(properties, "summaryState"),
             IntProperty(properties, "retryCount") ?? 0,
-            DeserializeList(StringProperty(properties, "memberIdsJson")),
+            properties.TryGetValue("memberIds", out var members)
+                ? members.As<List<string>>()
+                : DeserializeList(StringProperty(properties, "memberIdsJson")),
             IntProperty(properties, "memberCount") ?? 0,
             DeserializeList(StringProperty(properties, "topTablesJson")),
             DeserializeList(StringProperty(properties, "topEntryPointsJson")),
@@ -522,11 +495,53 @@ public sealed partial class Neo4jGraphStore
     private static bool IsActiveSearchScope(
         INode node,
         string projectId,
-        string graphVersion) =>
-        node.Properties.TryGetValue("projectId", out var projectValue) &&
-        node.Properties.TryGetValue("graphVersion", out var versionValue) &&
-        string.Equals(projectValue.As<string>(), projectId, StringComparison.Ordinal) &&
-        string.Equals(versionValue.As<string>(), graphVersion, StringComparison.Ordinal);
+        string graphVersion)
+    {
+        return node.Properties.TryGetValue("wingmanProjectId", out var projectValue) &&
+               node.Properties.TryGetValue("graphVersion", out var versionValue) &&
+               string.Equals(projectValue.As<string>(), projectId, StringComparison.Ordinal) &&
+               string.Equals(versionValue.As<string>(), graphVersion, StringComparison.Ordinal);
+    }
+
+    public async Task<bool> TryUpdateCommunityTextAsync(
+        string projectId,
+        string graphVersion,
+        string communityId,
+        string expectedCacheKey,
+        string title,
+        string summary,
+        string summaryState,
+        int retryCount,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(title);
+        ArgumentException.ThrowIfNullOrWhiteSpace(summary);
+        retryCount = Math.Clamp(retryCount, 0, 2);
+        if (_driver is null) return false;
+        var activeVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (activeVersion != graphVersion) return false;
+        await using var session = OpenWriteSession();
+        return await session.ExecuteWriteAsync(async transaction =>
+        {
+            var cursor = await transaction.RunAsync(
+                """
+                MATCH (c:GraphCommunity {
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion,
+                    communityId: $communityId,
+                    cacheKey: $expectedCacheKey
+                })
+                SET c.title = $title,
+                    c.summary = $summary,
+                    c.summaryState = $summaryState,
+                    c.retryCount = $retryCount,
+                    c.updatedAt = datetime()
+                RETURN count(c) AS updated
+                """,
+                new { projectId, graphVersion, communityId, expectedCacheKey, title, summary, summaryState, retryCount });
+            return (await cursor.SingleAsync())["updated"].As<int>() == 1;
+        });
+    }
 
     private sealed record ScoredCommunityTemplate(
         GraphCommunityReportV4 Template,

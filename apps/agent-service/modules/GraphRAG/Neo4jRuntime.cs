@@ -174,7 +174,7 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
                 return false;
             }
             Status = "starting";
-            progress?.Report("正在啟動 Neo4j V4 runtime...");
+            progress?.Report("正在啟動 Neo4j 圖譜執行環境…");
             var started = await StartProcessAsync(home, cancellationToken);
             Status = started ? "running" : "start-failed";
             LastError ??= started ? null : "Wingman 管理的 Neo4j 無法啟動。";
@@ -364,9 +364,12 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
         var port = ManagedPort();
         SetConfiguration(lines, "server.bolt.listen_address", $"127.0.0.1:{port}");
         SetConfiguration(lines, "server.bolt.advertised_address", $"127.0.0.1:{port}");
-        SetConfiguration(lines, "server.memory.heap.initial_size", "512m");
-        SetConfiguration(lines, "server.memory.heap.max_size", "1g");
-        SetConfiguration(lines, "server.memory.pagecache.size", "256m");
+        // ParallelExtractor 的 FBL 完整圖約有百萬級寫入命令；1 GiB heap
+        // 在中斷後的 transaction-log reverse recovery 會發生 OOM。上限 4 GiB
+        // 同時足以完成復原與大型發布，且不會在啟動時一次全數佔用。
+        SetConfiguration(lines, "server.memory.heap.initial_size", "1g");
+        SetConfiguration(lines, "server.memory.heap.max_size", "4g");
+        SetConfiguration(lines, "server.memory.pagecache.size", "512m");
         File.WriteAllLines(configurationPath, lines);
 
         var authFile = Path.Combine(home, "data", "dbms", "auth.ini");

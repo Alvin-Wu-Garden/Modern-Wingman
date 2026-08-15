@@ -39,6 +39,8 @@ public sealed partial class Neo4jGraphStore
                 GraphStoreFailureKind.Unavailable,
                 "Neo4j 尚未建立連線，無法讀取 Graph 鄰接關係。");
         }
+        graphVersion ??= await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null) return [];
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         try
@@ -47,15 +49,14 @@ public sealed partial class Neo4jGraphStore
             {
             var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (center:GraphEntity {
-                    projectId: $projectId,
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion,
                     id: $nodeId
                 })-[relationship]-(neighbor:GraphEntity {
-                    projectId: $projectId
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
-                WHERE center.graphVersion = coalesce($graphVersion, p.activeManifestVersion)
-                  AND neighbor.graphVersion = coalesce($graphVersion, p.activeManifestVersion)
                 RETURN neighbor, relationship,
                        startNode(relationship).id AS sourceId,
                        endNode(relationship).id AS targetId,
@@ -165,6 +166,9 @@ public sealed partial class Neo4jGraphStore
                 GraphStoreFailureKind.Unavailable,
                 "Neo4j 尚未建立連線，無法讀取 Graph 鄰接關係。");
         }
+        graphVersion ??= await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null)
+            return distinctIds.ToDictionary(id => id, _ => (IReadOnlyList<GraphNeighbor>)[], StringComparer.Ordinal);
         if (distinctIds.Count == 0) return empty;
 
         await using var session = OpenReadSession();
@@ -175,16 +179,15 @@ public sealed partial class Neo4jGraphStore
             {
                 var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 UNWIND $nodeIds AS nodeId
                 MATCH (center:GraphEntity {
-                    projectId: $projectId,
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion,
                     id: nodeId
                 })-[relationship]-(neighbor:GraphEntity {
-                    projectId: $projectId
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
-                WHERE center.graphVersion = coalesce($graphVersion, p.activeManifestVersion)
-                  AND neighbor.graphVersion = coalesce($graphVersion, p.activeManifestVersion)
                 WITH center, neighbor, relationship,
                      CASE WHEN startNode(relationship) = center
                           THEN 'outgoing' ELSE 'incoming' END AS direction

@@ -28,6 +28,17 @@ public static class AgentSchemaMigrator
             CREATE UNIQUE INDEX IF NOT EXISTS "IX_project_index_manifests_Current"
                 ON "project_index_manifests" ("ProjectId") WHERE "IsCurrent" = 1;
 
+            CREATE TABLE IF NOT EXISTS "project_index_files" (
+                "ProjectId" TEXT NOT NULL,
+                "GraphVersion" TEXT NOT NULL,
+                "RelativePath" TEXT NOT NULL,
+                "ContentHash" TEXT NOT NULL,
+                PRIMARY KEY("ProjectId", "GraphVersion", "RelativePath"),
+                FOREIGN KEY("ProjectId") REFERENCES "Projects"("Id") ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS "IX_project_index_files_Project_Version"
+                ON "project_index_files" ("ProjectId", "GraphVersion");
+
             CREATE TABLE IF NOT EXISTS "discovery_records" (
                 "Id" TEXT NOT NULL PRIMARY KEY,
                 "SourceId" TEXT NOT NULL,
@@ -169,11 +180,43 @@ public static class AgentSchemaMigrator
             """, ct);
 
         await EnsureConversationSchemaAsync(db.Database.GetDbConnection(), ct);
+        await EnsureProjectGraphColumnsAsync(db.Database.GetDbConnection(), ct);
         await EnsureProjectDatabaseConfigurationSchemaAsync(db.Database.GetDbConnection(), ct);
 
         // 目前仍不採用完整版本化 migration；只對必要的舊欄位做可重入清理，
         // 並確保目前版本的 Atlassian 連線表存在，不覆寫既有本機資料。
         await EnsureAtlassianConnectionTableAsync(db.Database.GetDbConnection(), ct);
+    }
+
+    /// <summary>為既有 Projects 表補上方案選擇與圖格式遷移旗標。</summary>
+    private static async Task EnsureProjectGraphColumnsAsync(
+        DbConnection connection,
+        CancellationToken ct)
+    {
+        if (connection.State == System.Data.ConnectionState.Closed)
+            await connection.OpenAsync(ct);
+
+        await using var inspect = connection.CreateCommand();
+        inspect.CommandText = "PRAGMA table_info(\"Projects\");";
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var reader = await inspect.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+                columns.Add(reader.GetString(1));
+        }
+
+        if (!columns.Contains("SelectedSolutionPath"))
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "ALTER TABLE \"Projects\" ADD COLUMN \"SelectedSolutionPath\" TEXT;";
+            await command.ExecuteNonQueryAsync(ct);
+        }
+        if (!columns.Contains("GraphStorageMigrated"))
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "ALTER TABLE \"Projects\" ADD COLUMN \"GraphStorageMigrated\" INTEGER NOT NULL DEFAULT 0;";
+            await command.ExecuteNonQueryAsync(ct);
+        }
     }
 
     /// <summary>

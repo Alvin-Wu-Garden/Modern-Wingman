@@ -28,10 +28,13 @@
     <Content Remove="tests\**\*" />
     <None Remove="tests\**\*" />
     <Compile Remove="modules\Marketplace\**\*.cs" />
+    <Compile Remove="modules\GraphRAG\ParallelExtractor\**\*.cs" />
+    <Compile Include="modules\GraphRAG\ParallelExtractor\ParallelExtractorPipeline.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="modules\Marketplace\Wingman.Marketplace.csproj" />
+    <ProjectReference Include="modules\GraphRAG\ParallelExtractor\Wingman.ParallelExtractor.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -62,29 +65,19 @@
     <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="1.13.0" />
     <PackageReference Include="Microsoft.Agents.AI.GitHub.Copilot" Version="1.13.0-rc1" />
     <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.13.0" />
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
-    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.14.0" />
-    <PackageReference Include="Microsoft.Build.Locator" Version="1.7.8" />
-    <!-- Workspaces.MSBuild 4.14 pulls vulnerable 17.7.2 transitively. Pin a
-         patched line for restore resolution, while MSBuildLocator supplies the
-         installed SDK assemblies at runtime. -->
-    <PackageReference Include="Microsoft.Build" Version="17.14.28" ExcludeAssets="runtime" />
-    <PackageReference Include="Microsoft.Build.Framework" Version="17.14.28" ExcludeAssets="runtime" />
-    <PackageReference Include="Microsoft.Build.Tasks.Core" Version="17.14.28" ExcludeAssets="runtime" />
-    <PackageReference Include="Microsoft.Build.Utilities.Core" Version="17.14.28" ExcludeAssets="runtime" />
+    <!-- 原始碼工具只需要 Roslyn 語法 API；完整抽取器及其精確套件版本隔離在 Wingman.ParallelExtractor。 -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.6.0" />
     <!-- Override the vulnerable 9.x transitive dependency from Roslyn/MSBuild. -->
     <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.10" NoWarn="NU1510" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
     <!-- GraphRAG V4 的 live SQL Server metadata 與業務設定抽取只使用唯讀查詢。 -->
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
-    <!-- 使用正式 T-SQL AST 判斷 READS/WRITES，避免以正規表示式猜測 SQL 關係。 -->
-    <PackageReference Include="Microsoft.SqlServer.TransactSql.ScriptDom" Version="180.37.3" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.0" />
     <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.8.0" />
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.8.0" />
-    <PackageReference Include="Neo4j.Driver" Version="5.28.3" />
+    <PackageReference Include="Neo4j.Driver" Version="6.3.0" />
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
     <PackageReference Include="OpenAI" Version="2.12.0" />
     <PackageReference Include="System.ClientModel" Version="1.14.0" />

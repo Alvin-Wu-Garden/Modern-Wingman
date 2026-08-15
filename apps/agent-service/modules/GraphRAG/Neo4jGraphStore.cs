@@ -5,12 +5,12 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Security.Cryptography;
 using System.Text;
+using AgentService.Application.Contracts;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Neo4j.Driver;
 using AuthorityGraphNode = AgentService.Modules.GraphRAG.FblAuthority.GraphNode;
 using AuthorityGraphRelationship = AgentService.Modules.GraphRAG.FblAuthority.GraphRelationship;
-using AuthorityGraphEvidence = AgentService.Modules.GraphRAG.FblAuthority.GraphEvidence;
 using AuthorityGraphNodeKind = AgentService.Modules.GraphRAG.FblAuthority.GraphNodeKind;
 using AuthorityGraphRelationshipKind = AgentService.Modules.GraphRAG.FblAuthority.GraphRelationshipKind;
 using AuthorityGraphSchema = AgentService.Modules.GraphRAG.FblAuthority.GraphSchema;
@@ -24,6 +24,10 @@ namespace AgentService.Modules.GraphRAG;
 /// </summary>
 public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
 {
+    // 高連結節點 DETACH DELETE 會為一個節點生成大量 command；
+    // 500 節點一批可避免百萬級圖在清理時形成過大 transaction log。
+    // 500 筆會讓百萬級舊版本清理產生數千次 transaction；5,000 筆已在 2 GiB
+    // Neo4j heap 的完整 FBL 圖實測通過，並可把切版後清理縮短到合理時間。
     private const int CleanupBatchSize = 5_000;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -47,6 +51,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
 
     private readonly GraphRagNeo4jOptions _options;
     private readonly ILogger<Neo4jGraphStore> _logger;
+    private readonly IProjectIndexManifestStore _manifests;
     private readonly IDriver? _driver;
     private readonly SemaphoreSlim _schemaGate = new(1, 1);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _projectGates =
@@ -62,9 +67,11 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     public Neo4jGraphStore(
         IOptions<GraphRagNeo4jOptions> options,
         IOptions<GraphRagNeo4jRuntimeOptions> runtimeOptions,
+        IProjectIndexManifestStore manifests,
         ILogger<Neo4jGraphStore> logger)
     {
         _options = options.Value;
+        _manifests = manifests;
         _logger = logger;
         ValidateOptions(_options);
         if (_options.Disabled ||
@@ -99,7 +106,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         catch (Exception exception)
         {
             _logger.LogDebug(
-                "Neo4j V4 connectivity check 失敗；已遮蔽連線資訊。ExceptionType={ExceptionType}",
+                "Neo4j 連線檢查失敗；已遮蔽連線資訊。ExceptionType={ExceptionType}",
                 exception.GetType().Name);
             return false;
         }
@@ -187,8 +194,13 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(snapshot);
         await StageVersionAsync(snapshot, cancellationToken);
         await PromoteVersionAsync(snapshot, cancellationToken);
-        await FinalizeActiveVersionAsync(snapshot.ProjectId, cancellationToken);
     }
+
+    /// <inheritdoc />
+    public Task FinalizePublishedVersionAsync(
+        string projectId,
+        CancellationToken cancellationToken = default) =>
+        FinalizeActiveVersionAsync(projectId, cancellationToken);
 
     /// <summary>
     /// 發布後本機 manifest 或專案狀態寫入失敗時的補償交易。
@@ -202,43 +214,6 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     {
         if (_driver is null)
             return;
-
-        if (string.IsNullOrWhiteSpace(previousVersion))
-        {
-            await DeleteProjectAsync(projectId, cancellationToken);
-            return;
-        }
-
-        await using var session = OpenWriteSession();
-        var restored = await session.ExecuteWriteAsync(async transaction =>
-        {
-            var cursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                MATCH (old:GraphEntity {projectId: $projectId, graphVersion: $previousVersion})
-                WITH p, count(old) AS nodeCount
-                OPTIONAL MATCH (oldEdge:GraphEntity {projectId: $projectId, graphVersion: $previousVersion})
-                    -[oldRel {graphVersion: $previousVersion}]->
-                    (:GraphEntity {projectId: $projectId, graphVersion: $previousVersion})
-                WITH p, nodeCount, count(oldRel) AS edgeCount
-                SET p.activeManifestVersion = $previousVersion,
-                    p.schemaVersion = $schemaVersion,
-                    p.nodeCount = nodeCount,
-                    p.edgeCount = edgeCount,
-                    p.previousManifestVersion = NULL,
-                    p.promotedAt = datetime()
-                RETURN count(p) AS restored
-                """,
-                new
-                {
-                    projectId,
-                    previousVersion,
-                    schemaVersion = ProjectGraphVersions.StorageSchema,
-                });
-            return (await cursor.SingleAsync())["restored"].As<int>();
-        });
-        if (restored != 1)
-            throw new InvalidOperationException($"Neo4j 找不到可恢復的上一版圖譜：{projectId}/{previousVersion}");
 
         await DeleteVersionAsync(projectId, publishedVersion, cancellationToken);
     }
@@ -302,7 +277,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         if (!validation.IsValid)
             throw new InvalidOperationException(
                 $"Neo4j staging 不完整，禁止 Promote：{string.Join("；", validation.Errors)}");
-        await PromoteAsync(snapshot, cancellationToken);
+        // active 指標由 Modern Wingman SQLite manifest 保存；Neo4j 不建立 ProjectGraph。
     }
 
     /// <inheritdoc />
@@ -311,57 +286,19 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
-        if (_driver is null)
-            return new GraphVersionPointers(projectId, null, null);
-        await using var session = OpenReadSession();
-        cancellationToken.ThrowIfCancellationRequested();
-        return await session.ExecuteReadAsync(async transaction =>
-        {
-            var cursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                RETURN p.activeManifestVersion AS active,
-                       p.previousManifestVersion AS previous
-                LIMIT 1
-                """,
-                new { projectId });
-            if (!await cursor.FetchAsync())
-                return new GraphVersionPointers(projectId, null, null);
-            return new GraphVersionPointers(
-                projectId,
-                cursor.Current["active"].As<string?>(),
-                cursor.Current["previous"].As<string?>());
-        });
+        var versions = await _manifests.ListSuccessfulAsync(projectId, cancellationToken);
+        var active = await _manifests.GetCurrentAsync(projectId, cancellationToken);
+        return new GraphVersionPointers(
+            projectId,
+            active?.Version,
+            versions.FirstOrDefault(item => item.Version != active?.Version)?.Version);
     }
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<GraphVersionPointers>> ListVersionPointersAsync(
         CancellationToken cancellationToken = default)
     {
-        if (_driver is null) return [];
-        await using var session = OpenReadSession();
-        cancellationToken.ThrowIfCancellationRequested();
-        return await session.ExecuteReadAsync(async transaction =>
-        {
-            var cursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph)
-                RETURN p.projectId AS projectId,
-                       p.activeManifestVersion AS active,
-                       p.previousManifestVersion AS previous
-                ORDER BY p.projectId
-                """);
-            var pointers = new List<GraphVersionPointers>();
-            while (await cursor.FetchAsync())
-            {
-                pointers.Add(new GraphVersionPointers(
-                    cursor.Current["projectId"].As<string>(),
-                    cursor.Current["active"].As<string?>(),
-                    cursor.Current["previous"].As<string?>()));
-            }
-
-            return (IReadOnlyList<GraphVersionPointers>)pointers;
-        });
+        return [];
     }
 
     /// <inheritdoc />
@@ -383,43 +320,24 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             var cursor = await transaction.RunAsync(
                 """
                 MATCH (n:GraphEntity {
-                    projectId: $projectId,
+                    wingmanProjectId: $projectId,
                     graphVersion: $graphVersion
                 })
-                WITH count(n) AS nodes,
-                     count(CASE
-                         WHEN n.kind IS NOT NULL
-                          AND n.propertiesJson IS NOT NULL
-                          AND n.degree IS NOT NULL
-                         THEN 1 END) AS validNodes
+                WITH count(n) AS nodes
                 OPTIONAL MATCH (:GraphEntity {
-                    projectId: $projectId,
+                    wingmanProjectId: $projectId,
                     graphVersion: $graphVersion
-                })-[r {
-                    graphVersion: $graphVersion
-                }]->(:GraphEntity {
-                    projectId: $projectId,
+                })-[r]->(:GraphEntity {
+                    wingmanProjectId: $projectId,
                     graphVersion: $graphVersion
                 })
-                RETURN nodes, validNodes, count(r) AS edges,
-                     count(CASE
-                         WHEN r.id IS NOT NULL
-                          AND r.evidenceJson IS NOT NULL
-                          AND NOT 'sourceId' IN keys(r)
-                          AND NOT 'targetId' IN keys(r)
-                         THEN 1 END) AS validEdges
+                RETURN nodes, count(r) AS edges
                 """,
                 new { projectId, graphVersion });
             var record = await cursor.SingleAsync();
             var nodes = record["nodes"].As<int>();
-            var validNodes = record["validNodes"].As<int>();
             var edges = record["edges"].As<int>();
-            var validEdges = record["validEdges"].As<int>();
             var errors = new List<string>();
-            if (validNodes != nodes)
-                errors.Add($"authority node properties {validNodes}/{nodes}");
-            if (validEdges != edges)
-                errors.Add($"authority relationship properties {validEdges}/{edges}");
             if (expectedNodes is not null && nodes != expectedNodes)
                 errors.Add($"node count {nodes}/{expectedNodes}");
             if (expectedEdges is not null && edges != expectedEdges)
@@ -434,35 +352,11 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
-        if (_driver is null)
-            throw new InvalidOperationException("Neo4j V4 已停用。");
-        await using var session = OpenWriteSession();
-        cancellationToken.ThrowIfCancellationRequested();
-        var restored = await session.ExecuteWriteAsync(async transaction =>
-        {
-            var cursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                WHERE p.previousManifestVersion IS NOT NULL
-                SET p.activeManifestVersion = p.previousManifestVersion,
-                    p.schemaVersion = p.previousSchemaVersion,
-                    p.canonicalDigest = p.previousCanonicalDigest,
-                    p.nodeCount = p.previousNodeCount,
-                    p.edgeCount = p.previousEdgeCount,
-                    p.previousManifestVersion = NULL,
-                    p.previousSchemaVersion = NULL,
-                    p.previousCanonicalDigest = NULL,
-                    p.previousNodeCount = NULL,
-                    p.previousEdgeCount = NULL,
-                    p.promotedAt = datetime()
-                RETURN count(p) AS restored
-                """,
-                new { projectId });
-            return (await cursor.SingleAsync())["restored"].As<int>();
-        });
-        if (restored != 1)
-            throw new InvalidOperationException(
-                $"Neo4j ProjectGraph 沒有可回復的 previous：{projectId}。");
+        var versions = await _manifests.ListSuccessfulAsync(projectId, cancellationToken);
+        var active = await _manifests.GetCurrentAsync(projectId, cancellationToken);
+        var previous = versions.FirstOrDefault(item => item.Version != active?.Version)
+            ?? throw new InvalidOperationException($"專案沒有可回復的 previous graphVersion：{projectId}。");
+        await _manifests.ActivateAsync(projectId, previous.Version, cancellationToken);
     }
 
     /// <inheritdoc />
@@ -472,25 +366,6 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         if (_driver is null) return;
-        await using (var session = OpenWriteSession())
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            await session.ExecuteWriteAsync(async transaction =>
-            {
-                var cursor = await transaction.RunAsync(
-                    """
-                    MATCH (p:ProjectGraph {projectId: $projectId})
-                    SET p.previousManifestVersion = NULL,
-                        p.previousSchemaVersion = NULL,
-                        p.previousCanonicalDigest = NULL,
-                        p.previousNodeCount = NULL,
-                        p.previousEdgeCount = NULL
-                    """,
-                    new { projectId });
-                await cursor.ConsumeAsync();
-            });
-        }
-
         await CleanupRetiredVersionsAsync(projectId, cancellationToken);
     }
 
@@ -500,42 +375,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
-        if (_driver is null) return null;
-        await using var session = OpenReadSession();
-        cancellationToken.ThrowIfCancellationRequested();
-        return await session.ExecuteReadAsync(async transaction =>
-        {
-            var cursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                OPTIONAL MATCH (n:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
-                })
-                WITH p, count(n) AS nodeCount
-                OPTIONAL MATCH (:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
-                })-[r {
-                    graphVersion: p.activeManifestVersion
-                }]->(:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
-                })
-                WITH p, nodeCount, count(r) AS edgeCount
-                RETURN CASE
-                    WHEN p.activeManifestVersion IS NULL THEN null
-                    WHEN nodeCount <> p.nodeCount THEN null
-                    WHEN edgeCount <> p.edgeCount THEN null
-                    ELSE p.activeManifestVersion
-                END AS manifest
-                """,
-                new { projectId });
-            // 尚未建立 ProjectGraph 是首次索引的正常狀態；不能用 SingleAsync，
-            // 否則空結果會被誤判成資料庫故障，讓任何新專案都無法發布第一版。
-            if (!await cursor.FetchAsync()) return null;
-            return cursor.Current["manifest"].As<string?>();
-        });
+        return (await _manifests.GetCurrentAsync(projectId, cancellationToken))?.Version;
     }
 
     /// <inheritdoc />
@@ -553,7 +393,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             {
                 var cursor = await transaction.RunAsync(
                     $$"""
-                    MATCH (n:GraphEntity {projectId: $projectId})
+                    MATCH (n:GraphEntity {wingmanProjectId: $projectId})
                     WITH n LIMIT {{CleanupBatchSize}}
                     DETACH DELETE n
                     RETURN count(*) AS deleted
@@ -569,12 +409,29 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 """
                 MATCH (n)
                 WHERE (n:ProjectGraph OR n:CommunityReport OR n:GraphCommunity)
-                  AND n.projectId = $projectId
+                  AND (n.projectId = $projectId OR n.wingmanProjectId = $projectId)
                 DETACH DELETE n
                 """,
                 new { projectId });
             await cursor.ConsumeAsync();
         });
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var deleted = await session.ExecuteWriteAsync(async transaction =>
+            {
+                var cursor = await transaction.RunAsync(
+                    $$"""
+                    MATCH (n:GraphEntity {projectId: $projectId})
+                    WITH n LIMIT {{CleanupBatchSize}}
+                    DETACH DELETE n
+                    RETURN count(*) AS deleted
+                    """,
+                    new { projectId });
+                return (await cursor.SingleAsync())["deleted"].As<int>();
+            });
+            if (deleted == 0) break;
+        }
     }
 
     /// <inheritdoc />
@@ -613,6 +470,9 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             throw new GraphStoreException(
                 GraphStoreFailureKind.SnapshotNotFound,
                 "Graph 檢索要求的 graphVersion 不可為空。 ");
+        graphVersion ??= await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null)
+            return [];
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         try
@@ -620,20 +480,6 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             return await session.ExecuteReadAsync(async transaction =>
             {
                 var snapshotVersion = graphVersion;
-                if (snapshotVersion is null)
-                {
-                    var manifestCursor = await transaction.RunAsync(
-                        """
-                        MATCH (p:ProjectGraph {projectId: $projectId})
-                        RETURN p.activeManifestVersion AS graphVersion
-                        """,
-                        new { projectId });
-                    if (!await manifestCursor.FetchAsync())
-                        return (IReadOnlyList<GraphSearchHit>)[];
-                    snapshotVersion = manifestCursor.Current["graphVersion"].As<string?>();
-                    if (string.IsNullOrWhiteSpace(snapshotVersion))
-                        return (IReadOnlyList<GraphSearchHit>)[];
-                }
 
                 // Neo4j full-text index 會同時包含其他專案及 retained versions。
                 // 固定 global LIMIT 會讓目標 snapshot 永遠沒有機會進入候選，
@@ -769,28 +615,29 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         limit = Math.Clamp(limit, 1, 500);
         if (_driver is null) return [];
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null) return [];
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         return await session.ExecuteReadAsync(async transaction =>
         {
             var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (node:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 OPTIONAL MATCH (node)-[relationship]-(:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 RETURN node, count(relationship) AS degree
                 ORDER BY
-                    CASE node.kind
-                        WHEN 'Menu' THEN 0
-                        WHEN 'Endpoint' THEN 1
-                        WHEN 'WebAction' THEN 2
-                        WHEN 'CodeClass' THEN 3
+                    CASE
+                        WHEN node:MenuItem THEN 0
+                        WHEN node:ApiEndpoint THEN 1
+                        WHEN node:Method THEN 2
+                        WHEN node:Type THEN 3
                         WHEN 'DatabaseObject' THEN 4
                         ELSE 5
                     END,
@@ -798,7 +645,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                     node.id
                 LIMIT $limit
                 """,
-                new { projectId, limit });
+                new { projectId, graphVersion, limit });
             var result = new List<GraphSearchHit>();
             while (await cursor.FetchAsync())
                 result.Add(new GraphSearchHit(
@@ -815,208 +662,35 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         if (_driver is null) return (0, 0);
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null) return (0, 0);
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         return await session.ExecuteReadAsync(async transaction =>
         {
             var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 OPTIONAL MATCH (n:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
-                WITH p, count(n) AS nodes
+                WITH count(n) AS nodes
                 OPTIONAL MATCH (:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })-[r]->(:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
-                WHERE r IS NULL OR r.graphVersion = p.activeManifestVersion
                 RETURN nodes, count(r) AS edges
                 """,
-                new { projectId });
-            // 尚未索引或已 DeleteProject 的專案沒有 ProjectGraph anchor；
+                new { projectId, graphVersion });
+            // 尚未索引或已刪除的專案沒有任何 GraphEntity；
             // 統計 API 必須回傳零，而不是讓空 cursor 的 SingleAsync 變成 500。
             if (!await cursor.FetchAsync()) return (0, 0);
             var record = cursor.Current;
             return (record["nodes"].As<int>(), record["edges"].As<int>());
         });
-    }
-
-    /// <inheritdoc />
-    public async Task<IReadOnlyList<IReadOnlyList<string>>?> TryDetectLeidenCommunitiesAsync(
-        string projectId,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
-        if (_driver is null) return null;
-        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
-        if (graphVersion is null) return null;
-
-        // graph catalog name 只存在於 GDS 記憶體，使用隨機 suffix 避免兩個專案索引
-        // 或清理重試互相碰撞；domain graph 與 primary community 都不會被 Leiden 改寫。
-        var graphName =
-            $"wingman_{StableSha256(projectId)[..12]}_{Guid.NewGuid():N}";
-        var projected = false;
-        await using var session = OpenWriteSession();
-        try
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var functionCursor = await session.RunAsync(
-                """
-                SHOW FUNCTIONS
-                YIELD name
-                WHERE name = 'gds.graph.project'
-                RETURN count(*) AS count
-                """);
-            var hasProjection =
-                (await functionCursor.SingleAsync())["count"].As<long>() > 0;
-            var procedureCursor = await session.RunAsync(
-                """
-                SHOW PROCEDURES
-                YIELD name
-                WHERE name = 'gds.leiden.stream'
-                RETURN count(*) AS count
-                """);
-            var hasLeiden =
-                (await procedureCursor.SingleAsync())["count"].As<long>() > 0;
-            if (!hasProjection || !hasLeiden) return null;
-
-            // Cypher projection 只讀目前 active manifest，並依 FBL 業務鏈關係配置 discovery 權重。
-            // undirected projection 只供 discovery；原始 domain edge 方向仍完整保留在 Neo4j。
-            var projectionCursor = await session.RunAsync(
-                """
-                MATCH (source:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: $graphVersion
-                })
-                OPTIONAL MATCH (source)-[relationship]->(target:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: $graphVersion
-                })
-                RETURN gds.graph.project(
-                    $graphName,
-                    source,
-                    target,
-                    {
-                        relationshipProperties:
-                            CASE
-                                WHEN relationship IS NULL THEN {}
-                                ELSE {
-                                    weight:
-                                        CASE type(relationship)
-                                            WHEN 'OPENS' THEN 1.00
-                                            WHEN 'ROUTES_TO' THEN 1.00
-                                            WHEN 'IMPLEMENTED_BY' THEN 0.98
-                                            WHEN 'OPENS_CUSTOM_REPORT' THEN 0.98
-                                            WHEN 'LOADS_PLUGIN_REPORT' THEN 0.98
-                                            WHEN 'CONTAINS_DATA_SOURCE' THEN 0.95
-                                            WHEN 'READS_VIA' THEN 0.90
-                                            WHEN 'WRITES_VIA' THEN 0.95
-                                            WHEN 'USES_DEFINITION' THEN 0.90
-                                            WHEN 'MAPS_TO' THEN 0.90
-                                            WHEN 'QUERIES' THEN 0.90
-                                            WHEN 'CALLS' THEN 0.75
-                                            ELSE 0.50
-                                        END
-                                }
-                            END
-                    },
-                    {
-                        undirectedRelationshipTypes: ['*'],
-                        readConcurrency: 1
-                    }
-                ) AS graph
-                """,
-                new { projectId, graphVersion, graphName });
-            await projectionCursor.SingleAsync();
-            projected = true;
-
-            // randomSeed + concurrency=1 讓相同 topology 的 membership 可重現；
-            // 回傳 member IDs 後由 GraphCommunityBuilder 重新計算穩定 community ID，
-            // 不採用 GDS 執行期 communityId 作為持久 identity。
-            var leidenCursor = await session.RunAsync(
-                """
-                CALL gds.leiden.stream(
-                    $graphName,
-                    {
-                        relationshipWeightProperty: 'weight',
-                        randomSeed: 23,
-                        concurrency: 1,
-                        logProgress: false
-                    })
-                YIELD nodeId, communityId
-                RETURN gds.util.asNode(nodeId).id AS id, communityId
-                ORDER BY communityId, id
-                """,
-                new { graphName });
-            var groups = new SortedDictionary<long, List<string>>();
-            while (await leidenCursor.FetchAsync())
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var id = leidenCursor.Current["id"].As<string?>();
-                if (string.IsNullOrWhiteSpace(id)) continue;
-                var communityId = leidenCursor.Current["communityId"].As<long>();
-                if (!groups.TryGetValue(communityId, out var members))
-                {
-                    members = [];
-                    groups.Add(communityId, members);
-                }
-                members.Add(id);
-            }
-            return groups.Values
-                .Where(group => group.Count >= 2)
-                .Select(group => (IReadOnlyList<string>)group
-                    .Distinct(StringComparer.Ordinal)
-                    .OrderBy(id => id, StringComparer.Ordinal)
-                    .ToList())
-                .OrderBy(group => group[0], StringComparer.Ordinal)
-                .ToList();
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception exception)
-        {
-            // GDS 是 optional discovery 能力。外掛缺失、版本不相容或記憶體估算拒絕時，
-            // 必須安全退回 deterministic label propagation，不能讓 canonical publish 失敗。
-            _logger.LogInformation(
-                "Neo4j GDS Leiden 不可用，將使用確定性的次級 Community 降級流程。" +
-                " ProjectId={ProjectId}, ExceptionType={ExceptionType}",
-                projectId,
-                exception.GetType().Name);
-            return null;
-        }
-        finally
-        {
-            if (projected)
-            {
-                try
-                {
-                    var dropCursor = await session.RunAsync(
-                        """
-                        CALL gds.graph.drop($graphName, false)
-                        YIELD graphName
-                        RETURN graphName
-                        """,
-                        new { graphName });
-                    await dropCursor.ConsumeAsync();
-                }
-                catch (Exception exception) when (
-                    exception is not OperationCanceledException)
-                {
-                    _logger.LogWarning(
-                        "清理暫存 GDS projection 失敗；不影響目前的 domain graph。" +
-                        " ProjectId={ProjectId}, ExceptionType={ExceptionType}",
-                        projectId,
-                        exception.GetType().Name);
-                }
-            }
-        }
     }
 
     /// <summary>
@@ -1028,10 +702,6 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         CancellationToken cancellationToken)
     {
         await using var session = OpenWriteSession();
-        var degrees = snapshot.Document.Relationships
-            .SelectMany(edge => new[] { edge.SourceKey, edge.TargetKey })
-            .GroupBy(key => key, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
         foreach (var kindGroup in snapshot.Document.Nodes.GroupBy(node => node.Kind))
         {
             var authorityLabel = AuthorityGraphSchema.GetNodeLabel(kindGroup.Key);
@@ -1041,18 +711,6 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 var rows = batch.Select(node => new Dictionary<string, object?>
                 {
                     ["id"] = node.Key,
-                    ["kind"] = node.Kind.ToString(),
-                    ["role"] = node.Kind.ToString(),
-                    ["name"] = DisplayName(node),
-                    ["searchableText"] = SearchableText(node),
-                    ["language"] = AuthorityLanguage(node.Kind),
-                    ["filePath"] = AuthorityStringProperty(node.Properties, "source_file")
-                        ?? AuthorityStringProperty(node.Properties, "file_path"),
-                    ["startLine"] = AuthorityIntProperty(node.Properties, "source_line")
-                        ?? AuthorityIntProperty(node.Properties, "start_line"),
-                    ["endLine"] = AuthorityIntProperty(node.Properties, "end_line"),
-                    ["degree"] = degrees.GetValueOrDefault(node.Key),
-                    ["propertiesJson"] = JsonSerializer.Serialize(node.Properties, JsonOptions),
                     ["domainProperties"] = ToNeo4jProperties(node.Properties),
                 }).ToList();
                 await session.ExecuteWriteAsync(async transaction =>
@@ -1061,19 +719,9 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                     $$"""
                     UNWIND $rows AS row
                     CREATE (n:GraphEntity:{{authorityLabel}} {
-                        projectId: $projectId,
+                        wingmanProjectId: $projectId,
                         graphVersion: $graphVersion,
-                        id: row.id,
-                        kind: row.kind,
-                        role: row.role,
-                        name: row.name,
-                        searchableText: row.searchableText,
-                        language: row.language,
-                        filePath: row.filePath,
-                        startLine: row.startLine,
-                        endLine: row.endLine,
-                        degree: row.degree,
-                        propertiesJson: row.propertiesJson
+                        id: row.id
                     })
                     SET n += row.domainProperties
                     """,
@@ -1103,18 +751,8 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 cancellationToken.ThrowIfCancellationRequested();
                 var rows = batch.Select(edge => new
                 {
-                    edge.Id,
                     SourceId = edge.SourceKey,
                     TargetId = edge.TargetKey,
-                    EvidenceJson = JsonSerializer.Serialize(edge.Evidence, JsonOptions),
-                    EvidenceSourceKind = edge.Evidence.SourceKind.ToString(),
-                    edge.Evidence.SourceFile,
-                    LineNumber = edge.Evidence.SourceLine,
-                    edge.Evidence.DatabaseObject,
-                    edge.Evidence.DatabaseColumn,
-                    edge.Evidence.RowKey,
-                    edge.Evidence.RawValue,
-                    PropertiesJson = JsonSerializer.Serialize(edge.Properties, JsonOptions),
                     DomainProperties = ToNeo4jProperties(edge.Properties),
                 }).ToList();
                 await session.ExecuteWriteAsync(async transaction =>
@@ -1123,28 +761,16 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                         $$"""
                         UNWIND $rows AS row
                         MATCH (source:GraphEntity {
-                            projectId: $projectId,
+                            wingmanProjectId: $projectId,
                             graphVersion: $graphVersion,
                             id: row.SourceId
                         })
                         MATCH (target:GraphEntity {
-                            projectId: $projectId,
+                            wingmanProjectId: $projectId,
                             graphVersion: $graphVersion,
                             id: row.TargetId
                         })
-                        CREATE (source)-[relationship:{{relationshipType}} {
-                            id: row.Id,
-                            graphVersion: $graphVersion,
-                            evidenceJson: row.EvidenceJson,
-                            evidenceSourceKind: row.EvidenceSourceKind,
-                            sourceFile: row.SourceFile,
-                            lineNumber: row.LineNumber,
-                            databaseObject: row.DatabaseObject,
-                            databaseColumn: row.DatabaseColumn,
-                            rowKey: row.RowKey,
-                            rawValue: row.RawValue,
-                            propertiesJson: row.PropertiesJson
-                        }]->(target)
+                        CREATE (source)-[relationship:{{relationshipType}}]->(target)
                         SET relationship += row.DomainProperties
                         """,
                         new
@@ -1170,30 +796,19 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             var cursor = await transaction.RunAsync(
                 """
                 MATCH (n:GraphEntity {
-                    projectId: $projectId,
+                    wingmanProjectId: $projectId,
                     graphVersion: $graphVersion
                 })
-                WITH count(n) AS nodes,
-                     count(CASE WHEN n.kind IS NOT NULL
-                                      AND n.propertiesJson IS NOT NULL
-                                THEN 1 END) AS validNodes
+                WITH count(n) AS nodes
                 OPTIONAL MATCH (:GraphEntity {
-                    projectId: $projectId,
+                    wingmanProjectId: $projectId,
                     graphVersion: $graphVersion
-                })-[r {
-                    graphVersion: $graphVersion
-                }]->(:GraphEntity {
-                    projectId: $projectId,
+                })-[r]->(:GraphEntity {
+                    wingmanProjectId: $projectId,
                     graphVersion: $graphVersion
                 })
                 RETURN nodes,
-                       validNodes,
                        count(r) AS edges,
-                       count(CASE
-                           WHEN r.id IS NOT NULL
-                                AND r.evidenceJson IS NOT NULL
-                           THEN 1
-                       END) AS validEdges,
                        collect(DISTINCT type(r)) AS relationshipTypes
                 """,
                 new
@@ -1205,9 +820,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             return new
             {
                 Nodes = record["nodes"].As<int>(),
-                ValidNodes = record["validNodes"].As<int>(),
                 Edges = record["edges"].As<int>(),
-                ValidEdges = record["validEdges"].As<int>(),
                 RelationshipTypes = record["relationshipTypes"]
                     .As<List<string>>()
                     .Where(value => !string.IsNullOrWhiteSpace(value))
@@ -1222,71 +835,11 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             .ToList();
         if (validation.Nodes != snapshot.Document.Nodes.Count ||
             validation.Edges != snapshot.Document.Relationships.Count ||
-            validation.ValidNodes != snapshot.Document.Nodes.Count ||
-            validation.ValidEdges != snapshot.Document.Relationships.Count ||
             !validation.RelationshipTypes.SequenceEqual(
                 expectedRelationshipTypes, StringComparer.Ordinal))
             throw new InvalidOperationException(
                 $"Neo4j staging 驗證不一致：nodes {validation.Nodes}/{snapshot.Document.Nodes.Count}, " +
-                $"edges {validation.Edges}/{snapshot.Document.Relationships.Count}, " +
-                $"valid nodes {validation.ValidNodes}/{snapshot.Document.Nodes.Count}, " +
-                $"valid relationships {validation.ValidEdges}/{snapshot.Document.Relationships.Count}。");
-    }
-
-    private async Task PromoteAsync(
-        FblGraphSnapshot snapshot,
-        CancellationToken cancellationToken)
-    {
-        await using var session = OpenWriteSession();
-        cancellationToken.ThrowIfCancellationRequested();
-        await session.ExecuteWriteAsync(async transaction =>
-        {
-            var cursor = await transaction.RunAsync(
-                """
-                MERGE (p:ProjectGraph {projectId: $projectId})
-                SET p.previousManifestVersion = CASE
-                        WHEN p.activeManifestVersion = $graphVersion
-                        THEN p.previousManifestVersion
-                        ELSE p.activeManifestVersion
-                    END,
-                    p.previousSchemaVersion = CASE
-                        WHEN p.activeManifestVersion = $graphVersion
-                        THEN p.previousSchemaVersion
-                        ELSE p.schemaVersion
-                    END,
-                    p.previousCanonicalDigest = CASE
-                        WHEN p.activeManifestVersion = $graphVersion
-                        THEN p.previousCanonicalDigest
-                        ELSE p.canonicalDigest
-                    END,
-                    p.previousNodeCount = CASE
-                        WHEN p.activeManifestVersion = $graphVersion
-                        THEN p.previousNodeCount
-                        ELSE p.nodeCount
-                    END,
-                    p.previousEdgeCount = CASE
-                        WHEN p.activeManifestVersion = $graphVersion
-                        THEN p.previousEdgeCount
-                        ELSE p.edgeCount
-                    END,
-                    p.activeManifestVersion = $graphVersion,
-                    p.schemaVersion = $schemaVersion,
-                    p.canonicalDigest = $canonicalDigest,
-                    p.nodeCount = $nodeCount,
-                    p.edgeCount = $edgeCount,
-                    p.promotedAt = datetime()
-                """,
-                new
-                {
-                    projectId = snapshot.ProjectId,
-                    graphVersion = snapshot.GraphVersion,
-                    schemaVersion = ProjectGraphVersions.StorageSchema,
-                    canonicalDigest = snapshot.ContentDigest,
-                    nodeCount = snapshot.Document.Nodes.Count,
-                    edgeCount = snapshot.Document.Relationships.Count,
-                });
-            await cursor.ConsumeAsync();
-        });
+                $"edges {validation.Edges}/{snapshot.Document.Relationships.Count}。");
     }
 
     /// <inheritdoc />
@@ -1312,7 +865,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 var cursor = await transaction.RunAsync(
                     $$"""
                     MATCH (n:GraphEntity {
-                        projectId: $projectId,
+                        wingmanProjectId: $projectId,
                         graphVersion: $graphVersion
                     })
                     WITH n LIMIT {{CleanupBatchSize}}
@@ -1329,7 +882,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             var cursor = await transaction.RunAsync(
                 """
                 MATCH (c:GraphCommunity {
-                    projectId: $projectId,
+                    wingmanProjectId: $projectId,
                     graphVersion: $graphVersion
                 })
                 DELETE c
@@ -1343,6 +896,9 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         string projectId,
         CancellationToken cancellationToken)
     {
+        var retainedVersions = (await _manifests.ListSuccessfulAsync(projectId, cancellationToken))
+            .Select(item => item.Version)
+            .ToArray();
         await using var session = OpenWriteSession();
         while (true)
         {
@@ -1351,16 +907,13 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             {
                 var cursor = await transaction.RunAsync(
                     $$"""
-                    MATCH (p:ProjectGraph {projectId: $projectId})
-                    MATCH (n:GraphEntity {projectId: $projectId})
-                    WHERE n.graphVersion <> p.activeManifestVersion
-                      AND (p.previousManifestVersion IS NULL
-                           OR n.graphVersion <> p.previousManifestVersion)
+                    MATCH (n:GraphEntity {wingmanProjectId: $projectId})
+                    WHERE NOT n.graphVersion IN $retainedVersions
                     WITH n LIMIT {{CleanupBatchSize}}
                     DETACH DELETE n
                     RETURN count(*) AS deleted
                     """,
-                    new { projectId });
+                    new { projectId, retainedVersions });
                 return (await cursor.SingleAsync())["deleted"].As<int>();
             });
             if (deleted == 0) break;
@@ -1369,14 +922,11 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         {
             var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                MATCH (c:GraphCommunity {projectId: $projectId})
-                WHERE c.graphVersion <> p.activeManifestVersion
-                  AND (p.previousManifestVersion IS NULL
-                       OR c.graphVersion <> p.previousManifestVersion)
+                MATCH (c:GraphCommunity {wingmanProjectId: $projectId})
+                WHERE NOT c.graphVersion IN $retainedVersions
                 DELETE c
                 """,
-                new { projectId });
+                new { projectId, retainedVersions });
             await cursor.ConsumeAsync();
         });
     }
@@ -1395,16 +945,17 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         if (_driver is null) return [];
         if (direction is not ("in" or "out"))
             throw new ArgumentException("方向查詢只允許 in 或 out。", nameof(direction));
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null) return [];
 
         var cypher = direction == "in"
             ? """
-              MATCH (p:ProjectGraph {projectId: $projectId})
               MATCH (neighbor:GraphEntity {
-                  projectId: $projectId,
-                  graphVersion: p.activeManifestVersion
+                  wingmanProjectId: $projectId,
+                  graphVersion: $graphVersion
               })-[relationship]->(center:GraphEntity {
-                  projectId: $projectId,
-                  graphVersion: p.activeManifestVersion,
+                  wingmanProjectId: $projectId,
+                  graphVersion: $graphVersion,
                   id: $nodeId
               })
               RETURN neighbor, relationship,
@@ -1414,14 +965,13 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
               LIMIT $limit
               """
             : """
-              MATCH (p:ProjectGraph {projectId: $projectId})
               MATCH (center:GraphEntity {
-                  projectId: $projectId,
-                  graphVersion: p.activeManifestVersion,
+                  wingmanProjectId: $projectId,
+                  graphVersion: $graphVersion,
                   id: $nodeId
               })-[relationship]->(neighbor:GraphEntity {
-                  projectId: $projectId,
-                  graphVersion: p.activeManifestVersion
+                  wingmanProjectId: $projectId,
+                  graphVersion: $graphVersion
               })
               RETURN neighbor, relationship,
                      startNode(relationship).id AS sourceId,
@@ -1436,7 +986,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         {
             var cursor = await transaction.RunAsync(
                 cypher,
-                new { projectId, nodeId, limit });
+                new { projectId, graphVersion, nodeId, limit });
             var result = new List<GraphNeighbor>();
             while (await cursor.FetchAsync())
             {
@@ -1468,6 +1018,8 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         CancellationToken cancellationToken)
     {
         if (_driver is null) return new([], [], 0, 0, 0, false);
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null) return new([], [], 0, 0, 0, false);
 
         var centerIds = nodeIds
             .Where(value => !string.IsNullOrWhiteSpace(value))
@@ -1482,10 +1034,9 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             // 先從 active graph 的中心節點解析檔案路徑，禁止信任前端直接提供路徑。
             var fileCursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (center:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 WHERE center.id IN $centerIds
                   AND center.filePath IS NOT NULL
@@ -1493,7 +1044,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 RETURN DISTINCT center.filePath AS filePath
                 ORDER BY filePath
                 """,
-                new { projectId, centerIds });
+                new { projectId, graphVersion, centerIds });
             var filePaths = new List<string>();
             while (await fileCursor.FetchAsync())
                 filePaths.Add(fileCursor.Current["filePath"].As<string>());
@@ -1502,16 +1053,15 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             // 只有具備 filePath 的中心才會帶出同檔案的其他節點。
             var nodeCursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (node:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 WHERE node.id IN $centerIds OR
                       (size($filePaths) > 0 AND node.filePath IN $filePaths)
                 OPTIONAL MATCH (node)-[relationship]-(:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 WITH node, count(relationship) AS degree,
                     CASE WHEN node.id IN $centerIds THEN 0 ELSE 1 END AS centerPriority
@@ -1519,7 +1069,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                 LIMIT $limit
                 RETURN node, degree
                 """,
-                new { projectId, centerIds, filePaths, limit });
+                new { projectId, graphVersion, centerIds, filePaths, limit });
             var visualNodes = new List<GraphVisualNode>();
             while (await nodeCursor.FetchAsync())
             {
@@ -1534,13 +1084,12 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             {
                 var edgeCursor = await transaction.RunAsync(
                     """
-                    MATCH (p:ProjectGraph {projectId: $projectId})
                     MATCH (source:GraphEntity {
-                        projectId: $projectId,
-                        graphVersion: p.activeManifestVersion
+                        wingmanProjectId: $projectId,
+                        graphVersion: $graphVersion
                     })-[relationship]->(target:GraphEntity {
-                        projectId: $projectId,
-                        graphVersion: p.activeManifestVersion
+                        wingmanProjectId: $projectId,
+                        graphVersion: $graphVersion
                     })
                     WHERE source.id IN $ids AND target.id IN $ids
                     RETURN relationship, source.id AS sourceId, target.id AS targetId
@@ -1550,6 +1099,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                     new
                     {
                         projectId,
+                        graphVersion,
                         ids,
                         edgeLimit = Math.Min(limit * 4, 20_000),
                     });
@@ -1564,10 +1114,9 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
 
             var countCursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (node:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 WITH node,
                     CASE WHEN node.id IN $centerIds OR
@@ -1575,7 +1124,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                          THEN 1 ELSE 0 END AS eligible
                 RETURN count(node) AS total, sum(eligible) AS eligibleTotal
                 """,
-                new { projectId, centerIds, filePaths });
+                new { projectId, graphVersion, centerIds, filePaths });
             var counts = await countCursor.SingleAsync();
             var total = counts["total"].As<int>();
             var eligibleTotal = counts["eligibleTotal"].As<int>();
@@ -1595,25 +1144,26 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         CancellationToken cancellationToken)
     {
         if (_driver is null) return null;
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null) return null;
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         return await session.ExecuteReadAsync(async transaction =>
         {
             var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (node:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion,
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion,
                     id: $nodeId
                 })
                 OPTIONAL MATCH (node)-[relationship]-(:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 RETURN node, count(relationship) AS degree
                 """,
-                new { projectId, nodeId });
+                new { projectId, graphVersion, nodeId });
             return await cursor.FetchAsync()
                 ? MapVisualNode(
                     cursor.Current["node"].As<INode>(),
@@ -1658,7 +1208,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
 
     /// <summary>
     /// 驗證 UI 提供的 Cypher 僅能讀取同一個 active V4 graph。
-    /// 每一個 MATCH node pattern 都必須明確使用 GraphEntity、projectId 與 graphVersion，
+    /// 每一個 MATCH node pattern 都必須明確使用 GraphEntity、wingmanProjectId 與 graphVersion，
     /// 並強制使用服務端提供的 $limit，避免只在 client 停止讀取但資料庫仍執行無界查詢。
     /// </summary>
     /// <param name="cypher">使用者輸入的單一 read-only statement。</param>
@@ -1689,10 +1239,11 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             {
                 var node = nodePattern.Groups["node"].Value;
                 if (!node.Contains(":GraphEntity", StringComparison.Ordinal) ||
+                    !node.Contains("wingmanProjectId", StringComparison.Ordinal) ||
                     !node.Contains("$projectId", StringComparison.Ordinal) ||
                     !node.Contains("$graphVersion", StringComparison.Ordinal))
                     throw new InvalidOperationException(
-                        "每個 MATCH node 都必須使用 :GraphEntity，並以 $projectId、$graphVersion 限制 active graph。");
+                        "每個 MATCH node 都必須使用 :GraphEntity，並以 wingmanProjectId=$projectId、graphVersion=$graphVersion 限制 active graph。");
             }
         }
         return cypher;
@@ -1751,8 +1302,11 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         INode node => new Dictionary<string, object?>
         {
             ["id"] = StringProperty(node.Properties, "id"),
-            ["kind"] = StringProperty(node.Properties, "kind"),
+            ["kind"] = node.Labels.FirstOrDefault(label =>
+                !label.Equals("GraphEntity", StringComparison.Ordinal)),
             ["role"] = StringProperty(node.Properties, "role"),
+            ["rawKind"] = StringProperty(node.Properties, "kind"),
+            ["rawRole"] = StringProperty(node.Properties, "role"),
             ["name"] = StringProperty(node.Properties, "name"),
             ["filePath"] = StringProperty(node.Properties, "filePath"),
         },
@@ -1788,12 +1342,15 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             node.Kind.ToString(),
             node.Kind.ToString(),
             DisplayName(node),
-            AuthorityStringProperty(node.Properties, "source_file")
+            AuthorityStringProperty(node.Properties, "filePath")
+                ?? AuthorityStringProperty(node.Properties, "source_file")
                 ?? AuthorityStringProperty(node.Properties, "file_path"),
-            AuthorityIntProperty(node.Properties, "source_line")
+            AuthorityIntProperty(node.Properties, "startLine")
+                ?? AuthorityIntProperty(node.Properties, "source_line")
                 ?? AuthorityIntProperty(node.Properties, "start_line"),
-            AuthorityIntProperty(node.Properties, "end_line"),
-            AuthorityLanguage(node.Kind),
+            AuthorityIntProperty(node.Properties, "endLine")
+                ?? AuthorityIntProperty(node.Properties, "end_line"),
+            AuthorityStringProperty(node.Properties, "language") ?? string.Empty,
             degree,
             node.Properties);
 
@@ -1808,22 +1365,26 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             edge.SourceKey,
             edge.TargetKey,
             RelationshipType(edge.Kind),
-            new Dictionary<string, object?>
-            {
-                ["evidence"] = edge.Evidence,
-                ["properties"] = edge.Properties,
-            });
+            edge.Properties);
     }
 
     /// <summary>由 :GraphEntity envelope 還原未經簡化的 authority node。</summary>
     private static AuthorityGraphNode MapNode(INode node)
     {
         var properties = node.Properties;
+        var kindLabel = node.Labels.FirstOrDefault(label =>
+            !label.Equals("GraphEntity", StringComparison.Ordinal))
+            ?? throw new InvalidOperationException("GraphEntity 缺少 ParallelExtractor 原始 label。");
         return new AuthorityGraphNode(
             RequiredString(properties, "id"),
-            Enum.Parse<AuthorityGraphNodeKind>(RequiredString(properties, "kind"), ignoreCase: false),
-            DeserializeAuthorityProperties(StringProperty(properties, "propertiesJson")));
+            ParseNodeKind(kindLabel),
+            ExtractDomainProperties(properties, NodeEnvelopeProperties));
     }
+
+    private static AuthorityGraphNodeKind ParseNodeKind(string value) =>
+        AuthorityGraphSchema.TryParseNodeLabel(value, out var kind)
+            ? kind
+            : throw new InvalidOperationException($"Neo4j 出現未允許的 ParallelExtractor label：{value}。");
 
     /// <summary>由 Neo4j relationship 還原 authority relationship 與完整 evidence。</summary>
     private static AuthorityGraphRelationship MapEdge(
@@ -1834,14 +1395,11 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         var properties = relationship.Properties;
         var kind = ParseRelationshipType(relationship.Type);
         return new AuthorityGraphRelationship(
-            RequiredString(properties, "id"),
+            AuthorityGraphRelationship.Create(kind, sourceId, targetId).Id,
             sourceId,
             targetId,
             kind,
-            JsonSerializer.Deserialize<AuthorityGraphEvidence>(
-                RequiredString(properties, "evidenceJson"), JsonOptions)
-                ?? throw new InvalidOperationException("Neo4j authority relationship evidenceJson 無效。"),
-            DeserializeAuthorityProperties(StringProperty(properties, "propertiesJson")));
+            ExtractDomainProperties(properties, RelationshipEnvelopeProperties));
     }
 
     private static string RelationshipType(AuthorityGraphRelationshipKind kind) =>
@@ -1896,46 +1454,16 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         return node.Key;
     }
 
-    /// <summary>把穩定 key、kind 與可讀 scalar properties 組成 BM25 文字，不加入大型 XML／原始碼。</summary>
-    private static string SearchableText(AuthorityGraphNode node)
-    {
-        var values = new List<string> { node.Key, node.Kind.ToString(), DisplayName(node) };
-        foreach (var (key, value) in node.Properties)
-        {
-            if (key.Contains("xml", StringComparison.OrdinalIgnoreCase) ||
-                key.Contains("source_text", StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (value is string text && text.Length <= 1_000)
-                values.Add(text);
-            else if (value is Enum or Guid or int or long or bool)
-                values.Add(value.ToString()!);
-        }
-
-        return string.Join(' ', values.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal));
-    }
-
-    /// <summary>以 authority node kind 提供 UI 使用的語言提示，不改變 graph schema。</summary>
-    private static string AuthorityLanguage(AuthorityGraphNodeKind kind) => kind switch
-    {
-        AuthorityGraphNodeKind.SourceFile or AuthorityGraphNodeKind.CodeType
-            or AuthorityGraphNodeKind.CodeMethod or AuthorityGraphNodeKind.CodeChunk
-            or AuthorityGraphNodeKind.CodeClass or AuthorityGraphNodeKind.WebAction => "csharp",
-        AuthorityGraphNodeKind.ClientScript or AuthorityGraphNodeKind.ReactEntry => "javascript",
-        AuthorityGraphNodeKind.ViewPage => "view",
-        AuthorityGraphNodeKind.DatabaseObject or AuthorityGraphNodeKind.CustomReportDataSource
-            or AuthorityGraphNodeKind.CustomParameterDataSource => "sql",
-        _ => "business",
-    };
-
-    /// <summary>只把 Neo4j 原生支援的 scalar／scalar array 直接投影，完整資料仍保留於 propertiesJson。</summary>
+    /// <summary>
+    /// 只把 Neo4j 原生支援的 scalar／scalar array 直接投影，並原名保留
+    /// ParallelExtractor 的屬性；Modern Wingman 不額外建立相容欄位。
+    /// </summary>
     private static IReadOnlyDictionary<string, object?> ToNeo4jProperties(
         IReadOnlyDictionary<string, object?> properties)
     {
         var reserved = new HashSet<string>(
         [
-            "projectId", "graphVersion", "id", "kind", "role", "name", "searchableText",
-            "language", "filePath", "startLine", "endLine", "degree", "propertiesJson",
-            "evidenceJson",
+            "wingmanProjectId", "graphVersion", "id",
         ], StringComparer.Ordinal);
         var result = new Dictionary<string, object?>(StringComparer.Ordinal);
         foreach (var (key, value) in properties)
@@ -1972,6 +1500,19 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         }
         return null;
     }
+
+    private static readonly HashSet<string> NodeEnvelopeProperties =
+        new(["wingmanProjectId", "graphVersion", "id"], StringComparer.Ordinal);
+
+    private static readonly HashSet<string> RelationshipEnvelopeProperties =
+        new(StringComparer.Ordinal);
+
+    private static IReadOnlyDictionary<string, object?> ExtractDomainProperties(
+        IReadOnlyDictionary<string, object> properties,
+        IReadOnlySet<string> envelope) =>
+        properties
+            .Where(pair => !envelope.Contains(pair.Key))
+            .ToDictionary(pair => pair.Key, pair => (object?)pair.Value, StringComparer.Ordinal);
 
     /// <summary>由 JSON 還原 authority properties；JSON element 保留精確的 primitive 值。</summary>
     private static IReadOnlyDictionary<string, object?> DeserializeAuthorityProperties(string? json) =>
@@ -2082,13 +1623,10 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         "kind",
         "role",
         "name",
-        "searchableText",
         "language",
         "filePath",
         "startLine",
         "endLine",
         "degree",
-        "propertiesJson",
-        "evidenceJson",
     ];
 }

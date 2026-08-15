@@ -12,6 +12,7 @@ namespace AgentService.Infrastructure.Orchestration;
 public sealed class ProjectConversationPreparationService(
     GraphRetrievalService graphRetrieval,
     IGraphStore graphStore,
+    IProjectIndexManifestStore manifests,
     ILogger<ProjectConversationPreparationService> logger,
     ProjectEvidenceOptions? options = null)
 {
@@ -103,7 +104,8 @@ public sealed class ProjectConversationPreparationService(
                 project.RootPath,
                 graphStore,
                 activity,
-                graphContext.Version)
+                graphContext.Version,
+                manifests)
             .CreateTools(graphToolsAvailable);
 
         return new ConversationPreparation(

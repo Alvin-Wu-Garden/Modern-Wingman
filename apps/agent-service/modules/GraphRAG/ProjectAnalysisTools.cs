@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Security.Cryptography;
 using System.Text.Json;
 using AgentService.Application.Contracts;
 using Microsoft.CodeAnalysis;
@@ -41,6 +42,7 @@ public sealed class ProjectAnalysisTools
     private readonly string _rootPath;
     private readonly string _rootPrefix;
     private readonly IGraphStore _graphStore;
+    private readonly IProjectIndexManifestStore? _manifests;
     // 每個專案解析回合固定使用同一個 immutable snapshot，避免索引發布中途
     // 讓 search 與 trace 分別讀到不同 Graph 版本；一般舊呼叫可保留 null，
     // 由 Graph Store 退回 active 版本。
@@ -64,7 +66,8 @@ public sealed class ProjectAnalysisTools
         string rootPath,
         IGraphStore graphStore,
         AgentActivityReporter? activity = null,
-        string? graphVersion = null)
+        string? graphVersion = null,
+        IProjectIndexManifestStore? manifests = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
@@ -76,18 +79,8 @@ public sealed class ProjectAnalysisTools
         _rootPrefix = _rootPath + Path.DirectorySeparatorChar;
         _graphStore = graphStore;
         _graphVersion = string.IsNullOrWhiteSpace(graphVersion) ? null : graphVersion;
+        _manifests = manifests;
         _activity = activity;
-    }
-
-    /// <summary>
-    /// 由檔案 watcher 通知工具快取某一個檔案已失效。
-    /// 只移除受影響的目錄清單與檔案內容，不觸發任何全專案重新掃描。
-    /// </summary>
-    public static void InvalidateFileCatalog(string changedPath)
-    {
-        // watcher 事件可能同時影響目錄清單、文字倒排索引及 Roslyn 符號索引；
-        // 統一移除該專案的 immutable snapshot，下一次查詢會重新建立一致版本。
-        ProjectSourceIndex.InvalidateForPath(changedPath);
     }
 
     /// <summary>
@@ -527,14 +520,18 @@ public sealed class ProjectAnalysisTools
                         continue;
 
                     var relationship = neighbor.Relationship;
+                    var evidenceFile = GetRelationshipText(relationship, "sourceFile")
+                        ?? GetRelationshipText(relationship, "filePath");
+                    var evidenceLine = GetRelationshipInt(relationship, "sourceLine")
+                        ?? GetRelationshipInt(relationship, "line");
                     var step = new GraphPathStepToolItem(
                         relationship.SourceKey,
                         relationship.Kind.ToString(),
                         relationship.TargetKey,
                         neighbor.Direction,
-                        relationship.Evidence.SourceKind.ToString(),
-                        relationship.Evidence.SourceFile,
-                        relationship.Evidence.SourceLine);
+                        "ParallelExtractor",
+                        evidenceFile,
+                        evidenceLine);
                     var nextSteps = current.Steps.Append(step).ToList();
                     paths.Add(new GraphPathToolItem(
                         nodeId,
@@ -542,8 +539,8 @@ public sealed class ProjectAnalysisTools
                         neighbor.Node.Kind.ToString(),
                         GetNodeText(neighbor.Node, "role") ?? neighbor.Node.Kind.ToString(),
                         GetNodeText(neighbor.Node, "name") ?? neighbor.Node.Key,
-                        GetNodeFilePath(neighbor.Node) ?? relationship.Evidence.SourceFile,
-                        GetNodeLine(neighbor.Node) ?? relationship.Evidence.SourceLine,
+                        GetNodeFilePath(neighbor.Node) ?? evidenceFile,
+                        GetNodeLine(neighbor.Node) ?? evidenceLine,
                         nextSteps));
 
                     if (current.Depth + 1 < maxDepth)
@@ -586,10 +583,14 @@ public sealed class ProjectAnalysisTools
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
+        var expectedFiles = await GetVerifiedSnapshotAsync(cancellationToken);
         query = query.Trim();
         maxResults = Math.Clamp(maxResults, 1, MaximumTextSearchResults);
         var normalizedExtension = NormalizeExtension(extension);
-        var index = await ProjectSourceIndex.GetOrCreateAsync(_rootPath, cancellationToken)
+        var index = await ProjectSourceIndex.GetOrCreateAsync(
+                _rootPath,
+                expectedFiles,
+                cancellationToken)
             .ConfigureAwait(false);
         var search = index.SearchText(query, normalizedExtension, maxResults, cancellationToken);
         var matches = search.Matches
@@ -622,6 +623,7 @@ public sealed class ProjectAnalysisTools
         CancellationToken cancellationToken = default)
     {
         var fullPath = ResolveProjectFile(filePath);
+        await VerifyFileAgainstSnapshotAsync(fullPath, cancellationToken);
         startLine = Math.Max(1, startLine);
         lineCount = Math.Clamp(lineCount, 1, MaximumReadLines);
 
@@ -696,13 +698,17 @@ public sealed class ProjectAnalysisTools
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        var expectedFiles = await GetVerifiedSnapshotAsync(cancellationToken);
         symbol = symbol.Trim();
         maxResults = Math.Clamp(maxResults, 1, 100);
         var identifier = symbol.Split('.', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
         if (string.IsNullOrWhiteSpace(identifier) ||
             !Microsoft.CodeAnalysis.CSharp.SyntaxFacts.IsValidIdentifier(identifier))
             throw new ArgumentException("symbol 必須包含有效的 C# identifier。", nameof(symbol));
-        var index = await ProjectSourceIndex.GetOrCreateAsync(_rootPath, cancellationToken)
+        var index = await ProjectSourceIndex.GetOrCreateAsync(
+                _rootPath,
+                expectedFiles,
+                cancellationToken)
             .ConfigureAwait(false);
         var search = await index.SearchSymbolsAsync(
             symbol,
@@ -741,6 +747,59 @@ public sealed class ProjectAnalysisTools
         if (!File.Exists(fullPath))
             throw new FileNotFoundException("找不到指定的專案檔案。", filePath);
         return fullPath;
+    }
+
+    private async Task<IReadOnlyDictionary<string, string>?> GetVerifiedSnapshotAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_manifests is null || string.IsNullOrWhiteSpace(_graphVersion)) return null;
+        var files = await _manifests.GetFileSnapshotAsync(
+            _projectId,
+            _graphVersion,
+            cancellationToken);
+        if (files.Count == 0)
+            throw new InvalidOperationException("目前圖譜版本沒有檔案清單，請先重新索引。 ");
+        var expected = files.ToDictionary(
+            file => file.RelativePath.Replace('\\', '/'),
+            file => file.ContentHash,
+            StringComparer.OrdinalIgnoreCase);
+        return expected;
+    }
+
+    private async Task VerifyFileAgainstSnapshotAsync(
+        string fullPath,
+        CancellationToken cancellationToken)
+    {
+        if (_manifests is null || string.IsNullOrWhiteSpace(_graphVersion)) return;
+        var relativePath = ToRelativePath(fullPath);
+        var files = await _manifests.GetFileSnapshotAsync(
+            _projectId,
+            _graphVersion,
+            cancellationToken);
+        var expected = files.FirstOrDefault(file =>
+            file.RelativePath.Equals(relativePath, StringComparison.OrdinalIgnoreCase));
+        if (expected is null)
+            throw new InvalidOperationException("檔案不屬於目前圖譜版本，請重新索引。 ");
+        await VerifyFileHashAsync(relativePath, expected.ContentHash, cancellationToken);
+    }
+
+    private async Task VerifyFileHashAsync(
+        string relativePath,
+        string expectedHash,
+        CancellationToken cancellationToken)
+    {
+        var fullPath = ResolveProjectFile(relativePath);
+        await using var stream = new FileStream(
+            fullPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var actual = Convert.ToHexStringLower(
+            await SHA256.HashDataAsync(stream, cancellationToken));
+        if (!actual.Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"檔案已在索引後變更：{relativePath}；請重新索引。 ");
     }
 
     private string ToRelativePath(string fullPath) =>
@@ -905,6 +964,19 @@ public sealed class ProjectAnalysisTools
         }
         return null;
     }
+
+    private static string? GetRelationshipText(
+        FblAuthority.GraphRelationship relationship,
+        string key) =>
+        relationship.Properties.TryGetValue(key, out var value) ? value?.ToString() : null;
+
+    private static int? GetRelationshipInt(
+        FblAuthority.GraphRelationship relationship,
+        string key) =>
+        relationship.Properties.TryGetValue(key, out var value) && value is not null &&
+        int.TryParse(value.ToString(), out var parsed)
+            ? parsed
+            : null;
 
     /// <summary>讀取語意節點的結束行；未提供時使用開始行。</summary>
     private static int? GetNodeEndLine(FblAuthority.GraphNode node)

@@ -17,7 +17,8 @@ public sealed class ProjectRecord
     public int NodeCount { get; set; }
     public int EdgeCount { get; set; }
     public string? IndexManifestVersion { get; set; }
-    public int PendingFileCount { get; set; }
+    public string? SelectedSolutionPath { get; set; }
+    public bool GraphStorageMigrated { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
 
@@ -59,15 +60,32 @@ public sealed class ProjectRepository(IDbContextFactory<AppDbContext> dbFactory)
         record.NodeCount = project.NodeCount;
         record.EdgeCount = project.EdgeCount;
         record.IndexManifestVersion = project.IndexManifestVersion;
-        record.PendingFileCount = project.PendingFileCount;
-
+        record.SelectedSolutionPath = project.SelectedSolutionPath;
+        record.GraphStorageMigrated = project.GraphStorageMigrated;
         await db.SaveChangesAsync(ct);
     }
 
     public async Task DeleteAsync(string projectId, CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        // 不依賴歷史資料庫是否正確開啟 foreign_keys；明確清除全部專案附屬資料。
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM Messages WHERE ConversationId IN (SELECT Id FROM Conversations WHERE ProjectId = {projectId})", ct);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM Conversations WHERE ProjectId = {projectId}", ct);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM jira_analysis_runs WHERE WingmanProjectId = {projectId}", ct);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM project_index_files WHERE ProjectId = {projectId}", ct);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM project_index_manifests WHERE ProjectId = {projectId}", ct);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM project_database_configurations WHERE ProjectId = {projectId}", ct);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM project_vcs_bindings WHERE ProjectId = {projectId}", ct);
         await db.Projects.Where(p => p.Id == projectId).ExecuteDeleteAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     private static ProjectEntity ToEntity(ProjectRecord r) => new()
@@ -77,13 +95,17 @@ public sealed class ProjectRepository(IDbContextFactory<AppDbContext> dbFactory)
         RootPath = r.RootPath,
         Languages = r.Languages,
         IndexStatus = Enum.TryParse<ProjectIndexStatus>(r.IndexStatus, out var s)
-            ? s : ProjectIndexStatus.NotIndexed,
+            ? s
+            : r.IndexStatus.Equals("PendingChanges", StringComparison.Ordinal)
+                ? ProjectIndexStatus.Stale
+                : ProjectIndexStatus.NotIndexed,
         IndexedAt = r.IndexedAt,
         IndexError = r.IndexError,
         NodeCount = r.NodeCount,
         EdgeCount = r.EdgeCount,
         IndexManifestVersion = r.IndexManifestVersion,
-        PendingFileCount = r.PendingFileCount,
+        SelectedSolutionPath = r.SelectedSolutionPath,
+        GraphStorageMigrated = r.GraphStorageMigrated,
         CreatedAt = r.CreatedAt,
     };
 }

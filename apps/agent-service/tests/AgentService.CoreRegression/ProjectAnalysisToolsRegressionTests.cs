@@ -58,7 +58,7 @@ public sealed class ProjectAnalysisToolsRegressionTests
     }
 
     [Fact]
-    public async Task SearchTextAsync_共用倒排索引且watcher失效後可看見新內容()
+    public async Task SearchTextAsync_共用倒排索引並縮小掃描檔案數()
     {
         var root = CreateTestRoot();
         try
@@ -85,17 +85,6 @@ public sealed class ProjectAnalysisToolsRegressionTests
             // 三字元倒排索引應把逐行掃描縮小到實際命中的檔案。
             Assert.Equal(1, first.FilesScanned);
 
-            await File.WriteAllTextAsync(
-                target,
-                "public sealed class BondTradeController { string FreshMarker = \"fresh-marker\"; }\n");
-            ProjectAnalysisTools.InvalidateFileCatalog(target);
-
-            var second = await tools.SearchTextAsync(
-                "fresh-marker",
-                ".cs",
-                10);
-            Assert.Single(second.Matches);
-            Assert.Equal("Controllers/BondTradeController.cs", second.Matches[0].FilePath);
         }
         finally
         {
@@ -290,11 +279,11 @@ public sealed class ProjectAnalysisToolsRegressionTests
     public async Task SearchSeedCandidatesAsync_精準名稱應優先於高分泛用節點()
     {
         var exact = GraphNode.Create(
-            GraphNodeKind.CodeClass,
+            GraphNodeKind.Type,
             "class:BondTradeController",
             new Dictionary<string, object?> { ["name"] = "BondTradeController" });
         var generic = GraphNode.Create(
-            GraphNodeKind.CodeClass,
+            GraphNodeKind.Type,
             "class:GenericTradeController",
             new Dictionary<string, object?> { ["name"] = "GenericTradeController" });
         var store = DispatchProxy.Create<IGraphStore, SearchGraphStoreProxy>();
@@ -354,11 +343,11 @@ public sealed class ProjectAnalysisToolsRegressionTests
         try
         {
             var generic = GraphNode.Create(
-                GraphNodeKind.CodeClass,
+                GraphNodeKind.Type,
                 "class:GenericTradeController",
                 new Dictionary<string, object?> { ["name"] = "GenericTradeController" });
             var exact = GraphNode.Create(
-                GraphNodeKind.CodeClass,
+                GraphNodeKind.Type,
                 "class:BondTradeController",
                 new Dictionary<string, object?> { ["name"] = "BondTradeController" });
             var store = DispatchProxy.Create<IGraphStore, SearchGraphStoreProxy>();

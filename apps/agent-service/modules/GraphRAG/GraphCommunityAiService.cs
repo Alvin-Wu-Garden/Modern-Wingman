@@ -1,4 +1,5 @@
 using AgentService.Application.Contracts;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 
 namespace AgentService.Modules.GraphRAG;
@@ -11,9 +12,11 @@ public sealed class GraphCommunityAiService(
     IGraphStore store,
     IGraphCommunitySummaryQueue queue,
     ILlmCompletionService llm,
+    IModelProviderService providers,
     ILogger<GraphCommunityAiService> logger)
 {
     private const int MaximumMemberIdsInPrompt = 80;
+    private const int MaximumPrewarmedCommunities = 3;
 
     /// <summary>取得 Progress API 要回傳的目前版本統計。</summary>
     public GraphCommunitySummaryProgress GetProgress(string projectId) =>
@@ -33,8 +36,7 @@ public sealed class GraphCommunityAiService(
     {
         queue.ActivateGraphVersion(projectId, graphVersion, true);
         var reports = await store.ListCommunityTemplatesAsync(projectId, cancellationToken);
-        foreach (var report in reports.Where(report =>
-                     string.Equals(report.Tier, "C0", StringComparison.Ordinal)))
+        foreach (var report in SelectPrewarmCandidates(reports))
             await TryEnqueueSafelyAsync(projectId, graphVersion, report, cancellationToken);
     }
 
@@ -66,15 +68,25 @@ public sealed class GraphCommunityAiService(
     {
         var reports = await store.ListCommunityTemplatesAsync(projectId, cancellationToken);
         queue.RestoreGraphVersion(projectId, graphVersion, true, reports);
-        foreach (var report in reports.Where(report =>
-                     report.Tier == "C0" ||
-                     report.SummaryState is
-                         GraphCommunitySummaryStates.Queued or
-                         GraphCommunitySummaryStates.Running ||
-                     (report.SummaryState == GraphCommunitySummaryStates.Failed &&
-                      report.RetryCount < 2)))
+        foreach (var report in SelectPrewarmCandidates(reports))
             await TryEnqueueSafelyAsync(projectId, graphVersion, report, cancellationToken);
     }
+
+    /// <summary>
+    /// 每版只預熱節點數最多的三個 C0。先前已排程或可重試者也必須位於這三個之內，
+    /// 避免 Host 重啟後把所有 deterministic community 一次塞入 AI 佇列。
+    /// </summary>
+    internal static IReadOnlyList<GraphCommunityReportV4> SelectPrewarmCandidates(
+        IEnumerable<GraphCommunityReportV4> reports) =>
+        reports
+            .Where(report => string.Equals(report.Tier, "C0", StringComparison.Ordinal))
+            .OrderByDescending(report => report.MemberCount)
+            .ThenBy(report => report.CommunityId, StringComparer.Ordinal)
+            .Take(MaximumPrewarmedCommunities)
+            .Where(report =>
+                report.SummaryState != GraphCommunitySummaryStates.AiReady &&
+                !(report.SummaryState == GraphCommunitySummaryStates.Failed && report.RetryCount >= 2))
+            .ToArray();
 
     /// <summary>
     /// 將單一 Community 的 CAS 或 bounded queue 失敗隔離在背景摘要層。
@@ -139,7 +151,7 @@ public sealed class GraphCommunityAiService(
             return;
 
         var executionCount = 0;
-        queue.TryEnqueue(new GraphCommunitySummaryJob(
+        var enqueued = queue.TryEnqueue(new GraphCommunitySummaryJob(
             projectId,
             graphVersion,
             report.CommunityId,
@@ -160,15 +172,20 @@ public sealed class GraphCommunityAiService(
                     GraphCommunitySummaryStates.Running,
                     executionRetryCount,
                     token);
-                var summary = await llm.CompleteAsync(BuildPrompt(report), token);
-                if (string.IsNullOrWhiteSpace(summary))
-                    throw new InvalidOperationException("模型回傳空白 Community 摘要。");
-                var updated = await store.TryUpdateCommunitySummaryAsync(
+                var profile = await providers.GetProfileAsync(null, token);
+                var response = await llm.CompleteAsync(
+                    BuildPrompt(report),
+                    profile.Id,
+                    profile.ModelId,
+                    token);
+                var generated = ParseGeneratedText(response);
+                var updated = await store.TryUpdateCommunityTextAsync(
                     projectId,
                     graphVersion,
                     report.CommunityId,
                     report.CacheKey,
-                    summary.Trim(),
+                    generated.Title,
+                    generated.Summary,
                     GraphCommunitySummaryStates.AiReady,
                     executionRetryCount,
                     token);
@@ -191,13 +208,27 @@ public sealed class GraphCommunityAiService(
                     retryCount,
                     token);
             }));
+        if (!enqueued)
+        {
+            // CAS 已先標成 queued；若有界佇列拒收，必須還原 template，否則 UI 會
+            // 永久顯示背景工作中，而 Host 重啟也會把不存在的工作誤判為待恢復。
+            await store.TryUpdateCommunitySummaryAsync(
+                projectId,
+                graphVersion,
+                report.CommunityId,
+                report.CacheKey,
+                report.Summary,
+                GraphCommunitySummaryStates.Template,
+                report.RetryCount,
+                cancellationToken);
+        }
     }
 
     /// <summary>建立只允許改寫既有事實的有界繁體中文摘要 Prompt。</summary>
     private static string BuildPrompt(GraphCommunityReportV4 report) =>
         $"""
         你是熟悉大型投資交易與風控系統的資深架構師。
-        請只根據下列 deterministic Graph template，改寫成 2 到 4 句繁體中文。
+        請只根據下列 deterministic Graph template，產生繁體中文標題與 2 到 4 句摘要。
         說明功能入口、主要程式責任與資料依賴；不得新增未提供的類別、資料表或流程。
 
         Tier：{report.Tier}
@@ -208,6 +239,27 @@ public sealed class GraphCommunityAiService(
         成員 ID：
         {string.Join('\n', report.MemberIds.Take(MaximumMemberIdsInPrompt))}
 
-        只輸出摘要，不要標題或前後綴。
+        只輸出具有 title 與 summary 兩個字串欄位的 JSON，不要 Markdown 或前後綴。
         """;
+
+    private static GraphCommunityGeneratedText ParseGeneratedText(string response)
+    {
+        if (string.IsNullOrWhiteSpace(response))
+            throw new InvalidOperationException("模型回傳空白 Community 標題與摘要。");
+        var text = response.Trim();
+        if (text.StartsWith("```", StringComparison.Ordinal))
+        {
+            var firstLine = text.IndexOf('\n');
+            var lastFence = text.LastIndexOf("```", StringComparison.Ordinal);
+            if (firstLine >= 0 && lastFence > firstLine)
+                text = text[(firstLine + 1)..lastFence].Trim();
+        }
+        var value = JsonSerializer.Deserialize<GraphCommunityGeneratedText>(
+            text,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (value is null || string.IsNullOrWhiteSpace(value.Title) ||
+            string.IsNullOrWhiteSpace(value.Summary))
+            throw new InvalidOperationException("模型未回傳有效的 Community 標題與摘要 JSON。");
+        return new GraphCommunityGeneratedText(value.Title.Trim(), value.Summary.Trim());
+    }
 }

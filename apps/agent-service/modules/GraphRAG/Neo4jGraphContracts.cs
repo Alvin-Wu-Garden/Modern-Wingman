@@ -274,28 +274,28 @@ public sealed record GraphVisualSchema(
         new(
             "entrypoints",
             "入口與功能鏈",
-            "MATCH path=(n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})-[r*1..4]->(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "MATCH path=(n:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion})-[r*1..4]->(m:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion})\n" +
             "RETURN path LIMIT $limit",
             "manual"),
         new(
             "high-degree",
             "高連結節點",
-            "MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "MATCH (n:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion})\n" +
             "OPTIONAL MATCH (n)-[r]-()\n" +
             "RETURN n, count(r) AS degree ORDER BY degree DESC LIMIT $limit",
             "manual"),
         new(
             "selected-node",
             "選取節點的一階關係",
-            "MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion, id: '{{nodeId}}'})\n" +
-            "OPTIONAL MATCH (n)-[r]-(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "MATCH (n:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion, id: '{{nodeId}}'})\n" +
+            "OPTIONAL MATCH (n)-[r]-(m:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion})\n" +
             "RETURN n, r, m LIMIT $limit",
             "node"),
         new(
             "selected-edge",
             "選取關係的兩端",
-            "MATCH (source:GraphEntity {projectId: $projectId, graphVersion: $graphVersion, id: '{{sourceId}}'})\n" +
-            "-[relationship]->(target:GraphEntity {projectId: $projectId, graphVersion: $graphVersion, id: '{{targetId}}'})\n" +
+            "MATCH (source:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion, id: '{{sourceId}}'})\n" +
+            "-[relationship]->(target:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion, id: '{{targetId}}'})\n" +
             "WHERE type(relationship) = '{{edgeType}}'\n" +
             "RETURN source, relationship, target LIMIT $limit",
             "edge"),
@@ -353,6 +353,14 @@ public interface IGraphStore
     Task PublishAsync(FblGraphSnapshot snapshot, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Neo4j active 與本機 manifest／Project 都完成後，才移除 previous 指標並清理舊版。
+    /// 非 Neo4j store 不需處理版本清理。
+    /// </summary>
+    Task FinalizePublishedVersionAsync(
+        string projectId,
+        CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    /// <summary>
     /// 發布後續步驟失敗時，將 active anchor 恢復到發布前版本並清理候選版本。
     /// 非 Neo4j 測試 store 可使用預設空實作。
     /// </summary>
@@ -361,6 +369,19 @@ public interface IGraphStore
         string publishedVersion,
         string? previousVersion,
         CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    /// <summary>切換歷史版本前，確認 Neo4j 節點與關係仍符合成功 manifest。</summary>
+    Task<GraphVersionValidation> ValidateVersionAsync(
+        string projectId,
+        string graphVersion,
+        int? expectedNodes = null,
+        int? expectedEdges = null,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(new GraphVersionValidation(
+            true,
+            expectedNodes ?? 0,
+            expectedEdges ?? 0,
+            []));
 
     /// <summary>取得專案目前 active manifest；圖譜不一致或尚未發布時回傳 null。</summary>
     Task<string?> GetActiveManifestAsync(
@@ -542,15 +563,25 @@ public interface IGraphStore
         CancellationToken cancellationToken = default) =>
         Task.FromResult(false);
 
-    /// <summary>
-    /// GDS 可用時以加權 Leiden 偵測 secondary community member groups；
-    /// 未安裝 GDS 時回傳 null，呼叫端必須使用 deterministic fallback。
-    /// 預設實作讓測試／非 Neo4j store 明確表示不提供 GDS，而不必模擬外掛。
-    /// </summary>
-    Task<IReadOnlyList<IReadOnlyList<string>>?> TryDetectLeidenCommunitiesAsync(
+    Task<bool> TryUpdateCommunityTextAsync(
         string projectId,
+        string graphVersion,
+        string communityId,
+        string expectedCacheKey,
+        string title,
+        string summary,
+        string summaryState,
+        int retryCount,
         CancellationToken cancellationToken = default) =>
-        Task.FromResult<IReadOnlyList<IReadOnlyList<string>>?>(null);
+        TryUpdateCommunitySummaryAsync(
+            projectId,
+            graphVersion,
+            communityId,
+            expectedCacheKey,
+            summary,
+            summaryState,
+            retryCount,
+            cancellationToken);
 
     /// <summary>取得 active graph 的可視化初始子圖。</summary>
     Task<GraphVisualData> GetVisualGraphAsync(

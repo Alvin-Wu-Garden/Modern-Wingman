@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -12,8 +13,7 @@ namespace AgentService.Modules.GraphRAG;
 ///
 /// 索引在同一個專案根目錄的多次工具呼叫之間共用：文字搜尋使用三字元倒排索引
 /// 先縮小候選檔案，C# 符號搜尋則重用每個檔案建立過的 Roslyn 語法資料，避免每次
-/// Agent 呼叫都重新讀取全部檔案及逐行掃描。索引有記憶體上限，且可由檔案 watcher
-/// 透過 <see cref="InvalidateForPath"/> 失效。
+/// Agent 呼叫都重新讀取全部檔案及逐行掃描。索引有記憶體上限，並只在工具查詢時惰性建立。
 /// </summary>
 internal sealed class ProjectSourceIndex
 {
@@ -42,6 +42,7 @@ internal sealed class ProjectSourceIndex
     private readonly IReadOnlyList<IndexedFile> _files;
     private readonly IReadOnlyDictionary<string, int> _fileNumbers;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<int>> _trigramPostings;
+    private readonly string _snapshotIdentity;
     private readonly object _symbolGate = new();
     private Task _symbolIndexTask = Task.CompletedTask;
     private bool _symbolIndexStarted;
@@ -50,11 +51,13 @@ internal sealed class ProjectSourceIndex
     private ProjectSourceIndex(
         IReadOnlyList<IndexedFile> files,
         IReadOnlyDictionary<string, int> fileNumbers,
-        IReadOnlyDictionary<string, IReadOnlyList<int>> trigramPostings)
+        IReadOnlyDictionary<string, IReadOnlyList<int>> trigramPostings,
+        string snapshotIdentity)
     {
         _files = files;
         _fileNumbers = fileNumbers;
         _trigramPostings = trigramPostings;
+        _snapshotIdentity = snapshotIdentity;
     }
 
     /// <summary>目前索引包含的檔案數；超過大小限制而未載入的檔案也會列在清單中。</summary>
@@ -63,7 +66,7 @@ internal sealed class ProjectSourceIndex
     /// <summary>目前實際載入內容的檔案數。</summary>
     public int IndexedFileCount => _files.Count(file => file.Content is not null);
 
-    /// <summary>目前索引建立時間，供 watcher 不可用時的安全生命週期判斷。</summary>
+    /// <summary>目前索引建立時間，供惰性快取生命週期判斷。</summary>
     public DateTime CreatedAtUtc { get; } = DateTime.UtcNow;
 
     /// <summary>
@@ -71,6 +74,7 @@ internal sealed class ProjectSourceIndex
     /// </summary>
     public static async Task<ProjectSourceIndex> GetOrCreateAsync(
         string rootPath,
+        IReadOnlyDictionary<string, string>? expectedFiles = null,
         CancellationToken cancellationToken = default)
     {
         rootPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
@@ -95,7 +99,8 @@ internal sealed class ProjectSourceIndex
                     existing));
                 throw;
             }
-            if (DateTime.UtcNow - index.CreatedAtUtc <= IndexLifetime)
+            if (DateTime.UtcNow - index.CreatedAtUtc <= IndexLifetime &&
+                index._snapshotIdentity == BuildSnapshotIdentity(expectedFiles))
                 return index;
             Indexes.TryRemove(new KeyValuePair<string, Lazy<Task<ProjectSourceIndex>>>(
                 rootPath,
@@ -103,7 +108,7 @@ internal sealed class ProjectSourceIndex
         }
 
         var created = new Lazy<Task<ProjectSourceIndex>>(
-            () => BuildAsync(rootPath),
+            () => BuildAsync(rootPath, expectedFiles),
             LazyThreadSafetyMode.ExecutionAndPublication);
         var selected = Indexes.GetOrAdd(rootPath, created);
         ProjectSourceIndex result;
@@ -127,7 +132,7 @@ internal sealed class ProjectSourceIndex
             Indexes.TryRemove(new KeyValuePair<string, Lazy<Task<ProjectSourceIndex>>>(
                 rootPath,
                 selected));
-            return await GetOrCreateAsync(rootPath, cancellationToken).ConfigureAwait(false);
+            return await GetOrCreateAsync(rootPath, expectedFiles, cancellationToken).ConfigureAwait(false);
         }
         return result;
     }
@@ -158,32 +163,14 @@ internal sealed class ProjectSourceIndex
     }
 
     /// <summary>
-    /// 由檔案 watcher 通知索引失效。整個 root 一次移除可避免只更新一個檔案時留下
-    /// 部分舊倒排索引；下一次工具呼叫會建立一致的新快照。
+    /// 專案刪除時立即移除該根目錄的惰性索引；不等待 30 秒生命週期，
+    /// 確保已刪專案的來源內容不再留在服務程序記憶體。
     /// </summary>
-    public static void InvalidateForPath(string changedPath)
+    public static void Forget(string rootPath)
     {
-        if (string.IsNullOrWhiteSpace(changedPath))
-            return;
-
-        string fullPath;
-        try
-        {
-            fullPath = Path.GetFullPath(changedPath);
-        }
-        catch (ArgumentException)
-        {
-            // watcher 的異常路徑不應中斷檔案索引或對話回合。
-            return;
-        }
-        foreach (var pair in Indexes)
-        {
-            if (!IsInsideRoot(pair.Key, fullPath))
-                continue;
-            Indexes.TryRemove(new KeyValuePair<string, Lazy<Task<ProjectSourceIndex>>>(
-                pair.Key,
-                pair.Value));
-        }
+        if (string.IsNullOrWhiteSpace(rootPath)) return;
+        var normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
+        Indexes.TryRemove(normalized, out _);
     }
 
     /// <summary>文字搜尋的結果及實際檢查的檔案統計。</summary>
@@ -290,8 +277,7 @@ internal sealed class ProjectSourceIndex
         try
         {
             var info = new FileInfo(fullPath);
-            // watcher 可能遺漏極短暫的儲存事件；讀檔時再做一次輕量 metadata
-            // 驗證，避免把舊 snapshot 的原始碼行號回傳給模型。
+            // 讀取快取行號前做一次輕量 metadata 驗證，避免工具回傳已被修改的舊內容。
             if (!info.Exists ||
                 info.Length != file.ByteLength ||
                 info.LastWriteTimeUtc != file.LastWriteUtc)
@@ -433,13 +419,21 @@ internal sealed class ProjectSourceIndex
         }
     });
 
-    private static async Task<ProjectSourceIndex> BuildAsync(string rootPath)
+    private static async Task<ProjectSourceIndex> BuildAsync(
+        string rootPath,
+        IReadOnlyDictionary<string, string>? expectedFiles)
     {
         var files = new List<IndexedFile>();
         var fileNumbers = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var postings = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
         long indexedBytes = 0;
-        foreach (var fullPath in EnumerateSearchableFiles(rootPath))
+        var sourceFiles = expectedFiles is null
+            ? EnumerateSearchableFiles(rootPath)
+            : expectedFiles.Keys
+                .Where(relativePath => SearchableExtensions.Contains(Path.GetExtension(relativePath)))
+                .Select(relativePath => Path.GetFullPath(Path.Combine(rootPath, relativePath)))
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase);
+        foreach (var fullPath in sourceFiles)
         {
             FileInfo info;
             try
@@ -461,6 +455,26 @@ internal sealed class ProjectSourceIndex
             {
                 try
                 {
+                    if (expectedFiles is not null)
+                    {
+                        var relativePath = Path.GetRelativePath(rootPath, fullPath)
+                            .Replace('\\', '/');
+                        if (!expectedFiles.TryGetValue(relativePath, out var expectedHash))
+                            throw new InvalidOperationException(
+                                $"檔案不屬於目前圖譜版本：{relativePath}；請重新索引。");
+                        await using var stream = new FileStream(
+                            fullPath,
+                            FileMode.Open,
+                            FileAccess.Read,
+                            FileShare.ReadWrite | FileShare.Delete,
+                            64 * 1024,
+                            FileOptions.Asynchronous | FileOptions.SequentialScan);
+                        var actualHash = Convert.ToHexStringLower(
+                            await SHA256.HashDataAsync(stream).ConfigureAwait(false));
+                        if (!actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
+                            throw new InvalidOperationException(
+                                $"檔案已在索引後變更：{relativePath}；請重新索引。");
+                    }
                     content = await File.ReadAllTextAsync(fullPath).ConfigureAwait(false);
                     lines = SplitLines(content);
                     indexedBytes += Encoding.UTF8.GetByteCount(content);
@@ -504,8 +518,17 @@ internal sealed class ProjectSourceIndex
             postings.ToDictionary(
                 pair => pair.Key,
                 pair => (IReadOnlyList<int>)pair.Value.ToArray(),
-                StringComparer.Ordinal));
+                StringComparer.Ordinal),
+            BuildSnapshotIdentity(expectedFiles));
     }
+
+    private static string BuildSnapshotIdentity(
+        IReadOnlyDictionary<string, string>? expectedFiles) =>
+        expectedFiles is null
+            ? "live"
+            : string.Join('\n', expectedFiles
+                .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(pair => $"{pair.Key}\0{pair.Value}"));
 
     private static IEnumerable<string> EnumerateSearchableFiles(string rootPath)
     {
@@ -563,15 +586,6 @@ internal sealed class ProjectSourceIndex
             yield break;
         for (var index = 0; index <= value.Length - TrigramLength; index++)
             yield return value.Substring(index, TrigramLength);
-    }
-
-    private static bool IsInsideRoot(string rootPath, string candidatePath)
-    {
-        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
-        var candidate = Path.GetFullPath(candidatePath);
-        return candidate.Equals(root, StringComparison.OrdinalIgnoreCase) ||
-               candidate.StartsWith(root + Path.DirectorySeparatorChar,
-                   StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ClassifyIdentifier(SyntaxToken token) => token.Parent switch

@@ -10,9 +10,6 @@ public sealed class ProjectIndexManifestStore(IDbContextFactory<AppDbContext> db
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public Task SaveAttemptAsync(ProjectIndexManifest manifest, CancellationToken ct = default) =>
-        SaveAsync(manifest, promote: false, ct);
-
     public Task PromoteAsync(ProjectIndexManifest manifest, CancellationToken ct = default) =>
         SaveAsync(manifest, promote: true, ct);
 
@@ -42,6 +39,177 @@ public sealed class ProjectIndexManifestStore(IDbContextFactory<AppDbContext> db
         return string.IsNullOrWhiteSpace(json)
             ? null
             : JsonSerializer.Deserialize<ProjectIndexManifest>(json, JsonOptions);
+    }
+
+    public async Task<IReadOnlyList<ProjectIndexManifest>> ListSuccessfulAsync(
+        string projectId,
+        CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = """
+            SELECT ManifestJson
+            FROM project_index_manifests
+            WHERE ProjectId = $projectId AND Status = 'Fresh'
+            ORDER BY CompletedAt DESC
+            LIMIT 2
+            """;
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "$projectId";
+        parameter.Value = projectId;
+        command.Parameters.Add(parameter);
+        if (command.Connection!.State != System.Data.ConnectionState.Open)
+            await command.Connection.OpenAsync(ct);
+        var result = new List<ProjectIndexManifest>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var manifest = JsonSerializer.Deserialize<ProjectIndexManifest>(reader.GetString(0), JsonOptions);
+            if (manifest is not null)
+                result.Add(manifest);
+        }
+        return result;
+    }
+
+    public async Task ActivateAsync(
+        string projectId,
+        string version,
+        CancellationToken ct = default)
+    {
+        var manifest = await GetByVersionAsync(projectId, version, ct);
+        if (manifest is null || manifest.Status != IndexManifestStatus.Fresh)
+            throw new KeyNotFoundException($"找不到可啟用的成功圖譜版本：{projectId}/{version}");
+
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE project_index_manifests SET IsCurrent = 0 WHERE ProjectId = {projectId}", ct);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE project_index_manifests SET IsCurrent = 1 WHERE ProjectId = {projectId} AND Version = {version}", ct);
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task DeleteVersionAsync(
+        string projectId,
+        string version,
+        CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM project_index_files WHERE ProjectId = {projectId} AND GraphVersion = {version}", ct);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM project_index_manifests WHERE ProjectId = {projectId} AND Version = {version} AND IsCurrent = 0", ct);
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task PruneSuccessfulAsync(
+        string projectId,
+        string? previousVersion,
+        CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            DELETE FROM project_index_files
+            WHERE ProjectId = {projectId}
+              AND GraphVersion NOT IN (
+                  SELECT Version FROM project_index_manifests
+                  WHERE ProjectId = {projectId}
+                    AND (IsCurrent = 1 OR Version = {previousVersion}))
+            """, ct);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            DELETE FROM project_index_manifests
+            WHERE ProjectId = {projectId}
+              AND IsCurrent = 0
+              AND ({previousVersion} IS NULL OR Version <> {previousVersion})
+            """, ct);
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task SaveFileSnapshotAsync(
+        string projectId,
+        string version,
+        IReadOnlyList<ProjectIndexedFile> files,
+        CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var connection = db.Database.GetDbConnection();
+        if (connection.State != System.Data.ConnectionState.Open)
+            await connection.OpenAsync(ct);
+        await using var tx = await connection.BeginTransactionAsync(ct);
+
+        await using var delete = connection.CreateCommand();
+        delete.Transaction = tx;
+        delete.CommandText = "DELETE FROM project_index_files WHERE ProjectId = $projectId AND GraphVersion = $version";
+        var deleteProject = delete.CreateParameter();
+        deleteProject.ParameterName = "$projectId";
+        deleteProject.Value = projectId;
+        delete.Parameters.Add(deleteProject);
+        var deleteVersion = delete.CreateParameter();
+        deleteVersion.ParameterName = "$version";
+        deleteVersion.Value = version;
+        delete.Parameters.Add(deleteVersion);
+        await delete.ExecuteNonQueryAsync(ct);
+
+        // 重用同一個 prepared command，避免每個檔案都重新建立 EF SQL 與參數物件。
+        await using var insert = connection.CreateCommand();
+        insert.Transaction = tx;
+        insert.CommandText = """
+            INSERT INTO project_index_files (ProjectId, GraphVersion, RelativePath, ContentHash)
+            VALUES ($projectId, $version, $relativePath, $contentHash)
+            """;
+        var insertProject = insert.CreateParameter();
+        insertProject.ParameterName = "$projectId";
+        insertProject.Value = projectId;
+        insert.Parameters.Add(insertProject);
+        var insertVersion = insert.CreateParameter();
+        insertVersion.ParameterName = "$version";
+        insertVersion.Value = version;
+        insert.Parameters.Add(insertVersion);
+        var relativePath = insert.CreateParameter();
+        relativePath.ParameterName = "$relativePath";
+        insert.Parameters.Add(relativePath);
+        var contentHash = insert.CreateParameter();
+        contentHash.ParameterName = "$contentHash";
+        insert.Parameters.Add(contentHash);
+        await insert.PrepareAsync(ct);
+        foreach (var file in files)
+        {
+            relativePath.Value = file.RelativePath;
+            contentHash.Value = file.ContentHash;
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<ProjectIndexedFile>> GetFileSnapshotAsync(
+        string projectId,
+        string version,
+        CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = """
+            SELECT RelativePath, ContentHash
+            FROM project_index_files
+            WHERE ProjectId = $projectId AND GraphVersion = $version
+            ORDER BY RelativePath
+            """;
+        foreach (var pair in new[] { ("$projectId", projectId), ("$version", version) })
+        {
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = pair.Item1;
+            parameter.Value = pair.Item2;
+            command.Parameters.Add(parameter);
+        }
+        if (command.Connection!.State != System.Data.ConnectionState.Open)
+            await command.Connection.OpenAsync(ct);
+        var result = new List<ProjectIndexedFile>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            result.Add(new ProjectIndexedFile(reader.GetString(0), reader.GetString(1)));
+        return result;
     }
 
     /// <summary>
@@ -83,6 +251,8 @@ public sealed class ProjectIndexManifestStore(IDbContextFactory<AppDbContext> db
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         await db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM project_index_files WHERE ProjectId = {projectId}", ct);
+        await db.Database.ExecuteSqlInterpolatedAsync(
             $"DELETE FROM project_index_manifests WHERE ProjectId = {projectId}", ct);
     }
 
@@ -118,6 +288,7 @@ public sealed class ProjectIndexManifestStore(IDbContextFactory<AppDbContext> db
                     WHEN excluded.IsCurrent = 1 THEN 1 ELSE project_index_manifests.IsCurrent END
             """, ct);
         await tx.CommitAsync(ct);
+
     }
 
     private async Task<ProjectIndexManifest?> GetAsync(
