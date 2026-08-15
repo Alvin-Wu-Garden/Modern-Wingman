@@ -1,4 +1,4 @@
-import { type ChangeEvent, type KeyboardEvent, memo, useRef, useState } from 'react'
+import { type ChangeEvent, type FocusEvent, type KeyboardEvent, memo, useRef, useState } from 'react'
 import { FileText, Loader2, Mic, Paperclip, Send, Square, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -34,12 +34,15 @@ export const MessageComposer = memo(function MessageComposer({
   busy = false,
   disabled = false,
   placeholder = '輸入訊息… (Enter 送出，Shift+Enter 換行)',
-  containerClassName = 'shrink-0 px-6 py-4 bg-surface border-t border-border',
+  containerClassName = 'shrink-0 px-6 py-2 bg-surface border-t border-border',
   innerClassName = 'max-w-3xl mx-auto space-y-2',
 }: MessageComposerProps) {
   const [attachments, setAttachments] = useState<AttachmentReference[]>([])
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const [isFocused, setIsFocused] = useState(false)
   const attachmentInput = useRef<HTMLInputElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const speech = useSpeechToText((text) => {
     const trimmed = value.trim()
     onChange(trimmed ? `${trimmed} ${text}` : text)
@@ -47,6 +50,18 @@ export const MessageComposer = memo(function MessageComposer({
 
   const canSubmit = !busy && !disabled && (!!value.trim() || attachments.length > 0)
   const showCancel = busy && !!onCancel
+  const isExpanded = isFocused || !!value.trim() || attachments.length > 0 || busy
+
+  const handleFocus = () => setIsFocused(true)
+  const handleBlur = (event: FocusEvent<HTMLDivElement>) => {
+    const next = event.relatedTarget as Node | null
+    if (next && containerRef.current?.contains(next)) return
+    setIsFocused(false)
+  }
+  const expandComposer = () => {
+    setIsFocused(true)
+    textareaRef.current?.focus()
+  }
 
   const handleSubmit = () => {
     const trimmed = value.trim()
@@ -143,58 +158,87 @@ export const MessageComposer = memo(function MessageComposer({
             ))}
           </div>
         )}
-        <div className="rounded-xl border border-border bg-surface focus-within:ring-2 focus-within:ring-brand/40">
-          <textarea
-            rows={3}
-            placeholder={placeholder}
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={busy || disabled}
-            className={cn(
-              'block w-full min-h-[76px] max-h-40 resize-none rounded-t-xl bg-transparent px-3.5 pb-2 pt-3 text-sm leading-5',
-              'placeholder:text-ink-subtle focus:outline-none',
-              'disabled:cursor-not-allowed disabled:opacity-50',
-            )}
-          />
-          <div className="flex flex-wrap items-end justify-between gap-2 px-2 pb-2">
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <ProviderModelPicker
-                selectedProviderId={selectedProviderId}
-                selectedModel={selectedModel}
-                onProviderChange={onProviderChange}
-                onModelChange={onModelChange}
-              />
-            </div>
-            <div className="ml-auto flex shrink-0 items-center gap-1">
+        <div
+          ref={containerRef}
+          onFocus={handleFocus}
+          onBlur={handleBlur}
+          onClick={() => { if (!isExpanded) expandComposer() }}
+          className="rounded-xl border border-border bg-surface transition-all duration-200 focus-within:ring-2 focus-within:ring-brand/40"
+        >
+          <div className={cn('flex items-center gap-2', isExpanded ? 'items-end px-3.5 pb-2 pt-3' : 'px-2 py-1.5')}>
+            <textarea
+              ref={textareaRef}
+              rows={isExpanded ? 3 : 1}
+              placeholder={placeholder}
+              value={value}
+              onChange={(e) => onChange(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onFocus={handleFocus}
+              disabled={busy || disabled}
+              className={cn(
+                'block w-full flex-1 resize-none bg-transparent text-sm leading-5 transition-all duration-200',
+                'placeholder:text-ink-subtle focus:outline-none',
+                'disabled:cursor-not-allowed disabled:opacity-50',
+                isExpanded ? 'min-h-[76px] max-h-40' : 'min-h-[24px] max-h-10',
+              )}
+            />
+            {!isExpanded && (
               <Button
                 size="icon"
-                variant="ghost"
-                title="附加檔案"
-                onClick={chooseAttachments}
-                disabled={busy || disabled || attachments.length >= 5}
+                title="送出"
+                onClick={handleSubmit}
+                disabled={!canSubmit}
+                className="shrink-0"
               >
-                <Paperclip className="h-4 w-4" />
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
               </Button>
-              {speech.available && !busy && !disabled && (
+            )}
+          </div>
+          <div
+            className={cn(
+              'overflow-hidden transition-all duration-200',
+              isExpanded ? 'max-h-14 opacity-100' : 'max-h-0 opacity-0',
+            )}
+          >
+            <div className="flex flex-wrap items-end justify-between gap-2 px-2 pb-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                <ProviderModelPicker
+                  selectedProviderId={selectedProviderId}
+                  selectedModel={selectedModel}
+                  onProviderChange={onProviderChange}
+                  onModelChange={onModelChange}
+                />
+              </div>
+              <div className="ml-auto flex shrink-0 items-center gap-1">
                 <Button
                   size="icon"
-                  variant={speech.state === 'recording' ? 'danger' : 'ghost'}
-                  onClick={speech.toggleRecording}
-                  disabled={speech.state === 'transcribing'}
-                  className={cn(speech.state === 'recording' && 'animate-pulse')}
-                  title={speech.state === 'recording' ? '停止錄音' : 'Speech to text'}
+                  variant="ghost"
+                  title="附加檔案"
+                  onClick={chooseAttachments}
+                  disabled={busy || disabled || attachments.length >= 5}
                 >
-                  {speech.state === 'transcribing' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mic className="h-4 w-4" />}
+                  <Paperclip className="h-4 w-4" />
                 </Button>
-              )}
-              {showCancel ? (
-                <Button size="icon" variant="ghost" title="停止回應" onClick={onCancel} className="text-red-400"><Square className="h-4 w-4 fill-current" /></Button>
-              ) : (
-                <Button size="icon" title="送出" onClick={handleSubmit} disabled={!canSubmit}>
-                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                </Button>
-              )}
+                {speech.available && !busy && !disabled && (
+                  <Button
+                    size="icon"
+                    variant={speech.state === 'recording' ? 'danger' : 'ghost'}
+                    onClick={speech.toggleRecording}
+                    disabled={speech.state === 'transcribing'}
+                    className={cn(speech.state === 'recording' && 'animate-pulse')}
+                    title={speech.state === 'recording' ? '停止錄音' : 'Speech to text'}
+                  >
+                    {speech.state === 'transcribing' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mic className="h-4 w-4" />}
+                  </Button>
+                )}
+                {showCancel ? (
+                  <Button size="icon" variant="ghost" title="停止回應" onClick={onCancel} className="text-red-400"><Square className="h-4 w-4 fill-current" /></Button>
+                ) : (
+                  <Button size="icon" title="送出" onClick={handleSubmit} disabled={!canSubmit}>
+                    {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
         </div>

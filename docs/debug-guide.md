@@ -36,7 +36,7 @@ Neo4j Browser 的 HTTP port 由 Neo4j 自己的設定管理，不應在 Debug ta
 前置 task 會執行：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass `
+powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\scripts\dev\start-all.ps1 -SkipBuild
 ```
 

@@ -11347,7 +11347,7 @@ declare class InteractiveShellToolContext {
      * Shuts down all attached shell sessions that don't have a command in progress
      * or unread output.
      * Intended to be called when the agent goes idle with no background tasks,
-     * reclaiming child processes (pwsh/bash) and in-process resources (output buffers).
+     * reclaiming child processes (powershell/bash) and in-process resources (output buffers).
      *
      * This is intentionally synchronous — `shutdownSession` performs synchronous
      * process kills and map cleanup with no async I/O.
@@ -21731,7 +21731,7 @@ declare interface SandboxConfigUserPolicyNetwork {
  * `close()`: spawn goes through `spawnSandboxedScript` (mxc-sdk's native
  * sandbox primitive) instead of `cross-spawn`, and `close()` walks the
  * process tree because our wrapper makes the actual MCP server a grandchild
- * of `bash -c` / `pwsh -Command`. The SDK's send/pid/stderr/onmessage
+ * of `bash -c` / `powershell -Command`. The SDK's send/pid/stderr/onmessage
  * lifecycle is inherited unchanged.
  */
 declare class SandboxedStdioClientTransport extends StdioClientTransport {
@@ -27521,7 +27521,7 @@ declare interface SessionUpdateOptionsParams {
     sessionCapabilities?: SessionCapability[];
     /** Shell init profile (`None` or `NonInteractive`). */
     shellInitProfile?: string;
-    /** Per-shell process flags (e.g., `pwsh` arguments). */
+    /** Per-shell process flags (e.g., `powershell` arguments). */
     shellProcessFlags?: string[];
     /** Additional directories to search for skills. */
     skillDirectories?: string[];

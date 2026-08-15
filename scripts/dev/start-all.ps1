@@ -1,4 +1,4 @@
-# start-all.ps1 — VS Code 全端 Debug 的唯一啟動前置作業。
+﻿# start-all.ps1 — VS Code 全端 Debug 的唯一啟動前置作業。
 #
 # AgentService 與 Tauri 必須由 VS Code Debugger 直接啟動，才能正確掛載中斷點，
 # 並在使用者按下 Stop 時結束。本腳本只負責：
@@ -125,7 +125,7 @@ function Wait-ForViteReady {
 }
 
 Write-Host "[1/4] 清理上次 Debug 遺留的 Modern Wingman 程序..." -ForegroundColor Cyan
-& pwsh.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -ForRestart -Quiet
+& powershell -NoProfile -ExecutionPolicy Bypass -File $stopScript -ForRestart -Quiet
 if ($LASTEXITCODE -ne 0) {
     throw "無法完成啟動前清理，請查看上方 stop-all 診斷。"
 }

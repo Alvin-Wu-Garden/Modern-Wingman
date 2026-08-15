@@ -11,7 +11,7 @@ import {
   Sparkles,
 } from 'lucide-react'
 import { AppShell } from '@/app/layout/AppShell'
-import { SidebarNavigation } from '@/components/layout/sidebar-navigation'
+import { SidebarNavigation, SidebarTooltip } from '@/components/layout/sidebar-navigation'
 import { useResizablePanel } from '@/components/layout/use-resizable-panel'
 import { Button } from '@/components/ui/button'
 import { SettingsPage } from '@/features/settings/components/SettingsPage'
@@ -152,19 +152,21 @@ export function ChatPage() {
   )
 
   const sidebarFooter = (
-    <button
-      type="button"
-      onClick={() => setActiveView('settings')}
-      className={cn(
-        'flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors',
-        activeView === 'settings'
-          ? 'bg-brand/10 font-medium text-brand'
-          : 'text-ink-secondary hover:bg-surface-alt hover:text-ink',
-      )}
-    >
-      <Settings className="h-4 w-4" />
-      {!appSidebar.collapsed && <span className="max-[640px]:hidden">設定</span>}
-    </button>
+    <SidebarTooltip label="設定" show={appSidebar.collapsed}>
+      <button
+        type="button"
+        onClick={() => setActiveView('settings')}
+        className={cn(
+          'flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors',
+          activeView === 'settings'
+            ? 'bg-brand/10 font-medium text-brand'
+            : 'text-ink-secondary hover:bg-surface-alt hover:text-ink',
+        )}
+      >
+        <Settings className="h-4 w-4" />
+        {!appSidebar.collapsed && <span className="max-[640px]:hidden">設定</span>}
+      </button>
+    </SidebarTooltip>
   )
 
   return (

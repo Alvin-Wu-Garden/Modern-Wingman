@@ -1,4 +1,4 @@
-# stop-all.ps1 — 關閉 Modern Wingman 全端 Debug 的所有本機程序。
+﻿# stop-all.ps1 — 關閉 Modern Wingman 全端 Debug 的所有本機程序。
 #
 # 本腳本只終止能以「ownership + 程序開始時間」或「固定執行檔路徑」驗證為
 # Modern Wingman 的程序。即使其他應用程式占用相同 port，也絕不直接誤殺。
@@ -133,7 +133,7 @@ function Test-AgentProcess {
     }
 
     return $Snapshot.Name -ieq "dotnet.exe" -and
-        $Snapshot.CommandLine.Contains($agentAssembly, [StringComparison]::OrdinalIgnoreCase)
+        $Snapshot.CommandLine.IndexOf($agentAssembly, [StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
 function Test-PathWithinRoot {
@@ -204,9 +204,9 @@ function Test-Neo4jLauncher {
 
     return ($Snapshot.Name -ieq "cmd.exe" -or
             $Snapshot.Name -ieq "powershell.exe" -or
-            $Snapshot.Name -ieq "pwsh.exe") -and
-        $Snapshot.CommandLine.Contains("neo4j", [StringComparison]::OrdinalIgnoreCase) -and
-        $Snapshot.CommandLine.Contains($Neo4jHome, [StringComparison]::OrdinalIgnoreCase)
+            $Snapshot.Name -ieq "powershell") -and
+        $Snapshot.CommandLine.IndexOf("neo4j", [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $Snapshot.CommandLine.IndexOf($Neo4jHome, [StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
 function Test-Neo4jJavaProcess {
@@ -222,8 +222,8 @@ function Test-Neo4jJavaProcess {
 
     return $Snapshot.Name -ieq "java.exe" -and
         (Test-PathWithinRoot -Root $neo4jRuntimeRoot -Candidate ([string]$Snapshot.ExecutablePath)) -and
-        $Snapshot.CommandLine.Contains("org.neo4j.server", [StringComparison]::OrdinalIgnoreCase) -and
-        $Snapshot.CommandLine.Contains($Neo4jHome, [StringComparison]::OrdinalIgnoreCase)
+        $Snapshot.CommandLine.IndexOf("org.neo4j.server", [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $Snapshot.CommandLine.IndexOf($Neo4jHome, [StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
 function Stop-StaleManagedNeo4jJava {
