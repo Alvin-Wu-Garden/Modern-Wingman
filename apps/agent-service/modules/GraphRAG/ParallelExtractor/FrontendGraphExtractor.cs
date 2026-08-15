@@ -235,7 +235,6 @@ sealed class FrontendFileCatalog
         }
     }
 }
-
 /// <summary>定義「FrontendGraphExtractor」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class FrontendGraphExtractor
 {

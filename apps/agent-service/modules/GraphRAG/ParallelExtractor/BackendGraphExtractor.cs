@@ -861,4 +861,3 @@ sealed class BackendGraphExtractor
     /// <summary>定義「TypeExtractionInfo」資料結構或服務職責，供圖譜抽取流程使用。</summary>
     private sealed record TypeExtractionInfo(string TypeId, string TypeName, INamedTypeSymbol? Symbol);
 }
-

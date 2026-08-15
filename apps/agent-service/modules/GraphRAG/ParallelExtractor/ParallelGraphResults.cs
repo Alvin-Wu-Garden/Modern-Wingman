@@ -61,4 +61,3 @@ sealed class ParallelGraphManifest
         => _relationshipIds.ToDictionary(pair => pair.Key, pair => pair.Value.Count, StringComparer.Ordinal);
 }
 
-
