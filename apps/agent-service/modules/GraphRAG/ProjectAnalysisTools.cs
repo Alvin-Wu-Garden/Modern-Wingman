@@ -1,11 +1,8 @@
 using System.ComponentModel;
-using System.Collections.Concurrent;
-using System.Text;
+using System.Security.Cryptography;
 using System.Text.Json;
 using AgentService.Application.Contracts;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Extensions.AI;
 
 namespace AgentService.Modules.GraphRAG;
@@ -21,15 +18,16 @@ public sealed class ProjectAnalysisTools
     private const int MaximumGraphSearchResults = 20;
     private const int MaximumGraphPaths = 80;
     private const int MaximumReadLines = 2_000;
-    private const long MaximumSearchFileBytes = 4 * 1024 * 1024;
-    private const int MaximumToolCalls = 32;
+    private const int MaximumReadStartLine = 100_000;
+    private const long MaximumReadFileBytes = 16 * 1024 * 1024;
+    // 必須與 ProjectConversationPreparationService 的 Agent 指令一致。
+    // 相同參數的快取命中不計次；只有真正執行 I/O 的工具呼叫才會消耗預算。
+    private const int MaximumToolCalls = 8;
     private const int MaximumGraphSearchCalls = 4;
     private const int MaximumGraphPathCalls = 6;
     private const int MaximumTextSearchCalls = 8;
     private const int MaximumSymbolSearchCalls = 6;
     private const int MaximumFileReadCalls = 16;
-    private const int MaximumCachedSourceBytes = 64 * 1024 * 1024;
-    private static readonly TimeSpan FileCatalogLifetime = TimeSpan.FromSeconds(30);
     private static readonly HashSet<string> SearchableExtensions = new(
         [
             ".cs", ".csproj", ".sln",
@@ -39,32 +37,22 @@ public sealed class ProjectAnalysisTools
             ".md", ".txt", ".yaml", ".yml",
         ],
         StringComparer.OrdinalIgnoreCase);
-    private static readonly HashSet<string> ExcludedDirectories = new(
-        [
-            ".git", ".svn", ".vs", "bin", "obj", "node_modules",
-            "packages", "dist", "build", "out", "target", "vendor",
-        ],
-        StringComparer.OrdinalIgnoreCase);
 
     private readonly string _projectId;
     private readonly string _rootPath;
     private readonly string _rootPrefix;
     private readonly IGraphStore _graphStore;
+    private readonly IProjectIndexManifestStore? _manifests;
+    // 每個專案解析回合固定使用同一個 immutable snapshot，避免索引發布中途
+    // 讓 search 與 trace 分別讀到不同 Graph 版本；一般舊呼叫可保留 null，
+    // 由 Graph Store 退回 active 版本。
+    private readonly string? _graphVersion;
     private readonly AgentActivityReporter? _activity;
     private readonly object _toolCacheGate = new();
     private readonly Dictionary<string, object> _toolCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Task<object>> _toolInFlight = new(StringComparer.Ordinal);
     private readonly Dictionary<ToolCategory, int> _toolCounts = new();
     private int _totalToolCalls;
-
-    // 目錄清單與小型原始碼快取跨越單次對話工具實例共用；檔案 watcher 會主動失效，
-    // 30 秒生命週期則是 watcher 不可用時的安全上限，不會把舊內容永久留在記憶體。
-    private static readonly ConcurrentDictionary<string, Lazy<FileCatalogSnapshot>> FileCatalogs = new(
-        StringComparer.OrdinalIgnoreCase);
-    private static readonly object SourceCacheGate = new();
-    private static readonly Dictionary<string, CachedSource> SourceCache = new(
-        StringComparer.OrdinalIgnoreCase);
-    private static long _cachedSourceBytes;
 
     /// <summary>
     /// 建立綁定單一專案的唯讀工具集合。
@@ -77,7 +65,9 @@ public sealed class ProjectAnalysisTools
         string projectId,
         string rootPath,
         IGraphStore graphStore,
-        AgentActivityReporter? activity = null)
+        AgentActivityReporter? activity = null,
+        string? graphVersion = null,
+        IProjectIndexManifestStore? manifests = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
@@ -88,30 +78,9 @@ public sealed class ProjectAnalysisTools
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         _rootPrefix = _rootPath + Path.DirectorySeparatorChar;
         _graphStore = graphStore;
+        _graphVersion = string.IsNullOrWhiteSpace(graphVersion) ? null : graphVersion;
+        _manifests = manifests;
         _activity = activity;
-    }
-
-    /// <summary>
-    /// 由檔案 watcher 通知工具快取某一個檔案已失效。
-    /// 只移除受影響的目錄清單與檔案內容，不觸發任何全專案重新掃描。
-    /// </summary>
-    public static void InvalidateFileCatalog(string changedPath)
-    {
-        if (string.IsNullOrWhiteSpace(changedPath))
-            return;
-
-        var fullPath = Path.GetFullPath(changedPath);
-        foreach (var pair in FileCatalogs)
-        {
-            if (IsInsideRoot(pair.Key, fullPath))
-                FileCatalogs.TryRemove(pair.Key, out _);
-        }
-
-        lock (SourceCacheGate)
-        {
-            if (SourceCache.Remove(fullPath, out var cached))
-                _cachedSourceBytes -= cached.ByteLength;
-        }
     }
 
     /// <summary>
@@ -120,29 +89,35 @@ public sealed class ProjectAnalysisTools
     /// 工具包裝器只回報開始、完成與失敗狀態，不會把完整工具輸出直接送到前端。
     /// </summary>
     /// <returns>只包含查詢能力的 MAF 工具集合。</returns>
-    public IReadOnlyList<AIFunction> CreateTools() =>
-    [
-        AIFunctionFactory.Create(
-            (Func<string, int, CancellationToken, Task<GraphSearchToolResult>>)SearchGraphWithActivityAsync,
-            "search_project_graph",
-            "以自然語言、業務名稱、程式符號或資料表名稱搜尋目前專案的知識圖譜。先用此工具取得精確 nodeId，再視需要追蹤鏈路。"),
-        AIFunctionFactory.Create(
-            (Func<string, int, int, CancellationToken, Task<GraphPathToolResult>>)TraceGraphPathsWithActivityAsync,
-            "trace_project_graph_paths",
-            "從已知 nodeId 逐層查詢目前專案 Graph 的上下游關係，回傳有界的最短鏈路。必須使用 search_project_graph 實際回傳的 nodeId。"),
-        AIFunctionFactory.Create(
+    public IReadOnlyList<AIFunction> CreateTools(bool includeGraphTools = true)
+    {
+        var tools = new List<AIFunction>(includeGraphTools ? 5 : 3);
+        if (includeGraphTools)
+        {
+            tools.Add(AIFunctionFactory.Create(
+                (Func<string, int, CancellationToken, Task<GraphSearchToolResult>>)SearchGraphWithActivityAsync,
+                "search_project_graph",
+                "以自然語言、業務名稱、程式符號或資料表名稱搜尋目前專案的知識圖譜。先用此工具取得精確 nodeId，再視需要追蹤鏈路。"));
+            tools.Add(AIFunctionFactory.Create(
+                (Func<string, int, int, CancellationToken, Task<GraphPathToolResult>>)TraceGraphPathsWithActivityAsync,
+                "trace_project_graph_paths",
+                "從已知 nodeId 逐層查詢目前專案 Graph 的上下游關係，回傳有界的最短鏈路。必須使用 search_project_graph 實際回傳的 nodeId。"));
+        }
+
+        tools.Add(AIFunctionFactory.Create(
             (Func<string, string?, int, CancellationToken, Task<TextSearchToolResult>>)SearchTextWithActivityAsync,
             "search_project_text",
-            "在目前專案的 C#、JavaScript、TypeScript、ASPX、SQL 與設定文件中執行不分大小寫的純文字搜尋。適合找錯誤訊息、URL、欄位或動態呼叫。"),
-        AIFunctionFactory.Create(
+            "在目前專案的 C#、JavaScript、TypeScript、ASPX、SQL 與設定文件中執行不分大小寫的純文字搜尋。適合找錯誤訊息、URL、欄位或動態呼叫。"));
+        tools.Add(AIFunctionFactory.Create(
             (Func<string, int, int, CancellationToken, Task<FileRangeToolResult>>)ReadFileRangeWithActivityAsync,
             "read_project_file_range",
-            "讀取目前專案內指定檔案的一段內容並附行號。filePath 可使用搜尋結果的相對路徑；每次最多讀取 2000 行。"),
-        AIFunctionFactory.Create(
+            "讀取目前專案內指定檔案的一段內容並附行號。filePath 可使用搜尋結果的相對路徑；每次最多讀取 2000 行。"));
+        tools.Add(AIFunctionFactory.Create(
             (Func<string, bool, int, CancellationToken, Task<CSharpSymbolToolResult>>)FindCSharpSymbolWithActivityAsync,
             "find_csharp_symbol",
-            "以不需要成功建置專案的 C# 語法解析，尋找 class、method、property、field 等定義及 identifier 引用。適合從符號名稱定位候選檔案。"),
-    ];
+            "以不需要成功建置專案的 C# 語法解析，尋找 class、method、property、field 等定義及 identifier 引用。適合從符號名稱定位候選檔案。"));
+        return tools;
+    }
 
     private Task<GraphSearchToolResult> SearchGraphWithActivityAsync(
         string query,
@@ -155,7 +130,12 @@ public sealed class ProjectAnalysisTools
             ToolCategory.GraphSearch,
             $"{query.Trim()}|{Math.Clamp(limit, 1, MaximumGraphSearchResults)}",
             () => SearchGraphAsync(query, limit, cancellationToken),
-            result => $"找到 {result.Hits.Count} 個節點");
+            result => $"找到 {result.Hits.Count} 個節點",
+            budget => new GraphSearchToolResult(
+                query.Trim(),
+                [],
+                budget.NextAction,
+                budget));
 
     private Task<GraphPathToolResult> TraceGraphPathsWithActivityAsync(
         string nodeId,
@@ -169,7 +149,13 @@ public sealed class ProjectAnalysisTools
             ToolCategory.GraphPath,
             $"{nodeId.Trim()}|{Math.Clamp(maxDepth, 1, 4)}|{Math.Clamp(maxPaths, 1, MaximumGraphPaths)}",
             () => TraceGraphPathsAsync(nodeId, maxDepth, maxPaths, cancellationToken),
-            result => $"找到 {result.Paths.Count} 條鏈路");
+            result => $"找到 {result.Paths.Count} 條鏈路",
+            budget => new GraphPathToolResult(
+                nodeId.Trim(),
+                [],
+                false,
+                budget.Message,
+                budget));
 
     private Task<TextSearchToolResult> SearchTextWithActivityAsync(
         string query,
@@ -181,9 +167,16 @@ public sealed class ProjectAnalysisTools
             "搜尋專案原始碼",
             cancellationToken,
             ToolCategory.TextSearch,
-            $"{query.Trim()}|{NormalizeExtension(extension) ?? "*"}|{Math.Clamp(maxResults, 1, MaximumTextSearchResults)}",
+            $"{NormalizeSearchQueryForCache(query)}|{NormalizeExtension(extension) ?? "*"}|{Math.Clamp(maxResults, 1, MaximumTextSearchResults)}",
             () => SearchTextAsync(query, extension, maxResults, cancellationToken),
-            result => $"找到 {result.Matches.Count} 筆文字命中");
+            result => $"找到 {result.Matches.Count} 筆文字命中",
+            budget => new TextSearchToolResult(
+                query.Trim(),
+                [],
+                0,
+                0,
+                false,
+                budget));
 
     private Task<FileRangeToolResult> ReadFileRangeWithActivityAsync(
         string filePath,
@@ -195,9 +188,15 @@ public sealed class ProjectAnalysisTools
             "讀取原始碼區段",
             cancellationToken,
             ToolCategory.FileRead,
-            $"{filePath.Trim()}|{Math.Max(1, startLine)}|{Math.Clamp(lineCount, 1, MaximumReadLines)}",
+            $"{NormalizeFilePathForCache(filePath)}|{Math.Clamp(startLine, 1, MaximumReadStartLine)}|{Math.Clamp(lineCount, 1, MaximumReadLines)}",
             () => ReadFileRangeAsync(filePath, startLine, lineCount, cancellationToken),
-            result => $"讀取 {result.Lines.Count} 行");
+            result => $"讀取 {result.Lines.Count} 行",
+            budget => new FileRangeToolResult(
+                filePath.Trim(),
+                Math.Max(1, startLine),
+                [],
+                false,
+                budget));
 
     private Task<CSharpSymbolToolResult> FindCSharpSymbolWithActivityAsync(
         string symbol,
@@ -211,7 +210,14 @@ public sealed class ProjectAnalysisTools
             ToolCategory.SymbolSearch,
             $"{symbol.Trim()}|{includeReferences}|{Math.Clamp(maxResults, 1, 100)}",
             () => FindCSharpSymbolAsync(symbol, includeReferences, maxResults, cancellationToken),
-            result => $"找到 {result.Matches.Count} 筆符號候選");
+            result => $"找到 {result.Matches.Count} 筆符號候選",
+            budget => new CSharpSymbolToolResult(
+                symbol.Trim(),
+                [],
+                0,
+                false,
+                budget.Message,
+                budget));
 
     /// <summary>
     /// 執行單一唯讀工具並回報其生命週期；工具本身的輸出仍只回傳給 Agent。
@@ -223,11 +229,13 @@ public sealed class ProjectAnalysisTools
         ToolCategory category,
         string cacheKeySuffix,
         Func<Task<T>> operation,
-        Func<T, string> completedDetail)
+        Func<T, string> completedDetail,
+        Func<ToolBudgetStatus, T> budgetExhaustedResult)
     {
         var cacheKey = $"{tool}|{cacheKeySuffix}";
         Task<object>? sharedTask = null;
         TaskCompletionSource<object>? ownerCompletion = null;
+        ToolBudgetStatus? exhaustedBudget = null;
         lock (_toolCacheGate)
         {
             if (_toolCache.TryGetValue(cacheKey, out var cached))
@@ -250,24 +258,41 @@ public sealed class ProjectAnalysisTools
                 if (_totalToolCalls >= MaximumToolCalls ||
                     _toolCounts.GetValueOrDefault(category) >= categoryLimit)
                 {
-                    throw new InvalidOperationException(
-                        $"本輪已達 {tool} 唯讀工具上限；請先整理目前證據與資訊缺口。 ");
+                    var categoryUsed = _toolCounts.GetValueOrDefault(category);
+                    var scope = _totalToolCalls >= MaximumToolCalls
+                        ? "total"
+                        : "category";
+                    exhaustedBudget = new ToolBudgetStatus(
+                        "budget_exhausted",
+                        true,
+                        scope,
+                        _totalToolCalls,
+                        MaximumToolCalls,
+                        categoryUsed,
+                        categoryLimit,
+                        $"本輪已達 {tool} 唯讀工具上限。",
+                        "不要再呼叫工具；請整理目前證據、標示合理推論與尚未確認的資訊缺口，然後直接回答使用者。");
                 }
-
-                _totalToolCalls++;
-                _toolCounts[category] = _toolCounts.GetValueOrDefault(category) + 1;
-                ownerCompletion = new TaskCompletionSource<object>(
-                    TaskCreationOptions.RunContinuationsAsynchronously);
-                sharedTask = ownerCompletion.Task;
-                // 沒有重複呼叫者時仍需觀察失敗 Task，避免取消／例外在背景造成未觀察例外。
-                _ = sharedTask.ContinueWith(
-                    task => _ = task.Exception,
-                    CancellationToken.None,
-                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default);
-                _toolInFlight[cacheKey] = sharedTask;
+                else
+                {
+                    _totalToolCalls++;
+                    _toolCounts[category] = _toolCounts.GetValueOrDefault(category) + 1;
+                    ownerCompletion = new TaskCompletionSource<object>(
+                        TaskCreationOptions.RunContinuationsAsynchronously);
+                    sharedTask = ownerCompletion.Task;
+                    // 沒有重複呼叫者時仍需觀察失敗 Task，避免取消／例外在背景造成未觀察例外。
+                    _ = sharedTask.ContinueWith(
+                        task => _ = task.Exception,
+                        CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
+                    _toolInFlight[cacheKey] = sharedTask;
+                }
             }
         }
+
+        if (exhaustedBudget is not null)
+            return budgetExhaustedResult(exhaustedBudget);
 
         if (ownerCompletion is null)
             return (T)(await sharedTask!.WaitAsync(cancellationToken).ConfigureAwait(false));
@@ -332,25 +357,61 @@ public sealed class ProjectAnalysisTools
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
         limit = Math.Clamp(limit, 1, MaximumGraphSearchResults);
-        var hits = await _graphStore.SearchAsync(
-            _projectId,
-            query.Trim(),
-            limit,
-            cancellationToken);
+        IReadOnlyList<GraphSearchHit> hits;
+        try
+        {
+            // Neo4j 會先依 NodeKind 做 bounded diversification；多取一小批候選後
+            // 在工具邊界重新做精準名稱排序，避免泛用高 BM25 節點蓋過使用者明確
+            // 指定的 Controller、Service 或資料表名稱。
+            var candidateLimit = Math.Clamp(
+                limit * 4,
+                limit,
+                MaximumGraphSearchResults * 4);
+            var luceneQuery = GraphRetrievalService.BuildViewerLuceneQuery(query);
+            hits = await _graphStore.SearchAsync(
+                _projectId,
+                luceneQuery,
+                candidateLimit,
+                _graphVersion,
+                cancellationToken);
+        }
+        catch (ArgumentException)
+        {
+            return new GraphSearchToolResult(
+                query.Trim(),
+                [],
+                "搜尋文字沒有可用的識別碼；請改用具體的類別、方法、路由、資料表或欄位名稱。 ");
+        }
+        catch (GraphStoreException exception)
+        {
+            // Graph 索引／連線錯誤是可預期的降級狀態，不應讓整個 Agent 回合
+            // 變成例外；回傳穩定狀態讓模型改用原始碼工具。
+            return new GraphSearchToolResult(
+                query.Trim(),
+                [],
+                DescribeGraphStoreFailure(exception));
+        }
+
+        var orderedHits = hits
+            .OrderByDescending(hit => ExactGraphNameBoost(hit, query))
+            .ThenByDescending(hit => hit.Score)
+            .ThenBy(hit => hit.Node.Key, StringComparer.Ordinal)
+            .Take(limit)
+            .ToArray();
 
         return new GraphSearchToolResult(
             query.Trim(),
-            hits.Select(hit => new GraphNodeToolItem(
+            orderedHits.Select(hit => new GraphNodeToolItem(
                     hit.Node.Key,
                     hit.Node.Kind.ToString(),
                     GetNodeText(hit.Node, "role") ?? hit.Node.Kind.ToString(),
                     GetNodeText(hit.Node, "name") ?? hit.Node.Key,
                     GetNodeFilePath(hit.Node),
                     GetNodeLine(hit.Node),
-                    GetNodeLine(hit.Node),
+                    GetNodeEndLine(hit.Node),
                     hit.Score))
                 .ToList(),
-            hits.Count == 0
+            orderedHits.Length == 0
                 ? "Graph 沒有命中；請改用 search_project_text 尋找原始字串或符號。"
                 : "如需上下游關係，請將實際 nodeId 傳給 trace_project_graph_paths。"
         );
@@ -405,27 +466,48 @@ public sealed class ProjectAnalysisTools
                     _projectId,
                     layer.Select(state => state.NodeId).ToArray(),
                     40,
+                    _graphVersion,
                     cancellationToken);
+            }
+            catch (GraphStoreException exception)
+            {
+                return new GraphPathToolResult(
+                    nodeId,
+                    paths,
+                    wasTruncated,
+                    DescribeGraphStoreFailure(exception));
             }
             catch (InvalidOperationException exception) when (
                 exception.Message.Contains("沒有設定 Graph Store 方法", StringComparison.Ordinal))
             {
                 // 舊的測試 double 尚未覆寫批次介面時保留相容 fallback；正式 Neo4j store
                 // 會走單一 UNWIND 查詢，不會進入此路徑。
-                var values = await Task.WhenAll(layer.Select(async state =>
-                    new
-                    {
-                        state.NodeId,
-                        Neighbors = await _graphStore.GetNeighborsAsync(
-                            _projectId,
+                try
+                {
+                    var values = await Task.WhenAll(layer.Select(async state =>
+                        new
+                        {
                             state.NodeId,
-                            40,
-                            cancellationToken),
-                    }));
-                neighborMap = values.ToDictionary(
-                    value => value.NodeId,
-                    value => value.Neighbors,
-                    StringComparer.Ordinal);
+                            Neighbors = await _graphStore.GetNeighborsAsync(
+                                _projectId,
+                                state.NodeId,
+                                40,
+                                _graphVersion,
+                                cancellationToken),
+                        }));
+                    neighborMap = values.ToDictionary(
+                        value => value.NodeId,
+                        value => value.Neighbors,
+                        StringComparer.Ordinal);
+                }
+                catch (GraphStoreException fallbackException)
+                {
+                    return new GraphPathToolResult(
+                        nodeId,
+                        paths,
+                        wasTruncated,
+                        DescribeGraphStoreFailure(fallbackException));
+                }
             }
             foreach (var current in layer)
             {
@@ -438,14 +520,18 @@ public sealed class ProjectAnalysisTools
                         continue;
 
                     var relationship = neighbor.Relationship;
+                    var evidenceFile = GetRelationshipText(relationship, "sourceFile")
+                        ?? GetRelationshipText(relationship, "filePath");
+                    var evidenceLine = GetRelationshipInt(relationship, "sourceLine")
+                        ?? GetRelationshipInt(relationship, "line");
                     var step = new GraphPathStepToolItem(
                         relationship.SourceKey,
                         relationship.Kind.ToString(),
                         relationship.TargetKey,
                         neighbor.Direction,
-                        relationship.Evidence.SourceKind.ToString(),
-                        relationship.Evidence.SourceFile,
-                        relationship.Evidence.SourceLine);
+                        "ParallelExtractor",
+                        evidenceFile,
+                        evidenceLine);
                     var nextSteps = current.Steps.Append(step).ToList();
                     paths.Add(new GraphPathToolItem(
                         nodeId,
@@ -453,8 +539,8 @@ public sealed class ProjectAnalysisTools
                         neighbor.Node.Kind.ToString(),
                         GetNodeText(neighbor.Node, "role") ?? neighbor.Node.Kind.ToString(),
                         GetNodeText(neighbor.Node, "name") ?? neighbor.Node.Key,
-                        GetNodeFilePath(neighbor.Node) ?? relationship.Evidence.SourceFile,
-                        GetNodeLine(neighbor.Node) ?? relationship.Evidence.SourceLine,
+                        GetNodeFilePath(neighbor.Node) ?? evidenceFile,
+                        GetNodeLine(neighbor.Node) ?? evidenceLine,
                         nextSteps));
 
                     if (current.Depth + 1 < maxDepth)
@@ -497,56 +583,29 @@ public sealed class ProjectAnalysisTools
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
+        var expectedFiles = await GetVerifiedSnapshotAsync(cancellationToken);
+        query = query.Trim();
         maxResults = Math.Clamp(maxResults, 1, MaximumTextSearchResults);
         var normalizedExtension = NormalizeExtension(extension);
-        var matches = new List<TextSearchToolItem>();
-        var filesScanned = 0;
-        var filesSkipped = 0;
-
-        foreach (var file in GetSearchableFiles(normalizedExtension))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var source = await ReadCachedSourceAsync(file, cancellationToken);
-            if (source is null)
-            {
-                filesSkipped++;
-                continue;
-            }
-
-            filesScanned++;
-            using var reader = new StringReader(source.Content);
-            var lineNumber = 0;
-            while (reader.ReadLine() is { } line)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                lineNumber++;
-                var column = line.IndexOf(query, StringComparison.OrdinalIgnoreCase);
-                if (column < 0)
-                    continue;
-                matches.Add(new TextSearchToolItem(
-                    ToRelativePath(file),
-                    lineNumber,
-                    column + 1,
-                    Truncate(line.Trim(), 500)));
-                if (matches.Count >= maxResults)
-                    return new TextSearchToolResult(
-                        query,
-                        matches,
-                        filesScanned,
-                        filesSkipped,
-                        true);
-            }
-
-            // 快取命中時仍主動讓出一次執行權，避免大量小檔案搜尋長時間佔住 request thread。
-            await Task.Yield();
-        }
-
+        var index = await ProjectSourceIndex.GetOrCreateAsync(
+                _rootPath,
+                expectedFiles,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var search = index.SearchText(query, normalizedExtension, maxResults, cancellationToken);
+        var matches = search.Matches
+            .Select(match => new TextSearchToolItem(
+                ToRelativePath(match.FilePath),
+                match.Line,
+                match.Column,
+                match.Preview))
+            .ToList();
         return new TextSearchToolResult(
             query,
             matches,
-            filesScanned,
-            filesSkipped,
-            false);
+            search.FilesScanned,
+            search.FilesSkipped,
+            search.WasTruncated);
     }
 
     /// <summary>
@@ -564,8 +623,35 @@ public sealed class ProjectAnalysisTools
         CancellationToken cancellationToken = default)
     {
         var fullPath = ResolveProjectFile(filePath);
+        await VerifyFileAgainstSnapshotAsync(fullPath, cancellationToken);
         startLine = Math.Max(1, startLine);
         lineCount = Math.Clamp(lineCount, 1, MaximumReadLines);
+
+        if (startLine > MaximumReadStartLine)
+            throw new ArgumentOutOfRangeException(
+                nameof(startLine),
+                $"startLine 不得超過 {MaximumReadStartLine}，請先用搜尋工具定位較小的行號。 ");
+
+        var info = new FileInfo(fullPath);
+        if (info.Length > MaximumReadFileBytes)
+            throw new InvalidDataException(
+                $"檔案大小超過 {MaximumReadFileBytes / (1024 * 1024)} MB 的讀取上限。 ");
+
+        // 只有本輪先前已建立索引時才重用；直接讀取單一檔案不應被迫掃描整個專案。
+        var index = await ProjectSourceIndex
+            .GetExistingAsync(_rootPath, cancellationToken)
+            .ConfigureAwait(false);
+        var indexedRange = index?.ReadFileRange(fullPath, startLine, lineCount);
+        if (indexedRange is not null)
+        {
+            return new FileRangeToolResult(
+                ToRelativePath(fullPath),
+                startLine,
+                indexedRange.Lines
+                    .Select(line => new FileLineToolItem(line.Line, line.Text))
+                    .ToList(),
+                indexedRange.HasMore);
+        }
 
         var lines = new List<FileLineToolItem>(lineCount);
         using var stream = new FileStream(
@@ -612,208 +698,40 @@ public sealed class ProjectAnalysisTools
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        var expectedFiles = await GetVerifiedSnapshotAsync(cancellationToken);
+        symbol = symbol.Trim();
         maxResults = Math.Clamp(maxResults, 1, 100);
         var identifier = symbol.Split('.', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
-        if (string.IsNullOrWhiteSpace(identifier) || !SyntaxFacts.IsValidIdentifier(identifier))
+        if (string.IsNullOrWhiteSpace(identifier) ||
+            !Microsoft.CodeAnalysis.CSharp.SyntaxFacts.IsValidIdentifier(identifier))
             throw new ArgumentException("symbol 必須包含有效的 C# identifier。", nameof(symbol));
-
-        var results = new List<CSharpSymbolToolItem>();
-        var filesScanned = 0;
-        foreach (var file in GetSearchableFiles(".cs"))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (results.Count >= maxResults)
-                break;
-            var source = await ReadCachedSourceAsync(file, cancellationToken);
-            if (source is null)
-                continue;
-            filesScanned++;
-
-            var tree = source.SyntaxTree ??= CSharpSyntaxTree.ParseText(
-                source.Content,
-                cancellationToken: cancellationToken);
-            var root = await tree.GetRootAsync(cancellationToken);
-            foreach (var token in root.DescendantTokens()
-                         .Where(token => string.Equals(
-                             token.ValueText,
-                             identifier,
-                             StringComparison.Ordinal)))
-            {
-                var classification = ClassifyIdentifier(token);
-                if (!includeReferences && classification == "reference")
-                    continue;
-                var container = GetContainerName(token.Parent);
-                if (symbol.Contains('.', StringComparison.Ordinal) &&
-                    classification != "reference" &&
-                    !QualifiedNameMatches(symbol, container, identifier))
-                    continue;
-
-                var position = tree.GetLineSpan(token.Span).StartLinePosition;
-                results.Add(new CSharpSymbolToolItem(
-                    ToRelativePath(file),
-                    position.Line + 1,
-                    position.Character + 1,
-                    classification,
-                    container,
-                    Truncate(token.Parent?.Parent?.ToString()
-                        .ReplaceLineEndings(" ").Trim() ?? identifier, 500)));
-                if (results.Count >= maxResults)
-                    break;
-            }
-
-            await Task.Yield();
-        }
+        var index = await ProjectSourceIndex.GetOrCreateAsync(
+                _rootPath,
+                expectedFiles,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var search = await index.SearchSymbolsAsync(
+            symbol,
+            includeReferences,
+            maxResults,
+            cancellationToken).ConfigureAwait(false);
+        var results = search.Matches
+            .Select(match => new CSharpSymbolToolItem(
+                ToRelativePath(match.FilePath),
+                match.Line,
+                match.Column,
+                match.Classification,
+                match.Container,
+                match.Preview))
+            .ToList();
 
         return new CSharpSymbolToolResult(
             symbol,
             results,
-            filesScanned,
-            results.Count >= maxResults,
+            search.FilesScanned,
+            search.WasTruncated,
             "此結果為 Roslyn 語法層候選；重要呼叫關係請再查 Graph 路徑或讀取原始碼。"
         );
-    }
-
-    /// <summary>
-    /// 取得目前專案的可搜尋檔案清單。目錄遞迴只在快取失效時執行，
-    /// 同一專案的全文與符號工具共用同一份清單，避免每次工具呼叫重建目錄樹。
-    /// </summary>
-    private IReadOnlyList<string> GetSearchableFiles(string? extension)
-    {
-        var catalog = GetFileCatalog(_rootPath);
-        return extension is null
-            ? catalog.Files
-            : catalog.Files
-                .Where(file => Path.GetExtension(file).Equals(
-                    extension,
-                    StringComparison.OrdinalIgnoreCase))
-                .ToArray();
-    }
-
-    private static FileCatalogSnapshot GetFileCatalog(string rootPath)
-    {
-        if (FileCatalogs.TryGetValue(rootPath, out var existing) &&
-            DateTime.UtcNow - existing.Value.CreatedAtUtc < FileCatalogLifetime)
-        {
-            return existing.Value;
-        }
-
-        FileCatalogs.TryRemove(rootPath, out _);
-        var created = new Lazy<FileCatalogSnapshot>(
-            () => BuildFileCatalog(rootPath),
-            LazyThreadSafetyMode.ExecutionAndPublication);
-        var selected = FileCatalogs.GetOrAdd(rootPath, created);
-        return selected.Value;
-    }
-
-    /// <summary>建立一次性目錄快照；遇到無法讀取的子目錄時保留其他可用檔案。</summary>
-    private static FileCatalogSnapshot BuildFileCatalog(string rootPath)
-    {
-        var files = new List<string>();
-        if (!Directory.Exists(rootPath))
-            return new FileCatalogSnapshot(DateTime.UtcNow, files);
-
-        var pending = new Stack<string>();
-        pending.Push(rootPath);
-        while (pending.Count > 0)
-        {
-            var directory = pending.Pop();
-            try
-            {
-                foreach (var child in Directory.EnumerateDirectories(directory))
-                {
-                    if (!ExcludedDirectories.Contains(Path.GetFileName(child)))
-                        pending.Push(child);
-                }
-                foreach (var file in Directory.EnumerateFiles(directory))
-                {
-                    if (SearchableExtensions.Contains(Path.GetExtension(file)))
-                        files.Add(Path.GetFullPath(file));
-                }
-            }
-            catch (Exception exception) when (
-                exception is IOException or UnauthorizedAccessException)
-            {
-                // 權限或檔案競態只略過當前目錄，不讓單一損壞資料夾阻斷整個 Agent。
-            }
-        }
-
-        files.Sort(StringComparer.OrdinalIgnoreCase);
-        return new FileCatalogSnapshot(DateTime.UtcNow, files);
-    }
-
-    /// <summary>依檔案修改時間重用原始碼內容與 Roslyn SyntaxTree，必要時才讀取磁碟。</summary>
-    private static async Task<CachedSource?> ReadCachedSourceAsync(
-        string file,
-        CancellationToken cancellationToken)
-    {
-        FileInfo info;
-        try
-        {
-            info = new FileInfo(file);
-            if (!info.Exists || info.Length > MaximumSearchFileBytes)
-                return null;
-        }
-        catch (IOException)
-        {
-            return null;
-        }
-
-        lock (SourceCacheGate)
-        {
-            if (SourceCache.TryGetValue(file, out var cached) &&
-                cached.LastWriteUtc == info.LastWriteTimeUtc &&
-                cached.ByteLength == info.Length)
-            {
-                cached.LastUsedUtc = DateTime.UtcNow;
-                return cached;
-            }
-        }
-
-        string content;
-        try
-        {
-            content = await File.ReadAllTextAsync(file, cancellationToken);
-        }
-        catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException)
-        {
-            return null;
-        }
-
-        var source = new CachedSource(
-            content,
-            info.LastWriteTimeUtc,
-            Encoding.UTF8.GetByteCount(content));
-        lock (SourceCacheGate)
-        {
-            if (SourceCache.Remove(file, out var previous))
-                _cachedSourceBytes -= previous.ByteLength;
-            SourceCache[file] = source;
-            _cachedSourceBytes += source.ByteLength;
-            TrimSourceCache();
-        }
-        return source;
-    }
-
-    private static void TrimSourceCache()
-    {
-        while (_cachedSourceBytes > MaximumCachedSourceBytes && SourceCache.Count > 0)
-        {
-            var oldest = SourceCache
-                .OrderBy(pair => pair.Value.LastUsedUtc)
-                .First();
-            SourceCache.Remove(oldest.Key);
-            _cachedSourceBytes -= oldest.Value.ByteLength;
-        }
-    }
-
-    private static bool IsInsideRoot(string rootPath, string candidatePath)
-    {
-        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
-        var candidate = Path.GetFullPath(candidatePath);
-        return candidate.Equals(root, StringComparison.OrdinalIgnoreCase) ||
-               candidate.StartsWith(root + Path.DirectorySeparatorChar,
-                   StringComparison.OrdinalIgnoreCase);
     }
 
     private string ResolveProjectFile(string filePath)
@@ -831,6 +749,59 @@ public sealed class ProjectAnalysisTools
         return fullPath;
     }
 
+    private async Task<IReadOnlyDictionary<string, string>?> GetVerifiedSnapshotAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_manifests is null || string.IsNullOrWhiteSpace(_graphVersion)) return null;
+        var files = await _manifests.GetFileSnapshotAsync(
+            _projectId,
+            _graphVersion,
+            cancellationToken);
+        if (files.Count == 0)
+            throw new InvalidOperationException("目前圖譜版本沒有檔案清單，請先重新索引。 ");
+        var expected = files.ToDictionary(
+            file => file.RelativePath.Replace('\\', '/'),
+            file => file.ContentHash,
+            StringComparer.OrdinalIgnoreCase);
+        return expected;
+    }
+
+    private async Task VerifyFileAgainstSnapshotAsync(
+        string fullPath,
+        CancellationToken cancellationToken)
+    {
+        if (_manifests is null || string.IsNullOrWhiteSpace(_graphVersion)) return;
+        var relativePath = ToRelativePath(fullPath);
+        var files = await _manifests.GetFileSnapshotAsync(
+            _projectId,
+            _graphVersion,
+            cancellationToken);
+        var expected = files.FirstOrDefault(file =>
+            file.RelativePath.Equals(relativePath, StringComparison.OrdinalIgnoreCase));
+        if (expected is null)
+            throw new InvalidOperationException("檔案不屬於目前圖譜版本，請重新索引。 ");
+        await VerifyFileHashAsync(relativePath, expected.ContentHash, cancellationToken);
+    }
+
+    private async Task VerifyFileHashAsync(
+        string relativePath,
+        string expectedHash,
+        CancellationToken cancellationToken)
+    {
+        var fullPath = ResolveProjectFile(relativePath);
+        await using var stream = new FileStream(
+            fullPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var actual = Convert.ToHexStringLower(
+            await SHA256.HashDataAsync(stream, cancellationToken));
+        if (!actual.Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"檔案已在索引後變更：{relativePath}；請重新索引。 ");
+    }
+
     private string ToRelativePath(string fullPath) =>
         Path.GetRelativePath(_rootPath, fullPath).Replace('\\', '/');
 
@@ -846,50 +817,70 @@ public sealed class ProjectAnalysisTools
         return normalized;
     }
 
-    private static string ClassifyIdentifier(SyntaxToken token) => token.Parent switch
-    {
-        BaseTypeDeclarationSyntax declaration when declaration.Identifier == token => "type-definition",
-        MethodDeclarationSyntax declaration when declaration.Identifier == token => "method-definition",
-        ConstructorDeclarationSyntax declaration when declaration.Identifier == token => "constructor-definition",
-        PropertyDeclarationSyntax declaration when declaration.Identifier == token => "property-definition",
-        EventDeclarationSyntax declaration when declaration.Identifier == token => "event-definition",
-        VariableDeclaratorSyntax declaration when declaration.Identifier == token => "variable-definition",
-        ParameterSyntax declaration when declaration.Identifier == token => "parameter-definition",
-        EnumMemberDeclarationSyntax declaration when declaration.Identifier == token => "enum-member-definition",
-        _ => "reference",
-    };
+    /// <summary>把 Graph 基礎設施失敗轉成模型可採取行動的繁中提示。</summary>
+    private static string DescribeGraphStoreFailure(GraphStoreException exception) =>
+        exception.FailureKind switch
+        {
+            GraphStoreFailureKind.Unavailable =>
+                "Graph 目前無法連線；請改用 search_project_text、find_csharp_symbol 與 read_project_file_range。",
+            GraphStoreFailureKind.SchemaNotReady =>
+                "Graph 索引尚未準備完成；請改用原始碼工具，不要重試相同 Graph 查詢。",
+            GraphStoreFailureKind.SnapshotNotFound =>
+                "本輪 Graph 快照不存在；請改用原始碼工具。",
+            _ => "Graph 查詢失敗；請改用原始碼工具，不要重試相同 Graph 查詢。",
+        };
 
-    private static string? GetContainerName(SyntaxNode? node)
+    /// <summary>為 Graph 工具命中的顯示名稱與穩定 key 計算精準名稱優先分數。</summary>
+    private static int ExactGraphNameBoost(GraphSearchHit hit, string query)
     {
-        var names = node?.AncestorsAndSelf()
-            .Where(item => item is BaseTypeDeclarationSyntax or MethodDeclarationSyntax)
-            .Select(item => item switch
-            {
-                BaseTypeDeclarationSyntax type => type.Identifier.ValueText,
-                MethodDeclarationSyntax method => method.Identifier.ValueText,
-                _ => string.Empty,
-            })
-            .Where(value => value.Length > 0)
-            .Reverse()
-            .ToList();
-        return names is { Count: > 0 } ? string.Join('.', names) : null;
+        var requested = query.Trim();
+        var normalizedRequested = NormalizeGraphName(requested);
+        var names = new[]
+        {
+            GetNodeText(hit.Node, "name"),
+            GetNodeText(hit.Node, "display_name"),
+            hit.Node.Key,
+        }.Where(value => !string.IsNullOrWhiteSpace(value));
+
+        var boost = 0;
+        foreach (var name in names)
+        {
+            if (name!.Equals(requested, StringComparison.OrdinalIgnoreCase))
+                boost = Math.Max(boost, 1_000);
+            else if (NormalizeGraphName(name).Equals(
+                         normalizedRequested,
+                         StringComparison.OrdinalIgnoreCase))
+                boost = Math.Max(boost, 900);
+            else if (name.Contains(requested, StringComparison.OrdinalIgnoreCase))
+                boost = Math.Max(boost, 500);
+        }
+
+        return boost;
     }
 
-    private static bool QualifiedNameMatches(
-        string requested,
-        string? container,
-        string identifier)
-    {
-        var candidate = string.IsNullOrWhiteSpace(container)
-            ? identifier
-            : container.EndsWith(identifier, StringComparison.Ordinal)
-                ? container
-                : $"{container}.{identifier}";
-        return candidate.EndsWith(requested, StringComparison.Ordinal);
-    }
+    private static string NormalizeGraphName(string value) =>
+        string.Concat(value.Where(char.IsLetterOrDigit));
 
-    private static string Truncate(string value, int maximumLength) =>
-        value.Length <= maximumLength ? value : value[..maximumLength] + "…";
+    /// <summary>將大小寫不同但語意相同的 literal 搜尋統一成快取 key。</summary>
+    private static string NormalizeSearchQueryForCache(string query) =>
+        query.Trim().ToUpperInvariant();
+
+    /// <summary>將相對與絕對檔案路徑統一成同一個快取 key，避免重複讀取磁碟。</summary>
+    private string NormalizeFilePathForCache(string filePath)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(
+                Path.IsPathFullyQualified(filePath)
+                    ? filePath.Trim()
+                    : Path.Combine(_rootPath, filePath.Trim()));
+            return fullPath.ToUpperInvariant();
+        }
+        catch (ArgumentException)
+        {
+            return filePath.Trim().ToUpperInvariant();
+        }
+    }
 
     private enum ToolCategory
     {
@@ -898,22 +889,6 @@ public sealed class ProjectAnalysisTools
         TextSearch,
         SymbolSearch,
         FileRead,
-    }
-
-    private sealed record FileCatalogSnapshot(
-        DateTime CreatedAtUtc,
-        IReadOnlyList<string> Files);
-
-    private sealed class CachedSource(
-        string content,
-        DateTime lastWriteUtc,
-        int byteLength)
-    {
-        public string Content { get; } = content;
-        public DateTime LastWriteUtc { get; } = lastWriteUtc;
-        public int ByteLength { get; } = byteLength;
-        public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
-        public SyntaxTree? SyntaxTree { get; set; }
     }
 
     /// <summary>
@@ -935,7 +910,7 @@ public sealed class ProjectAnalysisTools
     /// </summary>
     private static string? GetNodeFilePath(FblAuthority.GraphNode node)
     {
-        var path = GetNodeText(node, "path");
+        var path = GetNodeText(node, "file_path") ?? GetNodeText(node, "path");
         if (!string.IsNullOrWhiteSpace(path))
             return path;
         if (!node.Properties.TryGetValue("source_files", out var sourceFiles) ||
@@ -990,6 +965,32 @@ public sealed class ProjectAnalysisTools
         return null;
     }
 
+    private static string? GetRelationshipText(
+        FblAuthority.GraphRelationship relationship,
+        string key) =>
+        relationship.Properties.TryGetValue(key, out var value) ? value?.ToString() : null;
+
+    private static int? GetRelationshipInt(
+        FblAuthority.GraphRelationship relationship,
+        string key) =>
+        relationship.Properties.TryGetValue(key, out var value) && value is not null &&
+        int.TryParse(value.ToString(), out var parsed)
+            ? parsed
+            : null;
+
+    /// <summary>讀取語意節點的結束行；未提供時使用開始行。</summary>
+    private static int? GetNodeEndLine(FblAuthority.GraphNode node)
+    {
+        if (node.Properties.TryGetValue("end_line", out var value) && value is not null)
+        {
+            if (value is int line)
+                return line;
+            if (int.TryParse(value.ToString(), out line))
+                return line;
+        }
+        return GetNodeLine(node);
+    }
+
     private sealed record GraphTraversalState(
         string NodeId,
         IReadOnlyList<GraphPathStepToolItem> Steps,
@@ -999,7 +1000,8 @@ public sealed class ProjectAnalysisTools
     public sealed record GraphSearchToolResult(
         string Query,
         IReadOnlyList<GraphNodeToolItem> Hits,
-        string NextAction);
+        string NextAction,
+        ToolBudgetStatus? Budget = null);
 
     /// <summary>Graph 搜尋命中的精簡節點，避免把整個 node metadata 塞進模型。</summary>
     public sealed record GraphNodeToolItem(
@@ -1017,7 +1019,8 @@ public sealed class ProjectAnalysisTools
         string StartNodeId,
         IReadOnlyList<GraphPathToolItem> Paths,
         bool WasTruncated,
-        string Note);
+        string Note,
+        ToolBudgetStatus? Budget = null);
 
     /// <summary>從起點到一個受影響節點的最短路徑。</summary>
     public sealed record GraphPathToolItem(
@@ -1046,7 +1049,8 @@ public sealed class ProjectAnalysisTools
         IReadOnlyList<TextSearchToolItem> Matches,
         int FilesScanned,
         int FilesSkipped,
-        bool WasTruncated);
+        bool WasTruncated,
+        ToolBudgetStatus? Budget = null);
 
     /// <summary>一筆帶有位置的專案文字命中。</summary>
     public sealed record TextSearchToolItem(
@@ -1060,7 +1064,8 @@ public sealed class ProjectAnalysisTools
         string FilePath,
         int RequestedStartLine,
         IReadOnlyList<FileLineToolItem> Lines,
-        bool HasMore);
+        bool HasMore,
+        ToolBudgetStatus? Budget = null);
 
     /// <summary>帶有一基行號的原始碼文字。</summary>
     public sealed record FileLineToolItem(int Line, string Text);
@@ -1071,7 +1076,23 @@ public sealed class ProjectAnalysisTools
         IReadOnlyList<CSharpSymbolToolItem> Matches,
         int FilesScanned,
         bool WasTruncated,
-        string Note);
+        string Note,
+        ToolBudgetStatus? Budget = null);
+
+    /// <summary>
+    /// 工具預算用盡時回傳給模型的結構化狀態。這不是執行例外；模型應停止呼叫工具，
+    /// 使用已取得的證據完成回答，並誠實列出尚未確認的部分。
+    /// </summary>
+    public sealed record ToolBudgetStatus(
+        string Status,
+        bool Exhausted,
+        string Scope,
+        int TotalUsed,
+        int TotalLimit,
+        int CategoryUsed,
+        int CategoryLimit,
+        string Message,
+        string NextAction);
 
     /// <summary>一筆 C# 定義或語法層引用。</summary>
     public sealed record CSharpSymbolToolItem(

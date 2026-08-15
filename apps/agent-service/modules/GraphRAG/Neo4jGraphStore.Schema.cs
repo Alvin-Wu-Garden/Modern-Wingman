@@ -1,4 +1,5 @@
 using Neo4j.Driver;
+using AgentService.Application.Models;
 
 namespace AgentService.Modules.GraphRAG;
 
@@ -18,27 +19,20 @@ public sealed partial class Neo4jGraphStore
         if (_driver is null)
             throw new InvalidOperationException("Neo4j V4 已停用。");
 
+        var versions = await _manifests.ListSuccessfulAsync(projectId, cancellationToken);
+        var activeVersion = versions.FirstOrDefault(item => item.Status == IndexManifestStatus.Fresh)?.Version;
+        var previousVersion = versions.FirstOrDefault(item => item.Version != activeVersion)?.Version;
+        if (activeVersion is null)
+            return new GraphStorageAcceptanceDiagnostics(
+                projectId, null, null, 0, 0, 0, 0, 0, 0);
+
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         return await session.ExecuteReadAsync(async transaction =>
         {
-            var pointerCursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                RETURN p.activeManifestVersion AS activeVersion,
-                       p.previousManifestVersion AS previousVersion
-                """,
-                new { projectId });
-            var pointer = await pointerCursor.SingleOrDefaultAsync();
-            if (pointer is null)
-                return new GraphStorageAcceptanceDiagnostics(
-                    projectId, null, null, 0, 0, 0, 0, 0, 0);
-            var activeVersion = pointer["activeVersion"].As<string?>();
-            var previousVersion = pointer["previousVersion"].As<string?>();
-
             var nodeCursor = await transaction.RunAsync(
                 """
-                MATCH (n:GraphEntity {projectId: $projectId})
+                MATCH (n:GraphEntity {wingmanProjectId: $projectId})
                 RETURN count(DISTINCT n.graphVersion) AS versionCount,
                        sum(CASE WHEN n.graphVersion = $activeVersion
                            THEN 1 ELSE 0 END) AS activeNodes,
@@ -50,8 +44,8 @@ public sealed partial class Neo4jGraphStore
 
             var edgeCursor = await transaction.RunAsync(
                 """
-                MATCH (source:GraphEntity {projectId: $projectId})-[r]->
-                      (target:GraphEntity {projectId: $projectId})
+                MATCH (source:GraphEntity {wingmanProjectId: $projectId})-[r]->
+                      (target:GraphEntity {wingmanProjectId: $projectId})
                 RETURN sum(CASE
                            WHEN source.graphVersion = $activeVersion
                             AND target.graphVersion = $activeVersion
@@ -66,7 +60,7 @@ public sealed partial class Neo4jGraphStore
 
             var communityCursor = await transaction.RunAsync(
                 """
-                MATCH (c:GraphCommunity {projectId: $projectId})
+                MATCH (c:GraphCommunity {wingmanProjectId: $projectId})
                 RETURN sum(CASE WHEN c.graphVersion <> $activeVersion
                            THEN 1 ELSE 0 END) AS inactiveCommunities
                 """,
@@ -93,19 +87,14 @@ public sealed partial class Neo4jGraphStore
     private static readonly string[] SchemaStatements =
     [
         """
-        CREATE CONSTRAINT graph_entity_identity_v4 IF NOT EXISTS
+        CREATE CONSTRAINT graph_entity_identity_v5 IF NOT EXISTS
         FOR (n:GraphEntity)
-        REQUIRE (n.projectId, n.graphVersion, n.id) IS UNIQUE
-        """,
-        """
-        CREATE CONSTRAINT project_graph_identity_v4 IF NOT EXISTS
-        FOR (p:ProjectGraph)
-        REQUIRE p.projectId IS UNIQUE
+        REQUIRE (n.wingmanProjectId, n.graphVersion, n.id) IS UNIQUE
         """,
         """
         CREATE CONSTRAINT graph_community_identity_v4 IF NOT EXISTS
         FOR (c:GraphCommunity)
-        REQUIRE (c.projectId, c.graphVersion, c.communityId) IS UNIQUE
+        REQUIRE (c.wingmanProjectId, c.graphVersion, c.communityId) IS UNIQUE
         """,
         """
         CREATE INDEX graph_community_version_id_v4 IF NOT EXISTS
@@ -120,7 +109,8 @@ public sealed partial class Neo4jGraphStore
         """
         CREATE FULLTEXT INDEX graph_entity_search_v4 IF NOT EXISTS
         FOR (n:GraphEntity)
-        ON EACH [n.name, n.searchableText]
+        ON EACH [n.name, n.fullName, n.path, n.relativePath, n.route, n.signature,
+                 n.qualifiedName, n.objectName, n.displayName, n.description]
         """,
         """
         CREATE FULLTEXT INDEX graph_community_v4_search IF NOT EXISTS
@@ -131,10 +121,13 @@ public sealed partial class Neo4jGraphStore
 
     /// <summary>
     /// V4 是破壞式乾淨升級；移除會阻止同 schema V4 named index 建立的舊名稱。
-    /// 只刪除 schema 物件，不刪除任何圖資料。
+    /// GraphEntity 的 scope 欄位遷移只搬移 Modern envelope，不刪除圖資料。
     /// </summary>
     private static readonly string[] LegacySchemaCleanupStatements =
     [
+        "DROP CONSTRAINT graph_entity_identity_v4 IF EXISTS",
+        "DROP CONSTRAINT entity_key IF EXISTS",
+        "DROP CONSTRAINT project_graph_identity_v4 IF EXISTS",
         "DROP INDEX graphEntitySearchV3 IF EXISTS",
         "DROP CONSTRAINT graph_entity_identity_v3 IF EXISTS",
         "DROP CONSTRAINT project_graph_identity_v3 IF EXISTS",

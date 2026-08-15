@@ -50,13 +50,21 @@ public sealed class AgentRuntime(
             yield break;
         }
 
+        // 在建立 provider agent 前包裝工具，讓「本輪工具上限」成為 Runtime 的
+        // 硬性邊界。不能只把上限寫進 Prompt，否則不同模型仍可能繼續呼叫工具。
+        // 即使呼叫端傳入過大的數值，也不能繞過全域安全上限；零或負值
+        // 視為未設定並採用既有的八次上限。
+        var maximumToolCalls = request.MaxToolCalls <= 0
+            ? 8
+            : Math.Min(request.MaxToolCalls, 8);
+        var tools = WrapTools(request.Tools, maximumToolCalls);
         var context = new AgentCreationContext
         {
             Profile = request.Profile,
             ModelOverride = request.ModelOverride,
             Instructions = request.Instructions,
             SkillsPrompt = request.SkillsPrompt,
-            Tools = request.Tools,
+            Tools = tools,
         };
 
         var agent = factory.CreateAgent(context);
@@ -110,10 +118,10 @@ public sealed class AgentRuntime(
                 await request.Activity!.CompleteAsync(
                     answeringActivityId,
                     "模型已完成回答");
-            else if (answeringActivityId is not null && !ct.IsCancellationRequested)
+            else if (answeringActivityId is not null)
                 await request.Activity!.FailAsync(
                     answeringActivityId,
-                    "模型回應失敗");
+                    ct.IsCancellationRequested ? "模型回應已取消" : "模型回應失敗");
         }
 
         if (lastUsage is not null)
@@ -127,6 +135,79 @@ public sealed class AgentRuntime(
                 usage.InputTokens, usage.OutputTokens, usage.TotalTokens);
             request.OnUsage?.Invoke(usage);
         }
+    }
+
+    /// <summary>
+    /// 建立帶有本輪共用預算的工具集合。相同工具若被兩個平行 tool call 同時
+    /// 呼叫，也只能由第一批取得剩餘配額的呼叫執行，避免超過硬性上限。
+    /// </summary>
+    internal static IReadOnlyList<AIFunction> WrapTools(
+        IReadOnlyList<AIFunction> tools,
+        int maximumCalls)
+    {
+        if (tools.Count == 0 || maximumCalls <= 0)
+            return tools;
+
+        var budget = new ToolInvocationBudget(maximumCalls);
+        return tools
+            .Select(tool => (AIFunction)new BudgetedAIFunction(tool, budget))
+            .ToList();
+    }
+
+    /// <summary>每一輪 Agent 共用的原子工具配額。</summary>
+    private sealed class ToolInvocationBudget(int maximumCalls)
+    {
+        private int _used;
+
+        public bool TryReserve()
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref _used);
+                if (current >= maximumCalls)
+                    return false;
+                if (Interlocked.CompareExchange(ref _used, current + 1, current) == current)
+                    return true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 保留原始工具的 JSON schema 與名稱，只在真正執行前檢查共用配額。
+    /// 超過配額時回傳模型可理解的結構化結果，讓模型立即整理既有證據，
+    /// 不會因例外中斷整個回答串流。
+    /// </summary>
+    private sealed class BudgetedAIFunction(
+        AIFunction inner,
+        ToolInvocationBudget budget) : AIFunction
+    {
+        protected override ValueTask<object?> InvokeCoreAsync(
+            AIFunctionArguments arguments,
+            CancellationToken cancellationToken)
+        {
+            if (!budget.TryReserve())
+            {
+                IReadOnlyDictionary<string, object?> exhausted =
+                    new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["status"] = "budget_exhausted",
+                        ["scope"] = "runtime",
+                        ["tool"] = Name,
+                        ["message"] = "本輪工具呼叫已達上限，請整理目前證據後直接回答。",
+                    };
+                return ValueTask.FromResult<object?>(exhausted);
+            }
+
+            return inner.InvokeAsync(arguments, cancellationToken);
+        }
+
+        public override System.Reflection.MethodInfo? UnderlyingMethod => inner.UnderlyingMethod;
+        public override System.Text.Json.JsonSerializerOptions JsonSerializerOptions => inner.JsonSerializerOptions!;
+        public override System.Text.Json.JsonElement JsonSchema => inner.JsonSchema;
+        public override System.Text.Json.JsonElement? ReturnJsonSchema => inner.ReturnJsonSchema;
+        public override string Name => inner.Name;
+        public override string Description => inner.Description;
+        public override IReadOnlyDictionary<string, object?> AdditionalProperties => inner.AdditionalProperties;
     }
 
     // ─── 輔助方法 ─────────────────────────────────────────────────────────────

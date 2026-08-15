@@ -31,7 +31,6 @@ public static class ProjectIndexDiagnosticsEndpoints
         var group = app.MapGroup("/api/projects");
         group.MapGet("/{id}/index/manifest", GetDiagnostics);
         group.MapGet("/{id}/index/run", GetRun);
-        group.MapPost("/{id}/index/catch-up", CatchUp);
         group.MapPost("/{id}/retrieval/diagnostics", MeasureRetrieval);
         group.MapPost("/{id}/retrieval/seed-diagnostics", MeasureSeeds);
         group.MapGet("/{id}/community/acceptance-diagnostics", GetCommunityDiagnostics);
@@ -39,7 +38,7 @@ public static class ProjectIndexDiagnosticsEndpoints
         return app;
     }
 
-    /// <summary>回傳目前索引 manifest、最近 attempt 與 pending 檔案。</summary>
+    /// <summary>回傳目前索引 manifest 與最近一次完整索引 attempt。</summary>
     private static async Task<IResult> GetDiagnostics(
         string id,
         IProjectRepository projects,
@@ -68,25 +67,6 @@ public static class ProjectIndexDiagnosticsEndpoints
         return indexing.GetLastRun(id, mode) is { } run
             ? Results.Ok(run)
             : Results.NotFound();
-    }
-
-    /// <summary>補做一次內容 hash 比對，但不直接修改原始碼或資料庫。</summary>
-    private static async Task<IResult> CatchUp(
-        string id,
-        IProjectRepository projects,
-        GraphIndexingService indexing,
-        CancellationToken ct)
-    {
-        if (await projects.GetAsync(id, ct) is null)
-        {
-            return Results.NotFound();
-        }
-        var changed = await indexing.CatchUpAsync(id, ct);
-        return Results.Ok(new
-        {
-            changed,
-            diagnostics = await indexing.GetDiagnosticsAsync(id, ct),
-        });
     }
 
     /// <summary>量測建立 FBL Context Pack 的時間與大小，不呼叫 LLM。</summary>

@@ -14,26 +14,48 @@ public sealed partial class Neo4jGraphStore
         string projectId,
         string nodeId,
         int limit,
+        CancellationToken cancellationToken = default) =>
+        await GetNeighborsAsync(
+            projectId,
+            nodeId,
+            limit,
+            graphVersion: null,
+            cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<GraphNeighbor>> GetNeighborsAsync(
+        string projectId,
+        string nodeId,
+        int limit,
+        string? graphVersion,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
         limit = Math.Clamp(limit, 1, 500);
-        if (_driver is null) return [];
+        if (_driver is null)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.Unavailable,
+                "Neo4j 尚未建立連線，無法讀取 Graph 鄰接關係。");
+        }
+        graphVersion ??= await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null) return [];
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
-        return await session.ExecuteReadAsync(async transaction =>
+        try
         {
+            return await session.ExecuteReadAsync(async transaction =>
+            {
             var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (center:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion,
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion,
                     id: $nodeId
                 })-[relationship]-(neighbor:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 RETURN neighbor, relationship,
                        startNode(relationship).id AS sourceId,
@@ -60,7 +82,7 @@ public sealed partial class Neo4jGraphStore
                     neighbor.id
                 LIMIT $limit
                 """,
-                new { projectId, nodeId, limit });
+                new { projectId, nodeId, limit, graphVersion });
             var result = new List<GraphNeighbor>();
             while (await cursor.FetchAsync())
             {
@@ -73,8 +95,34 @@ public sealed partial class Neo4jGraphStore
                         cursor.Current["targetId"].As<string>()),
                     cursor.Current["direction"].As<string>()));
             }
-            return (IReadOnlyList<GraphNeighbor>)result;
-        });
+                return (IReadOnlyList<GraphNeighbor>)result;
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (ServiceUnavailableException exception)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.Unavailable,
+                "Neo4j 無法提供 Graph 鄰接關係。",
+                exception);
+        }
+        catch (ClientException exception)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.QueryFailed,
+                "Neo4j Graph 鄰接查詢失敗。",
+                exception);
+        }
+        catch (Exception exception)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.QueryFailed,
+                "Neo4j Graph 鄰接查詢失敗。",
+                exception);
+        }
     }
 
     /// <inheritdoc />
@@ -83,6 +131,21 @@ public sealed partial class Neo4jGraphStore
             string projectId,
             IReadOnlyList<string> nodeIds,
             int limitPerNode,
+            CancellationToken cancellationToken = default) =>
+        await GetNeighborsBatchAsync(
+            projectId,
+            nodeIds,
+            limitPerNode,
+            graphVersion: null,
+            cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<GraphNeighbor>>>
+        GetNeighborsBatchAsync(
+            string projectId,
+            IReadOnlyList<string> nodeIds,
+            int limitPerNode,
+            string? graphVersion,
             CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
@@ -97,23 +160,33 @@ public sealed partial class Neo4jGraphStore
             nodeId => nodeId,
             _ => (IReadOnlyList<GraphNeighbor>)Array.Empty<GraphNeighbor>(),
             StringComparer.Ordinal);
-        if (_driver is null || distinctIds.Count == 0) return empty;
+        if (_driver is null)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.Unavailable,
+                "Neo4j 尚未建立連線，無法讀取 Graph 鄰接關係。");
+        }
+        graphVersion ??= await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null)
+            return distinctIds.ToDictionary(id => id, _ => (IReadOnlyList<GraphNeighbor>)[], StringComparer.Ordinal);
+        if (distinctIds.Count == 0) return empty;
 
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
-        return await session.ExecuteReadAsync(async transaction =>
+        try
         {
-            var cursor = await transaction.RunAsync(
+            return await session.ExecuteReadAsync(async transaction =>
+            {
+                var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 UNWIND $nodeIds AS nodeId
                 MATCH (center:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion,
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion,
                     id: nodeId
                 })-[relationship]-(neighbor:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 WITH center, neighbor, relationship,
                      CASE WHEN startNode(relationship) = center
@@ -170,7 +243,7 @@ public sealed partial class Neo4jGraphStore
                     END,
                     item.neighbor.id
                 """,
-                new { projectId, nodeIds = distinctIds, limitPerNode });
+                new { projectId, nodeIds = distinctIds, limitPerNode, graphVersion });
             var mutable = distinctIds.ToDictionary(
                 nodeId => nodeId,
                 _ => new List<GraphNeighbor>(),
@@ -187,10 +260,36 @@ public sealed partial class Neo4jGraphStore
                         cursor.Current["targetId"].As<string>()),
                     cursor.Current["direction"].As<string>()));
             }
-            return mutable.ToDictionary(
-                pair => pair.Key,
-                pair => (IReadOnlyList<GraphNeighbor>)pair.Value,
-                StringComparer.Ordinal);
-        });
+                return mutable.ToDictionary(
+                    pair => pair.Key,
+                    pair => (IReadOnlyList<GraphNeighbor>)pair.Value,
+                    StringComparer.Ordinal);
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (ServiceUnavailableException exception)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.Unavailable,
+                "Neo4j 無法提供 Graph 鄰接關係。",
+                exception);
+        }
+        catch (ClientException exception)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.QueryFailed,
+                "Neo4j Graph 鄰接查詢失敗。",
+                exception);
+        }
+        catch (Exception exception)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.QueryFailed,
+                "Neo4j Graph 鄰接查詢失敗。",
+                exception);
+        }
     }
 }

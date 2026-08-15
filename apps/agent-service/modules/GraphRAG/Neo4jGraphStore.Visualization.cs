@@ -92,6 +92,9 @@ public sealed partial class Neo4jGraphStore
     {
         if (_driver is null || candidateIds.Count == 0 || relationshipTypes.Count == 0)
             return new HashSet<string>(StringComparer.Ordinal);
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null)
+            return new HashSet<string>(StringComparer.Ordinal);
 
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
@@ -99,13 +102,12 @@ public sealed partial class Neo4jGraphStore
         {
             var cursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (source:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })-[relationship]->(target:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 WHERE type(relationship) IN $relationshipTypes
                   AND (source.id IN $candidateIds OR target.id IN $candidateIds)
@@ -116,6 +118,7 @@ public sealed partial class Neo4jGraphStore
                 new
                 {
                     projectId,
+                    graphVersion,
                     candidateIds,
                     relationshipTypes,
                 });
@@ -174,6 +177,8 @@ public sealed partial class Neo4jGraphStore
         var normalizedKinds = NormalizeKinds(kinds);
         var normalizedRelationships = NormalizeRelationships(relationshipTypes);
         if (_driver is null) return new([], [], 0, 0, 0, false);
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null) return new([], [], 0, 0, 0, false);
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         return await session.ExecuteReadAsync(async transaction =>
@@ -184,30 +189,32 @@ public sealed partial class Neo4jGraphStore
             // 補滿剩餘額度，既維持 bounded query，也確保預設畫面能呈現實際程式碼關聯。
             var relationshipSeedCursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (source:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })-[relationship]->(target:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 WHERE (size($kinds) = 0 OR
-                       (source.kind IN $kinds AND target.kind IN $kinds))
+                       (any(label IN labels(source) WHERE label IN $kinds) AND
+                        any(label IN labels(target) WHERE label IN $kinds)))
                   AND (size($relationshipTypes) = 0 OR
                        type(relationship) IN $relationshipTypes)
                 WITH source, target, relationship,
-                    CASE source.kind
-                        WHEN 'Feature' THEN 0
-                        WHEN 'EntryPoint' THEN 1
-                        WHEN 'Code' THEN 2
-                        ELSE 3
+                    CASE
+                        WHEN source:Solution THEN 0
+                        WHEN source:Project THEN 1
+                        WHEN source:File THEN 2
+                        WHEN source:Type THEN 3
+                        ELSE 4
                     END AS sourcePriority,
-                    CASE target.kind
-                        WHEN 'Feature' THEN 0
-                        WHEN 'EntryPoint' THEN 1
-                        WHEN 'Code' THEN 2
-                        ELSE 3
+                    CASE
+                        WHEN target:Solution THEN 0
+                        WHEN target:Project THEN 1
+                        WHEN target:File THEN 2
+                        WHEN target:Type THEN 3
+                        ELSE 4
                     END AS targetPriority
                 ORDER BY
                     sourcePriority + targetPriority,
@@ -221,6 +228,7 @@ public sealed partial class Neo4jGraphStore
                 new
                 {
                     projectId,
+                    graphVersion,
                     kinds = normalizedKinds,
                     relationshipTypes = normalizedRelationships,
                     edgeSeedLimit = Math.Min(limit * 4, 20_000),
@@ -236,25 +244,25 @@ public sealed partial class Neo4jGraphStore
             var coreNodeIds = SelectRelationshipCoreNodeIds(relationshipSeeds, limit);
             var nodeCursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (node:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
-                WHERE size($kinds) = 0 OR node.kind IN $kinds
+                WHERE size($kinds) = 0 OR any(label IN labels(node) WHERE label IN $kinds)
                 OPTIONAL MATCH (node)-[relationship]-(:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 WITH node, count(relationship) AS degree,
                     CASE WHEN node.id IN $coreNodeIds THEN 0 ELSE 1 END AS corePriority
                 ORDER BY
                     corePriority,
-                    CASE node.kind
-                        WHEN 'Feature' THEN 0
-                        WHEN 'EntryPoint' THEN 1
-                        WHEN 'Code' THEN 2
-                        ELSE 3
+                    CASE
+                        WHEN node:Solution THEN 0
+                        WHEN node:Project THEN 1
+                        WHEN node:File THEN 2
+                        WHEN node:Type THEN 3
+                        ELSE 4
                     END,
                     degree DESC,
                     node.id
@@ -264,6 +272,7 @@ public sealed partial class Neo4jGraphStore
                 new
                 {
                     projectId,
+                    graphVersion,
                     kinds = normalizedKinds,
                     coreNodeIds,
                     limit,
@@ -280,13 +289,12 @@ public sealed partial class Neo4jGraphStore
             {
                 var edgeCursor = await transaction.RunAsync(
                     """
-                    MATCH (p:ProjectGraph {projectId: $projectId})
                     MATCH (source:GraphEntity {
-                        projectId: $projectId,
-                        graphVersion: p.activeManifestVersion
+                        wingmanProjectId: $projectId,
+                        graphVersion: $graphVersion
                     })-[relationship]->(target:GraphEntity {
-                        projectId: $projectId,
-                        graphVersion: p.activeManifestVersion
+                        wingmanProjectId: $projectId,
+                        graphVersion: $graphVersion
                     })
                     WHERE source.id IN $ids
                       AND target.id IN $ids
@@ -298,6 +306,7 @@ public sealed partial class Neo4jGraphStore
                     new
                     {
                         projectId,
+                        graphVersion,
                         ids,
                         relationshipTypes = normalizedRelationships,
                         edgeLimit = Math.Min(limit * 4, 20_000),
@@ -311,15 +320,14 @@ public sealed partial class Neo4jGraphStore
 
             var countCursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (node:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
-                WHERE size($kinds) = 0 OR node.kind IN $kinds
+                WHERE size($kinds) = 0 OR any(label IN labels(node) WHERE label IN $kinds)
                 RETURN count(node) AS total
                 """,
-                new { projectId, kinds = normalizedKinds });
+                new { projectId, graphVersion, kinds = normalizedKinds });
             var total = (await countCursor.SingleAsync())["total"].As<int>();
             return new GraphVisualData(
                 visualNodes,
@@ -470,32 +478,24 @@ public sealed partial class Neo4jGraphStore
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         if (_driver is null)
             return new(0, 0, [], [], VisualPropertyKeys);
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (graphVersion is null)
+            return new(0, 0, [], [], VisualPropertyKeys);
         await using var session = OpenReadSession();
         cancellationToken.ThrowIfCancellationRequested();
         return await session.ExecuteReadAsync(async transaction =>
         {
-            var revisionCursor = await transaction.RunAsync(
-                """
-                MATCH (p:ProjectGraph {projectId: $projectId})
-                RETURN p.activeManifestVersion AS graphRevision
-                LIMIT 1
-                """,
-                new { projectId });
-            var graphRevision = await revisionCursor.FetchAsync()
-                ? revisionCursor.Current["graphRevision"].As<string?>()
-                : null;
-
             var nodeCursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (node:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
-                RETURN node.kind AS name, count(node) AS count
+                UNWIND [label IN labels(node) WHERE label <> 'GraphEntity'] AS name
+                RETURN name, count(node) AS count
                 ORDER BY name
                 """,
-                new { projectId });
+                new { projectId, graphVersion });
             var nodeKinds = new List<GraphFacet>();
             while (await nodeCursor.FetchAsync())
                 nodeKinds.Add(new GraphFacet(
@@ -504,18 +504,17 @@ public sealed partial class Neo4jGraphStore
 
             var edgeCursor = await transaction.RunAsync(
                 """
-                MATCH (p:ProjectGraph {projectId: $projectId})
                 MATCH (:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })-[relationship]->(:GraphEntity {
-                    projectId: $projectId,
-                    graphVersion: p.activeManifestVersion
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
                 })
                 RETURN type(relationship) AS name, count(relationship) AS count
                 ORDER BY name
                 """,
-                new { projectId });
+                new { projectId, graphVersion });
             var relationships = new List<GraphFacet>();
             while (await edgeCursor.FetchAsync())
                 relationships.Add(new GraphFacet(
@@ -528,7 +527,7 @@ public sealed partial class Neo4jGraphStore
                 relationships,
                 VisualPropertyKeys)
             {
-                GraphRevision = graphRevision,
+                GraphRevision = graphVersion,
             };
         });
     }
@@ -603,10 +602,7 @@ public sealed partial class Neo4jGraphStore
                         neighbor.Relationship.SourceKey,
                         neighbor.Relationship.TargetKey,
                         RelationshipType(neighbor.Relationship.Kind),
-                        new Dictionary<string, object?>
-                        {
-                            ["evidence"] = neighbor.Relationship.Evidence,
-                        });
+                        neighbor.Relationship.Properties);
                 }
             }
             frontier = next.Distinct(StringComparer.Ordinal).ToList();
@@ -708,20 +704,19 @@ public sealed partial class Neo4jGraphStore
             {
                 var endpointCursor = await transaction.RunAsync(
                     """
-                    MATCH (p:ProjectGraph {projectId: $projectId})
                     MATCH (node:GraphEntity {
-                        projectId: $projectId,
-                        graphVersion: p.activeManifestVersion
+                        wingmanProjectId: $projectId,
+                        graphVersion: $graphVersion
                     })
                     WHERE node.id IN $nodeIds
                     OPTIONAL MATCH (node)-[relationship]-(:GraphEntity {
-                        projectId: $projectId,
-                        graphVersion: p.activeManifestVersion
+                        wingmanProjectId: $projectId,
+                        graphVersion: $graphVersion
                     })
                     RETURN node, count(relationship) AS degree
                     ORDER BY node.id
                     """,
-                    new { projectId, nodeIds = missingEndpointIds });
+                    new { projectId, graphVersion = manifest, nodeIds = missingEndpointIds });
                 while (await endpointCursor.FetchAsync())
                 {
                     var mapped = MapVisualNode(

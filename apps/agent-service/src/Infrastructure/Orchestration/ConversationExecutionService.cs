@@ -42,6 +42,11 @@ public sealed class ConversationExecutionService(
         ChannelWriter<ConversationStreamEvent> writer,
         CancellationToken ct)
     {
+        using var executionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var executionTimeout = request.ExecutionTimeout ?? TimeSpan.FromMinutes(2);
+        if (executionTimeout > TimeSpan.Zero && executionTimeout != Timeout.InfiniteTimeSpan)
+            executionCts.CancelAfter(executionTimeout);
+        var runCt = executionCts.Token;
         var conversation = request.Conversation;
         var firstExchange = conversation.Messages.Count == 0;
         var runId = Guid.NewGuid().ToString("N");
@@ -62,7 +67,7 @@ public sealed class ConversationExecutionService(
                     "run.started",
                     "正在分析問題",
                     tool: "runtime",
-                    detail: "準備 GraphRAG 與專案工具");
+                    detail: "準備本輪專案證據與唯讀工具");
             }
             var preparation = request.Prepare is null
                 ? new ConversationPreparation(
@@ -70,7 +75,7 @@ public sealed class ConversationExecutionService(
                     AgentRuntimeService.GeneralInstructions,
                     SkillPromptBuilder.BuildSkillsPrompt(skillProvider),
                     Tools: [])
-                : await request.Prepare(activity, ct);
+                : await request.Prepare(activity, runCt);
 
             await writer.WriteAsync(
                 new ConversationStartedEvent(
@@ -78,19 +83,20 @@ public sealed class ConversationExecutionService(
                     request.ModelId,
                     runId,
                     preparation.GraphStatus,
-                    preparation.GraphWarning),
+                    preparation.GraphWarning,
+                    preparation.GraphVersion),
                 CancellationToken.None);
 
             await conversations.AddMessageAsync(
                 conversation.Id,
                 MessageRole.User,
                 request.Message.UserMessage,
-                ct);
+                runCt);
             if (conversation.Title == "新對話")
                 await conversations.SetTitleAsync(
                     conversation.Id,
                     ShortTitle(request.Message.UserMessage),
-                    ct);
+                    runCt);
 
             await foreach (var token in agent.RunStreamingAsync(
                 new AgentExecutionRequest(
@@ -104,8 +110,9 @@ public sealed class ConversationExecutionService(
                     preparation.Tools,
                     value => usage = value,
                     activity,
-                    request.EmitRuntimeActivities),
-                ct))
+                    request.EmitRuntimeActivities,
+                    preparation.MaxToolCalls ?? 8),
+                runCt))
             {
                 fullResponse.Append(token);
                 await writer.WriteAsync(
@@ -160,6 +167,21 @@ public sealed class ConversationExecutionService(
         {
             // 使用者取消串流時不寫入未完成的 Assistant 回覆。
         }
+        catch (OperationCanceledException)
+        {
+            // 執行逾時必須明確回報，不能讓前端只看到串流中斷而誤以為仍在處理。
+            logger.LogWarning(
+                "對話 Agent 執行逾時。ConversationId={ConversationId}, ProviderId={ProviderId}",
+                conversation.Id,
+                request.Profile.Id);
+            if (runActivityId is not null)
+                await activity.FailAsync(runActivityId, "回答逾時");
+            await writer.WriteAsync(
+                new ConversationErrorEvent(
+                    "本輪對話逾時，請縮小問題範圍後重試。",
+                    "timeout"),
+                CancellationToken.None);
+        }
         catch (Exception exception)
         {
             logger.LogError(
@@ -170,7 +192,7 @@ public sealed class ConversationExecutionService(
             if (runActivityId is not null)
                 await activity.FailAsync(runActivityId, "回答失敗");
             await writer.WriteAsync(
-                new ConversationErrorEvent(exception.Message),
+                new ConversationErrorEvent(exception.Message, "agent_execution_failed"),
                 CancellationToken.None);
         }
         finally

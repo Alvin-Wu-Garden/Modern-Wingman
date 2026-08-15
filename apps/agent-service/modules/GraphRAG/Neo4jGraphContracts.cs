@@ -51,6 +51,37 @@ public sealed class GraphRagNeo4jOptions
 /// <param name="Score">Neo4j full-text score。</param>
 public sealed record GraphSearchHit(AuthorityGraphNode Node, double Score);
 
+/// <summary>Graph 檢索失敗的可辨識類型，避免把基礎設施錯誤誤報成查無結果。</summary>
+public enum GraphStoreFailureKind
+{
+    /// <summary>Neo4j 無法連線或服務未啟動。</summary>
+    Unavailable,
+
+    /// <summary>必要的 constraint／full-text index 尚未建立或不可用。</summary>
+    SchemaNotReady,
+
+    /// <summary>要求的 immutable graph snapshot 不存在。</summary>
+    SnapshotNotFound,
+
+    /// <summary>Neo4j 查詢執行失敗。</summary>
+    QueryFailed,
+}
+
+/// <summary>攜帶穩定失敗類型的 Graph Store 例外。</summary>
+public sealed class GraphStoreException : Exception
+{
+    /// <summary>建立 Graph Store 例外。</summary>
+    public GraphStoreException(
+        GraphStoreFailureKind failureKind,
+        string message,
+        Exception? innerException = null)
+        : base(message, innerException) =>
+        FailureKind = failureKind;
+
+    /// <summary>可供 API／診斷使用的穩定錯誤類型。</summary>
+    public GraphStoreFailureKind FailureKind { get; }
+}
+
 /// <summary>一個中心節點的一階關係，供 relation-aware BFS 使用。</summary>
 /// <param name="Node">鄰接 node。</param>
 /// <param name="Relationship">連接中心與鄰接 node 的 authority relationship。</param>
@@ -243,28 +274,28 @@ public sealed record GraphVisualSchema(
         new(
             "entrypoints",
             "入口與功能鏈",
-            "MATCH path=(n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})-[r*1..4]->(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "MATCH path=(n:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion})-[r*1..4]->(m:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion})\n" +
             "RETURN path LIMIT $limit",
             "manual"),
         new(
             "high-degree",
             "高連結節點",
-            "MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "MATCH (n:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion})\n" +
             "OPTIONAL MATCH (n)-[r]-()\n" +
             "RETURN n, count(r) AS degree ORDER BY degree DESC LIMIT $limit",
             "manual"),
         new(
             "selected-node",
             "選取節點的一階關係",
-            "MATCH (n:GraphEntity {projectId: $projectId, graphVersion: $graphVersion, id: '{{nodeId}}'})\n" +
-            "OPTIONAL MATCH (n)-[r]-(m:GraphEntity {projectId: $projectId, graphVersion: $graphVersion})\n" +
+            "MATCH (n:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion, id: '{{nodeId}}'})\n" +
+            "OPTIONAL MATCH (n)-[r]-(m:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion})\n" +
             "RETURN n, r, m LIMIT $limit",
             "node"),
         new(
             "selected-edge",
             "選取關係的兩端",
-            "MATCH (source:GraphEntity {projectId: $projectId, graphVersion: $graphVersion, id: '{{sourceId}}'})\n" +
-            "-[relationship]->(target:GraphEntity {projectId: $projectId, graphVersion: $graphVersion, id: '{{targetId}}'})\n" +
+            "MATCH (source:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion, id: '{{sourceId}}'})\n" +
+            "-[relationship]->(target:GraphEntity {wingmanProjectId: $projectId, graphVersion: $graphVersion, id: '{{targetId}}'})\n" +
             "WHERE type(relationship) = '{{edgeType}}'\n" +
             "RETURN source, relationship, target LIMIT $limit",
             "edge"),
@@ -322,6 +353,14 @@ public interface IGraphStore
     Task PublishAsync(FblGraphSnapshot snapshot, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Neo4j active 與本機 manifest／Project 都完成後，才移除 previous 指標並清理舊版。
+    /// 非 Neo4j store 不需處理版本清理。
+    /// </summary>
+    Task FinalizePublishedVersionAsync(
+        string projectId,
+        CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    /// <summary>
     /// 發布後續步驟失敗時，將 active anchor 恢復到發布前版本並清理候選版本。
     /// 非 Neo4j 測試 store 可使用預設空實作。
     /// </summary>
@@ -330,6 +369,19 @@ public interface IGraphStore
         string publishedVersion,
         string? previousVersion,
         CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    /// <summary>切換歷史版本前，確認 Neo4j 節點與關係仍符合成功 manifest。</summary>
+    Task<GraphVersionValidation> ValidateVersionAsync(
+        string projectId,
+        string graphVersion,
+        int? expectedNodes = null,
+        int? expectedEdges = null,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(new GraphVersionValidation(
+            true,
+            expectedNodes ?? 0,
+            expectedEdges ?? 0,
+            []));
 
     /// <summary>取得專案目前 active manifest；圖譜不一致或尚未發布時回傳 null。</summary>
     Task<string?> GetActiveManifestAsync(
@@ -348,12 +400,36 @@ public interface IGraphStore
         int limit,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 在指定 immutable graphVersion 搜尋。正式問答必須使用此多載，
+    /// 避免同一輪的每個 query variant 重讀 active manifest。
+    /// 舊實作以預設轉呼叫保留相容性。
+    /// </summary>
+    Task<IReadOnlyList<GraphSearchHit>> SearchAsync(
+        string projectId,
+        string query,
+        int limit,
+        string? graphVersion,
+        CancellationToken cancellationToken = default) =>
+        SearchAsync(projectId, query, limit, cancellationToken);
+
     /// <summary>取得 active graph 的一階鄰接關係；多 hop budget 由 retrieval service 控制。</summary>
     Task<IReadOnlyList<GraphNeighbor>> GetNeighborsAsync(
         string projectId,
         string nodeId,
         int limit,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 在指定 immutable graphVersion 取得鄰接關係；未指定時沿用 active graph。
+    /// </summary>
+    Task<IReadOnlyList<GraphNeighbor>> GetNeighborsAsync(
+        string projectId,
+        string nodeId,
+        int limit,
+        string? graphVersion,
+        CancellationToken cancellationToken = default) =>
+        GetNeighborsAsync(projectId, nodeId, limit, cancellationToken);
 
     /// <summary>
     /// 批次取得多個 active graph 節點的一階鄰接關係。
@@ -391,6 +467,19 @@ public interface IGraphStore
             item => item.Neighbors,
             StringComparer.Ordinal);
     }
+
+    /// <summary>
+    /// 在指定 immutable graphVersion 批次取得鄰接關係；正式問答使用此多載
+    /// 以固定整輪 BFS 的 snapshot。舊 store 會退回既有 active 查詢。
+    /// </summary>
+    Task<IReadOnlyDictionary<string, IReadOnlyList<GraphNeighbor>>>
+        GetNeighborsBatchAsync(
+            string projectId,
+            IReadOnlyList<string> nodeIds,
+            int limitPerNode,
+            string? graphVersion,
+            CancellationToken cancellationToken = default) =>
+        GetNeighborsBatchAsync(projectId, nodeIds, limitPerNode, cancellationToken);
 
     /// <summary>依 active graph degree 取得入口與核心節點，供 Repo Map 使用。</summary>
     Task<IReadOnlyList<GraphSearchHit>> GetCentralNodesAsync(
@@ -474,15 +563,25 @@ public interface IGraphStore
         CancellationToken cancellationToken = default) =>
         Task.FromResult(false);
 
-    /// <summary>
-    /// GDS 可用時以加權 Leiden 偵測 secondary community member groups；
-    /// 未安裝 GDS 時回傳 null，呼叫端必須使用 deterministic fallback。
-    /// 預設實作讓測試／非 Neo4j store 明確表示不提供 GDS，而不必模擬外掛。
-    /// </summary>
-    Task<IReadOnlyList<IReadOnlyList<string>>?> TryDetectLeidenCommunitiesAsync(
+    Task<bool> TryUpdateCommunityTextAsync(
         string projectId,
+        string graphVersion,
+        string communityId,
+        string expectedCacheKey,
+        string title,
+        string summary,
+        string summaryState,
+        int retryCount,
         CancellationToken cancellationToken = default) =>
-        Task.FromResult<IReadOnlyList<IReadOnlyList<string>>?>(null);
+        TryUpdateCommunitySummaryAsync(
+            projectId,
+            graphVersion,
+            communityId,
+            expectedCacheKey,
+            summary,
+            summaryState,
+            retryCount,
+            cancellationToken);
 
     /// <summary>取得 active graph 的可視化初始子圖。</summary>
     Task<GraphVisualData> GetVisualGraphAsync(

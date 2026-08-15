@@ -21,7 +21,11 @@ interface ProjectsState {
   error: string | null
 
   fetchProjects: () => Promise<void>
-  addProject: (name: string, rootPath: string) => Promise<ProjectInfo>
+  addProject: (
+    name: string,
+    rootPath: string,
+    selectedSolutionPath?: string | null,
+  ) => Promise<ProjectInfo>
   importRemoteProject: (
     request: Parameters<typeof importProject>[0],
     signal?: AbortSignal,
@@ -66,9 +70,9 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     }
   },
 
-  addProject: async (name, rootPath) => {
+  addProject: async (name, rootPath, selectedSolutionPath) => {
     try {
-      const project = await createProject(name, rootPath)
+      const project = await createProject(name, rootPath, selectedSolutionPath)
       await get().fetchProjects()
       set({ activeProjectId: project.id, error: null })
       return project
@@ -123,7 +127,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         try {
           const progress = await getIndexProgress(projectId)
           set({ progress })
-          if (progress.phase === 'failed') {
+          if (progress.phase === 'failed' || progress.phase === 'canceled') {
             set({ error: progress.message || '索引失敗。', progress: null })
             return
           }

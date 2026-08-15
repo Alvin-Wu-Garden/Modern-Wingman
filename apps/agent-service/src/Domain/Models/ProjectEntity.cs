@@ -3,12 +3,12 @@ namespace AgentService.Domain.Models;
 public enum ProjectIndexStatus
 {
     NotIndexed,
-    PendingChanges,
     Indexing,
     Indexed,
     Partial,
     Stale,
     Failed,
+    Canceled,
 }
 
 /// <summary>
@@ -43,8 +43,11 @@ public sealed class ProjectEntity
     /// <summary>目前可供查詢的已成功圖譜版本。</summary>
     public string? IndexManifestVersion { get; set; }
 
-    /// <summary>等待 debounce／catch-up 的檔案數。</summary>
-    public int PendingFileCount { get; set; }
+    /// <summary>根目錄包含多個方案時，由使用者明確選擇的方案絕對路徑。</summary>
+    public string? SelectedSolutionPath { get; set; }
+
+    /// <summary>是否已執行 ParallelExtractor v2 的舊格式清理。</summary>
+    public bool GraphStorageMigrated { get; set; }
 
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }

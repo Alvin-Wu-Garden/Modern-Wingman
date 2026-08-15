@@ -1,5 +1,3 @@
-using AgentService.Modules.GraphRAG.FblAuthority;
-
 namespace AgentService.Modules.GraphRAG;
 
 /// <summary>JIRA 邊界使用的舊式節點分類；不參與 V4 索引或 Neo4j 發布。</summary>
@@ -14,7 +12,6 @@ public enum LegacyGraphNodeKind
     /// <summary>資料庫或報表資料節點。</summary>
     Data,
 }
-
 /// <summary>JIRA 檢索結果使用的扁平節點投影。</summary>
 public sealed record LegacyGraphNode(
     string Id,
@@ -57,31 +54,32 @@ internal static class LegacyGraphMappings
     /// <summary>將 V4 authority kind 映射到 JIRA 舊分類。</summary>
     public static LegacyGraphNodeKind KindFor(FblAuthority.GraphNodeKind kind) => kind switch
     {
-        FblAuthority.GraphNodeKind.Menu => LegacyGraphNodeKind.Feature,
-        FblAuthority.GraphNodeKind.Endpoint => LegacyGraphNodeKind.EntryPoint,
-        FblAuthority.GraphNodeKind.WebAction => LegacyGraphNodeKind.EntryPoint,
-        FblAuthority.GraphNodeKind.ViewPage => LegacyGraphNodeKind.EntryPoint,
-        FblAuthority.GraphNodeKind.ClientScript => LegacyGraphNodeKind.EntryPoint,
-        FblAuthority.GraphNodeKind.ReactEntry => LegacyGraphNodeKind.EntryPoint,
-        FblAuthority.GraphNodeKind.CodeClass => LegacyGraphNodeKind.Code,
-        FblAuthority.GraphNodeKind.DatabaseObject => LegacyGraphNodeKind.Data,
-        FblAuthority.GraphNodeKind.CustomReportTemplate => LegacyGraphNodeKind.Data,
-        FblAuthority.GraphNodeKind.CustomReportDataSource => LegacyGraphNodeKind.Data,
+        FblAuthority.GraphNodeKind.Database or
+        FblAuthority.GraphNodeKind.DatabaseObject or
+        FblAuthority.GraphNodeKind.DatabaseColumn or
+        FblAuthority.GraphNodeKind.StoredProcedureParameter => LegacyGraphNodeKind.Data,
         FblAuthority.GraphNodeKind.CustomParameterDataSource => LegacyGraphNodeKind.Data,
-        FblAuthority.GraphNodeKind.ReportField => LegacyGraphNodeKind.Data,
+        FblAuthority.GraphNodeKind.ReportDataSource => LegacyGraphNodeKind.Data,
+        FblAuthority.GraphNodeKind.ReportTemplate => LegacyGraphNodeKind.Data,
+        FblAuthority.GraphNodeKind.ReportDocument => LegacyGraphNodeKind.Data,
+        FblAuthority.GraphNodeKind.ReportParameter => LegacyGraphNodeKind.Data,
+        FblAuthority.GraphNodeKind.ResultColumn => LegacyGraphNodeKind.Data,
+        FblAuthority.GraphNodeKind.MenuItem => LegacyGraphNodeKind.Feature,
+        FblAuthority.GraphNodeKind.ApiEndpoint or
+        FblAuthority.GraphNodeKind.WebFormPage or
+        FblAuthority.GraphNodeKind.View => LegacyGraphNodeKind.EntryPoint,
         _ => LegacyGraphNodeKind.Code,
     };
 
     /// <summary>將 V4 authority kind 映射到 JIRA 的入口角色文字。</summary>
     public static string RoleFor(FblAuthority.GraphNodeKind kind) => kind switch
     {
-        FblAuthority.GraphNodeKind.Menu => GraphRoles.MenuFeature,
-        FblAuthority.GraphNodeKind.Endpoint => GraphRoles.WebRoute,
-        FblAuthority.GraphNodeKind.WebAction => GraphRoles.ControllerAction,
-        FblAuthority.GraphNodeKind.ViewPage => GraphRoles.FrontendPage,
-        FblAuthority.GraphNodeKind.ClientScript => GraphRoles.FrontendPage,
-        FblAuthority.GraphNodeKind.ReactEntry => GraphRoles.FrontendPage,
-        FblAuthority.GraphNodeKind.CodeClass => GraphRoles.Controller,
+        FblAuthority.GraphNodeKind.MenuItem => GraphRoles.MenuFeature,
+        FblAuthority.GraphNodeKind.ApiEndpoint => GraphRoles.WebRoute,
+        FblAuthority.GraphNodeKind.WebFormPage or
+        FblAuthority.GraphNodeKind.View or
+        FblAuthority.GraphNodeKind.ScriptAsset => GraphRoles.FrontendPage,
+        FblAuthority.GraphNodeKind.Type => GraphRoles.Controller,
         _ => string.Empty,
     };
 }
@@ -107,12 +105,4 @@ internal static class GraphRoles
     public const string CliCommand = "CliCommand";
     /// <summary>排程入口。</summary>
     public const string Schedule = "Schedule";
-}
-
-/// <summary>將 authority 圖型別映射為應用層相容型別的工具。</summary>
-internal static class GraphRetrievalCompatibilityExtensions
-{
-    /// <summary>以相容資料建立 JIRA 證據項目。</summary>
-    public static LegacyGraphEvidence ToCompatibilityEvidence(this FblAuthority.GraphEvidence evidence) =>
-        new(evidence.SourceFile ?? evidence.DatabaseObject ?? evidence.XmlPath ?? evidence.SourceText ?? string.Empty);
 }

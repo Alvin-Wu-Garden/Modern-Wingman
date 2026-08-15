@@ -6,7 +6,7 @@ export interface ProjectInfo {
   name: string
   rootPath: string
   languages: string
-  indexStatus: 'NotIndexed' | 'PendingChanges' | 'Indexing' | 'Indexed' | 'Partial' | 'Stale' | 'Failed'
+  indexStatus: 'NotIndexed' | 'Indexing' | 'Indexed' | 'Partial' | 'Stale' | 'Failed' | 'Canceled'
   indexedAt: string | null
   indexError: string | null
   nodeCount: number
@@ -18,7 +18,7 @@ export interface ProjectInfo {
   repositoryPath?: string | null
   dirty?: boolean | null
   indexManifestVersion?: string | null
-  pendingFileCount?: number
+  selectedSolutionPath?: string | null
 }
 
 /**
@@ -28,11 +28,15 @@ export interface ProjectInfo {
 export type IndexProgressPhase =
   | 'idle'
   | 'starting'
-  | 'scan'
+  | 'preflight'
+  | 'migration'
   | 'extract'
-  | 'assemble'
+  | 'community'
+  | 'manifest'
   | 'publish'
+  | 'cleanup'
   | 'complete'
+  | 'canceled'
   | 'failed'
 
 export interface IndexProgress {
@@ -236,11 +240,15 @@ export async function listProjects(): Promise<ProjectInfo[]> {
   return response.json()
 }
 
-export async function createProject(name: string, rootPath: string): Promise<ProjectInfo> {
+export async function createProject(
+  name: string,
+  rootPath: string,
+  selectedSolutionPath?: string | null,
+): Promise<ProjectInfo> {
   const response = await fetch(`${AGENT_API_BASE_URL}/api/projects`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, rootPath }),
+    body: JSON.stringify({ name, rootPath, selectedSolutionPath }),
   })
   if (!response.ok)
     throw new Error(await errorMessage(response, `新增專案失敗 (${response.status})`))

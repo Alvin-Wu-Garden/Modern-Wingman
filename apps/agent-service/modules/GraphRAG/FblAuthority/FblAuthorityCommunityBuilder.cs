@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using AgentService.Modules.GraphRAG;
@@ -5,246 +6,309 @@ using AgentService.Modules.GraphRAG;
 namespace AgentService.Modules.GraphRAG.FblAuthority;
 
 /// <summary>
-/// 由已完成驗證的 FBL 權威圖建立 Community 結構模板。
-/// 此類別不呼叫模型，也不重新推測程式關係；索引發布只需付出一次線性走訪成本，
-/// AI 摘要則交由既有背景佇列處理，避免大量功能阻塞圖譜可用時間。
+/// 對 ParallelExtractor 原始圖執行確定性的單層加權 Leiden 分群。
+/// 所有有邊節點與所有原始關係都參與；關係方向不影響社群，occurrenceCount 是邊權重。
 /// </summary>
 public static class FblAuthorityCommunityBuilder
 {
-    private const int MaximumFunctionDepth = 8;
-    private const int MaximumFunctionMembers = 100;
+    private const double Epsilon = 1e-12;
+    private const int MaxLocalMovePasses = 100;
 
     /// <summary>
-    /// 建立三個入口類型 C0 與每個 Menu 一個 C1 模板。
-    /// C0 只供全域導覽並在發布後背景預熱；C1 保存單一功能的實際可達鏈路，
-    /// 只有問答命中時才排入 AI 摘要，因此模板數量不會轉化成索引等待時間。
+    /// 建立單層社群；孤立節點不建立 Community。
+    /// 使用壓縮稀疏列（CSR）保存鄰接圖，避免大型專案為每個節點建立 Dictionary。
     /// </summary>
-    /// <param name="document">已通過 Preflight 的完整 FBL 圖文件。</param>
-    /// <returns>排序穩定、可直接持久化的 Community 模板。</returns>
-    public static IReadOnlyList<GraphCommunityReportV4> Build(GraphDocument document)
+    public static IReadOnlyList<GraphCommunityReportV4> Build(
+        GraphDocument document,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(document);
+        cancellationToken.ThrowIfCancellationRequested();
 
-        var nodes = document.Nodes.ToDictionary(node => node.Key, StringComparer.Ordinal);
-        var outgoing = document.Relationships
-            .GroupBy(relationship => relationship.SourceKey, StringComparer.Ordinal)
-            .ToDictionary(
-                group => group.Key,
-                group => group
-                    .OrderBy(relationship => relationship.Kind)
-                    .ThenBy(relationship => relationship.TargetKey, StringComparer.Ordinal)
-                    .ToArray(),
-                StringComparer.Ordinal);
-        var menus = document.Nodes
-            .Where(node => node.Kind == GraphNodeKind.Menu)
-            .OrderBy(node => node.Key, StringComparer.Ordinal)
-            .ToArray();
+        var nodes = document.Nodes.ToArray();
+        var nodesById = nodes.ToDictionary(node => node.Key, StringComparer.Ordinal);
+        var graph = BuildAdjacency(document.Relationships, nodes, cancellationToken);
+        if (graph.OrderedConnectedNodes.Length == 0)
+            return [];
 
-        var reports = new List<GraphCommunityReportV4>(menus.Length + 3);
-        var parentByResolver = BuildC0(menus, reports);
-        foreach (var menu in menus)
+        var assignment = LocalMove(graph, cancellationToken);
+        var groups = SplitDisconnectedCommunities(graph, assignment, cancellationToken);
+        var reports = new GraphCommunityReportV4[groups.Count];
+        for (var index = 0; index < groups.Count; index++)
         {
-            reports.Add(BuildFunctionTemplate(
-                menu,
-                parentByResolver[ResolverKind(menu)],
-                nodes,
-                outgoing));
-        }
-
-        return reports
-            .OrderBy(report => report.Tier, StringComparer.Ordinal)
-            .ThenBy(report => report.CommunityId, StringComparer.Ordinal)
-            .ToArray();
-    }
-
-    /// <summary>依 StandardWeb、PluginReport、CustomReport 建立少量頂層模板。</summary>
-    private static IReadOnlyDictionary<string, string> BuildC0(
-        IReadOnlyList<GraphNode> menus,
-        ICollection<GraphCommunityReportV4> reports)
-    {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var group in menus
-                     .GroupBy(ResolverKind, StringComparer.Ordinal)
-                     .OrderBy(group => group.Key, StringComparer.Ordinal))
-        {
-            var communityId = CommunityId("c0", group.Key);
-            var memberIds = group.Select(menu => menu.Key)
-                .OrderBy(key => key, StringComparer.Ordinal)
+            cancellationToken.ThrowIfCancellationRequested();
+            var memberIds = groups[index]
+                .Select(nodeIndex => graph.NodeIds[nodeIndex])
+                .OrderBy(value => value, StringComparer.Ordinal)
                 .ToArray();
-            var title = group.Key switch
-            {
-                nameof(MenuResolverKind.StandardWeb) => "FBL 一般交易與管理功能",
-                nameof(MenuResolverKind.PluginReport) => "FBL PluginReport 功能",
-                nameof(MenuResolverKind.CustomReport) => "FBL CustomReport 功能",
-                _ => $"FBL {group.Key} 功能",
-            };
-            var summary = $"此社群包含 {memberIds.Length} 個 {group.Key} 菜單入口；" +
-                          "每個功能的程式與資料鏈請查詢對應 C1 結構模板。";
-            reports.Add(CreateReport(
-                communityId,
-                "C0",
-                null,
-                title,
-                summary,
-                memberIds,
-                topTables: [],
-                topEntryPoints: memberIds.Take(20).ToArray(),
-                truncated: memberIds.Length > 20,
-                truncatedMemberCount: Math.Max(0, memberIds.Length - 20),
-                new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    ["resolverKind"] = group.Key,
-                    ["source"] = "fbl-menu-inventory",
-                }));
-            result[group.Key] = communityId;
+            reports[index] = CreateReport(memberIds, nodesById);
         }
 
-        return result;
+        Array.Sort(reports, static (left, right) =>
+            string.CompareOrdinal(left.MemberIds[0], right.MemberIds[0]));
+        return reports;
     }
 
-    /// <summary>以有界 BFS 保存單一 Menu 的可達鏈路，不跨入其他 Menu。</summary>
-    private static GraphCommunityReportV4 BuildFunctionTemplate(
-        GraphNode menu,
-        string parentCommunityId,
-        IReadOnlyDictionary<string, GraphNode> nodes,
-        IReadOnlyDictionary<string, GraphRelationship[]> outgoing)
+    private static CsrGraph BuildAdjacency(
+        IReadOnlyList<GraphRelationship> relationships,
+        IReadOnlyList<GraphNode> nodes,
+        CancellationToken cancellationToken)
     {
-        var queue = new Queue<(string Key, int Depth)>();
-        var visited = new HashSet<string>(StringComparer.Ordinal) { menu.Key };
-        var members = new List<string>(MaximumFunctionMembers) { menu.Key };
-        queue.Enqueue((menu.Key, 0));
-        var truncatedCount = 0;
-
-        while (queue.Count > 0)
+        var nodeIds = new string[nodes.Count];
+        var nodeIndices = new Dictionary<string, int>(nodes.Count, StringComparer.Ordinal);
+        for (var index = 0; index < nodes.Count; index++)
         {
-            var current = queue.Dequeue();
-            if (current.Depth >= MaximumFunctionDepth ||
-                !outgoing.TryGetValue(current.Key, out var relationships))
+            var nodeId = nodes[index].Key;
+            nodeIds[index] = nodeId;
+            nodeIndices.Add(nodeId, index);
+        }
+
+        var adjacencyCounts = new int[nodes.Count];
+        var adjacencyEntryCount = 0;
+        for (var index = 0; index < relationships.Count; index++)
+        {
+            if ((index & 0x3fff) == 0)
+                cancellationToken.ThrowIfCancellationRequested();
+
+            var edge = relationships[index];
+            if (!nodeIndices.TryGetValue(edge.SourceKey, out var source) ||
+                !nodeIndices.TryGetValue(edge.TargetKey, out var target))
             {
-                continue;
+                throw new InvalidOperationException("Community 分群遇到端點不存在的原始關係。");
             }
 
-            foreach (var relationship in relationships)
+            adjacencyCounts[source] = checked(adjacencyCounts[source] + 1);
+            adjacencyEntryCount = checked(adjacencyEntryCount + 1);
+            if (source != target)
             {
-                if (!nodes.TryGetValue(relationship.TargetKey, out var target) ||
-                    target.Kind == GraphNodeKind.Menu ||
-                    !visited.Add(target.Key))
-                {
-                    continue;
-                }
-
-                if (members.Count < MaximumFunctionMembers)
-                {
-                    members.Add(target.Key);
-                    queue.Enqueue((target.Key, current.Depth + 1));
-                }
-                else
-                {
-                    truncatedCount++;
-                }
+                adjacencyCounts[target] = checked(adjacencyCounts[target] + 1);
+                adjacencyEntryCount = checked(adjacencyEntryCount + 1);
             }
         }
 
-        var orderedMembers = members.OrderBy(key => key, StringComparer.Ordinal).ToArray();
-        var memberNodes = orderedMembers.Select(key => nodes[key]).ToArray();
-        var kindCounts = memberNodes.GroupBy(node => node.Kind)
-            .OrderBy(group => group.Key)
+        var offsets = new int[nodes.Count + 1];
+        for (var index = 0; index < adjacencyCounts.Length; index++)
+            offsets[index + 1] = checked(offsets[index] + adjacencyCounts[index]);
+
+        var neighbors = new int[adjacencyEntryCount];
+        var weights = new double[adjacencyEntryCount];
+        var weightedDegree = new double[nodes.Count];
+        var cursors = offsets.AsSpan(0, nodes.Count).ToArray();
+        for (var index = 0; index < relationships.Count; index++)
+        {
+            if ((index & 0x3fff) == 0)
+                cancellationToken.ThrowIfCancellationRequested();
+
+            var edge = relationships[index];
+            var source = nodeIndices[edge.SourceKey];
+            var target = nodeIndices[edge.TargetKey];
+            var weight = ReadWeight(edge.Properties);
+            AddAdjacencyEntry(source, target, weight, cursors, neighbors, weights, weightedDegree);
+            if (source != target)
+                AddAdjacencyEntry(target, source, weight, cursors, neighbors, weights, weightedDegree);
+        }
+
+        var orderedConnectedNodes = Enumerable.Range(0, nodes.Count)
+            .Where(index => adjacencyCounts[index] > 0)
+            .OrderBy(index => nodeIds[index], StringComparer.Ordinal)
+            .ToArray();
+        return new CsrGraph(nodeIds, offsets, neighbors, weights, weightedDegree, orderedConnectedNodes);
+    }
+
+    private static void AddAdjacencyEntry(
+        int source,
+        int target,
+        double weight,
+        int[] cursors,
+        int[] neighbors,
+        double[] weights,
+        double[] weightedDegree)
+    {
+        var position = cursors[source]++;
+        neighbors[position] = target;
+        weights[position] = weight;
+        weightedDegree[source] += weight;
+    }
+
+    private static double ReadWeight(IReadOnlyDictionary<string, object?> properties)
+    {
+        if (!properties.TryGetValue("occurrenceCount", out var value) || value is null)
+            return 1d;
+        return double.TryParse(value.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) && parsed > 0
+            ? parsed
+            : 1d;
+    }
+
+    /// <summary>Leiden 第一階段：以固定節點順序做加權 modularity local moving。</summary>
+    private static int[] LocalMove(CsrGraph graph, CancellationToken cancellationToken)
+    {
+        var nodeCount = graph.NodeIds.Length;
+        var community = Enumerable.Range(0, nodeCount).ToArray();
+        var totalWeight = graph.OrderedConnectedNodes.Sum(index => graph.WeightedDegree[index]);
+        if (totalWeight <= Epsilon)
+            return community;
+
+        var totals = new double[nodeCount];
+        var accumulatedWeights = new double[nodeCount];
+        var accumulationStamp = new int[nodeCount];
+        var maxNeighborCount = graph.OrderedConnectedNodes.Max(index => graph.Offsets[index + 1] - graph.Offsets[index]);
+        var candidateCommunities = new int[maxNeighborCount];
+        var stamp = 0;
+
+        for (var pass = 0; pass < MaxLocalMovePasses; pass++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Array.Clear(totals);
+            foreach (var node in graph.OrderedConnectedNodes)
+                totals[community[node]] += graph.WeightedDegree[node];
+
+            var changed = false;
+            foreach (var node in graph.OrderedConnectedNodes)
+            {
+                if ((++stamp & 0x3fff) == 0)
+                    cancellationToken.ThrowIfCancellationRequested();
+                if (stamp == int.MaxValue)
+                {
+                    Array.Clear(accumulationStamp);
+                    stamp = 1;
+                }
+
+                var oldCommunity = community[node];
+                var degree = graph.WeightedDegree[node];
+                totals[oldCommunity] -= degree;
+                var candidateCount = 0;
+                for (var position = graph.Offsets[node]; position < graph.Offsets[node + 1]; position++)
+                {
+                    var candidate = community[graph.Neighbors[position]];
+                    if (accumulationStamp[candidate] != stamp)
+                    {
+                        accumulationStamp[candidate] = stamp;
+                        accumulatedWeights[candidate] = 0d;
+                        candidateCommunities[candidateCount++] = candidate;
+                    }
+                    accumulatedWeights[candidate] += graph.Weights[position];
+                }
+
+                var bestCommunity = oldCommunity;
+                var bestGain = 0d;
+                for (var candidateIndex = 0; candidateIndex < candidateCount; candidateIndex++)
+                {
+                    var candidate = candidateCommunities[candidateIndex];
+                    var gain = accumulatedWeights[candidate] - degree * totals[candidate] / totalWeight;
+                    if (gain > bestGain + Epsilon ||
+                        Math.Abs(gain - bestGain) <= Epsilon &&
+                        string.CompareOrdinal(graph.NodeIds[candidate], graph.NodeIds[bestCommunity]) < 0)
+                    {
+                        bestGain = gain;
+                        bestCommunity = candidate;
+                    }
+                }
+
+                community[node] = bestCommunity;
+                totals[bestCommunity] += degree;
+                changed |= bestCommunity != oldCommunity;
+            }
+
+            if (!changed)
+                break;
+        }
+
+        return community;
+    }
+
+    /// <summary>Leiden refinement：同一社群若不是連通圖，確定性拆成不同群。</summary>
+    private static List<int[]> SplitDisconnectedCommunities(
+        CsrGraph graph,
+        int[] assignment,
+        CancellationToken cancellationToken)
+    {
+        var visited = new bool[graph.NodeIds.Length];
+        var queue = new Queue<int>();
+        var groups = new List<int[]>();
+
+        foreach (var root in graph.OrderedConnectedNodes)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (visited[root])
+                continue;
+
+            var rootCommunity = assignment[root];
+            var members = new List<int>();
+            visited[root] = true;
+            queue.Enqueue(root);
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                members.Add(current);
+                for (var position = graph.Offsets[current]; position < graph.Offsets[current + 1]; position++)
+                {
+                    var neighbor = graph.Neighbors[position];
+                    if (!visited[neighbor] && assignment[neighbor] == rootCommunity)
+                    {
+                        visited[neighbor] = true;
+                        queue.Enqueue(neighbor);
+                    }
+                }
+            }
+            groups.Add(members.ToArray());
+        }
+
+        return groups;
+    }
+
+    private static GraphCommunityReportV4 CreateReport(
+        IReadOnlyList<string> memberIds,
+        IReadOnlyDictionary<string, GraphNode> nodesById)
+    {
+        var identity = string.Join('\n', memberIds);
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant();
+        var communityId = $"community:{hash[..24]}";
+        var labels = memberIds.Select(id => nodesById[id].Kind.ToString())
+            .GroupBy(value => value, StringComparer.Ordinal)
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => group.Key, StringComparer.Ordinal)
             .Select(group => $"{group.Key} {group.Count()}")
             .ToArray();
-        var title = StringProperty(menu, "name") ?? menu.Key;
-        var summary = $"功能「{title}」已解析 {orderedMembers.Length} 個節點：" +
-                      string.Join("、", kindCounts) + "。";
-        var tables = memberNodes
-            .Where(node => node.Kind == GraphNodeKind.DatabaseObject)
-            .Select(node => StringProperty(node, "name") ?? node.Key)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
-            .Take(20)
-            .ToArray();
-        var endpoints = memberNodes
-            .Where(node => node.Kind is GraphNodeKind.Endpoint or GraphNodeKind.WebAction)
-            .Select(node => StringProperty(node, "path") ?? node.Key)
-            .Take(20)
-            .ToArray();
-
-        return CreateReport(
-            CommunityId("c1", menu.Key),
-            "C1",
-            parentCommunityId,
-            title,
-            summary,
-            orderedMembers,
-            tables,
-            endpoints,
-            truncatedCount > 0,
-            truncatedCount,
-            new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["anchorKey"] = menu.Key,
-                ["menuId"] = StringProperty(menu, "menu_id") ?? string.Empty,
-                ["resolverKind"] = ResolverKind(menu),
-                ["maxDepth"] = MaximumFunctionDepth.ToString(),
-            });
-    }
-
-    /// <summary>建立具有穩定 CacheKey 的 deterministic template。</summary>
-    private static GraphCommunityReportV4 CreateReport(
-        string communityId,
-        string tier,
-        string? parentCommunityId,
-        string title,
-        string summary,
-        IReadOnlyList<string> memberIds,
-        IReadOnlyList<string> topTables,
-        IReadOnlyList<string> topEntryPoints,
-        bool truncated,
-        int truncatedMemberCount,
-        IReadOnlyDictionary<string, string> attributes)
-    {
-        var cacheMaterial = string.Join('\n',
-            "fbl-community-v1",
-            communityId,
-            title,
-            summary,
-            string.Join('|', memberIds));
-        var cacheKey = Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes(cacheMaterial)))
-            .ToLowerInvariant();
+        var title = memberIds.Select(id => DisplayName(nodesById[id]))
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? communityId;
+        var summary = $"包含 {memberIds.Count} 個節點：{string.Join("、", labels)}。";
+        var cacheKey = Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes($"{ProjectGraphVersions.Community}\n{identity}"))).ToLowerInvariant();
         return new GraphCommunityReportV4(
             communityId,
-            tier,
-            parentCommunityId,
-            Resolved: true,
+            "C0",
+            null,
+            true,
             title,
             summary,
             GraphCommunitySummaryStates.Template,
-            RetryCount: 0,
+            0,
             memberIds,
             memberIds.Count,
-            topTables,
-            topEntryPoints,
+            memberIds.Where(id => nodesById[id].Kind == GraphNodeKind.DatabaseObject)
+                .Select(id => DisplayName(nodesById[id])).Take(20).ToArray(),
+            memberIds.Where(id => nodesById[id].Kind is GraphNodeKind.MenuItem or GraphNodeKind.ApiEndpoint)
+                .Select(id => DisplayName(nodesById[id])).Take(20).ToArray(),
             cacheKey,
-            truncated,
-            truncatedMemberCount,
-            attributes);
+            false,
+            0,
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["algorithm"] = "weighted-leiden-single-level" });
     }
 
-    /// <summary>取得 Menu 的固定 resolver kind；缺值視為 StandardWeb。</summary>
-    private static string ResolverKind(GraphNode menu) =>
-        StringProperty(menu, "resolver_kind") ?? nameof(MenuResolverKind.StandardWeb);
-
-    /// <summary>安全讀取權威節點的字串屬性。</summary>
-    private static string? StringProperty(GraphNode node, string key) =>
-        node.Properties.TryGetValue(key, out var value) && value is not null
-            ? value.ToString()
-            : null;
-
-    /// <summary>以穩定文字產生固定 Community ID。</summary>
-    private static string CommunityId(string tier, string identity)
+    private static string DisplayName(GraphNode node)
     {
-        var digest = Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes($"{tier}|{identity}")))
-            .ToLowerInvariant();
-        return $"{tier}:{digest[..16]}";
+        foreach (var key in new[] { "name", "fullName", "path", "qualifiedName", "objectName" })
+            if (node.Properties.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value?.ToString()))
+                return value!.ToString()!;
+        return node.Key;
     }
+
+    /// <summary>以整數索引保存大型圖，避免每個節點各自配置雜湊表。</summary>
+    private sealed record CsrGraph(
+        string[] NodeIds,
+        int[] Offsets,
+        int[] Neighbors,
+        double[] Weights,
+        double[] WeightedDegree,
+        int[] OrderedConnectedNodes);
 }

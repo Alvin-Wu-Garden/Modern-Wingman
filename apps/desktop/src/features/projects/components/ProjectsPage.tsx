@@ -72,6 +72,7 @@ export function ProjectsPage() {
   const [showAddProject, setShowAddProject] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [projectPath, setProjectPath] = useState('')
+  const [selectedSolutionPath, setSelectedSolutionPath] = useState('')
   const [addMode, setAddMode] = useState<'local' | 'git' | 'svn'>('local')
   const [vcsProfiles, setVcsProfiles] = useState<VcsProfile[]>([])
   const [profileId, setProfileId] = useState('')
@@ -124,6 +125,7 @@ export function ProjectsPage() {
     const selected = await open({ directory: true, multiple: false })
     if (typeof selected !== 'string') return
     setProjectPath(selected)
+    setSelectedSolutionPath('')
     if (!projectName)
       setProjectName(selected.split(/[\\/]/).filter(Boolean).pop() ?? '新專案')
   }
@@ -133,7 +135,11 @@ export function ProjectsPage() {
     setSaving(true)
     try {
       if (addMode === 'local') {
-        await addProject(projectName.trim(), projectPath.trim())
+        await addProject(
+          projectName.trim(),
+          projectPath.trim(),
+          selectedSolutionPath.trim() || null,
+        )
       } else {
         await importRemoteProject({
           sourceType: addMode,
@@ -147,6 +153,7 @@ export function ProjectsPage() {
       setShowAddProject(false)
       setProjectName('')
       setProjectPath('')
+      setSelectedSolutionPath('')
       setRepositoryUrl('')
       setRepositoryRef('')
     } catch {
@@ -541,6 +548,35 @@ export function ProjectsPage() {
                 className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
               />
             </label>
+            {addMode === 'local' && (
+              <label className="block">
+                <span className="text-xs font-medium text-ink-secondary">
+                  Solution（根目錄只有一個時可留白）
+                </span>
+                <div className="mt-1 flex gap-2">
+                  <input
+                    value={selectedSolutionPath}
+                    readOnly
+                    placeholder="多個 .sln 時必須指定"
+                    className="min-w-0 flex-1 rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm"
+                  />
+                  <Button
+                    variant="outline"
+                    onClick={async () => {
+                      const selected = await open({
+                        directory: false,
+                        multiple: false,
+                        filters: [{ name: 'Visual Studio Solution', extensions: ['sln'] }],
+                        defaultPath: projectPath || undefined,
+                      })
+                      if (typeof selected === 'string') setSelectedSolutionPath(selected)
+                    }}
+                  >
+                    選擇
+                  </Button>
+                </div>
+              </label>
+            )}
             {addMode !== 'local' && (
               <>
                 <label className="block">

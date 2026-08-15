@@ -195,6 +195,30 @@ public sealed class ProjectGraphDatabaseSourceProvider(
 /// </summary>
 public sealed class ProjectGraphDatabaseExtractor
 {
+    public sealed record SqliteDatabaseObject(
+        string Name,
+        string ObjectType,
+        string? Definition);
+
+    public sealed record SqliteDatabaseColumn(
+        string ObjectName,
+        string Name,
+        int Ordinal,
+        string DataType,
+        bool IsNullable,
+        bool IsPrimaryKey);
+
+    public sealed record SqliteForeignKey(
+        string SourceTable,
+        string SourceColumn,
+        string TargetTable,
+        string TargetColumn,
+        int Ordinal);
+
+    public sealed record SqliteDatabaseCatalog(
+        IReadOnlyList<SqliteDatabaseObject> Objects,
+        IReadOnlyList<SqliteDatabaseColumn> Columns,
+        IReadOnlyList<SqliteForeignKey> ForeignKeys);
     /// <summary>只開啟連線並執行 SELECT 1，確認使用者設定可用。</summary>
     public async Task TestConnectionAsync(
         GraphDatabaseSource source,
@@ -257,7 +281,7 @@ public sealed class ProjectGraphDatabaseExtractor
     /// 以 SQLite 系統目錄建立唯讀 DB Object 清單。
     /// SQLite 沒有 FBL 菜單與 CustomReport authority tables，因此只回傳實際存在的使用者物件。
     /// </summary>
-    public async Task<IReadOnlyList<DatabaseObjectCatalogItem>> LoadSqliteDatabaseObjectsAsync(
+    public async Task<SqliteDatabaseCatalog> LoadSqliteDatabaseObjectsAsync(
         GraphDatabaseSource source,
         CancellationToken cancellationToken = default)
     {
@@ -267,9 +291,9 @@ public sealed class ProjectGraphDatabaseExtractor
         }
 
         const string sql = """
-            SELECT type, name
+            SELECT type, name, sql
             FROM sqlite_schema
-            WHERE type IN ('table', 'view', 'trigger', 'index')
+            WHERE type IN ('table', 'view')
               AND name NOT LIKE 'sqlite_%'
             ORDER BY type, name;
             """;
@@ -278,78 +302,50 @@ public sealed class ProjectGraphDatabaseExtractor
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        var result = new List<DatabaseObjectCatalogItem>();
+        var objects = new List<SqliteDatabaseObject>();
         while (await reader.ReadAsync(cancellationToken))
         {
             var objectType = reader.GetString(0);
-            var kind = objectType switch
-            {
-                "table" => DatabaseObjectKind.Table,
-                "view" => DatabaseObjectKind.View,
-                "trigger" => DatabaseObjectKind.Trigger,
-                "index" => DatabaseObjectKind.Index,
-                _ => throw new InvalidOperationException($"不支援的 SQLite object type：{objectType}"),
-            };
-            result.Add(new DatabaseObjectCatalogItem(
-                "main",
+            objects.Add(new SqliteDatabaseObject(
                 reader.GetString(1),
-                kind,
-                "Sqlite",
-                source.DatabaseName));
+                objectType == "table" ? "Table" : "View",
+                reader.IsDBNull(2) ? null : reader.GetString(2)));
         }
+        await reader.DisposeAsync();
 
-        return result;
-    }
-}
-
-/// <summary>
-/// 建立 SQLite-only 的最小可用 GraphDocument。
-/// 它保存原始碼中的 CodeClass 與 SQLite DB Object，刻意不套用 SQL Server 菜單及 FBL authority validator。
-/// </summary>
-public sealed class SqliteGraphDocumentBuilder
-{
-    /// <summary>
-    /// 建立原始碼＋SQLite DB Object 圖；所有輸入均來自唯讀掃描結果。
-    /// </summary>
-    public async Task<GraphDocument> BuildAsync(
-        string rootPath,
-        GraphDatabaseSource source,
-        IReadOnlyList<DatabaseObjectCatalogItem> databaseObjects,
-        CancellationToken cancellationToken = default,
-        bool sourceOnly = false)
-    {
-        var index = await CSharpSourceIndex.CreateAsync(rootPath, cancellationToken);
-        var metadata = new GraphRunMetadata(
-            Guid.NewGuid().ToString("N"),
-            DateTimeOffset.UtcNow,
-            rootPath,
-            sourceOnly ? string.Empty : source.DatabaseName,
-            GraphBuildStage.CompleteExtraction,
-            null,
-            source.ConfigurationFingerprint,
-            sourceOnly ? "SourceOnly" : "Sqlite");
-        var builder = new GraphDocumentBuilder(metadata);
-
-        foreach (var type in index.Types)
+        var columns = new List<SqliteDatabaseColumn>();
+        var foreignKeys = new List<SqliteForeignKey>();
+        foreach (var item in objects)
         {
-            CodeClassNodeFactory.Add(builder, type, CodeClassRole.Other);
+            await using var columnCommand = connection.CreateCommand();
+            columnCommand.CommandText = "SELECT cid, name, type, [notnull], pk FROM pragma_table_info($name) ORDER BY cid";
+            columnCommand.Parameters.AddWithValue("$name", item.Name);
+            await using var columnReader = await columnCommand.ExecuteReaderAsync(cancellationToken);
+            while (await columnReader.ReadAsync(cancellationToken))
+            {
+                columns.Add(new SqliteDatabaseColumn(
+                    item.Name,
+                    columnReader.GetString(1),
+                    columnReader.GetInt32(0) + 1,
+                    columnReader.IsDBNull(2) ? string.Empty : columnReader.GetString(2),
+                    columnReader.GetInt32(3) == 0,
+                    columnReader.GetInt32(4) > 0));
+            }
+            if (item.ObjectType != "Table") continue;
+            await using var foreignKeyCommand = connection.CreateCommand();
+            foreignKeyCommand.CommandText = "SELECT id, seq, [table], [from], [to] FROM pragma_foreign_key_list($name) ORDER BY id, seq";
+            foreignKeyCommand.Parameters.AddWithValue("$name", item.Name);
+            await using var foreignKeyReader = await foreignKeyCommand.ExecuteReaderAsync(cancellationToken);
+            while (await foreignKeyReader.ReadAsync(cancellationToken))
+            {
+                foreignKeys.Add(new SqliteForeignKey(
+                    item.Name,
+                    foreignKeyReader.IsDBNull(3) ? string.Empty : foreignKeyReader.GetString(3),
+                    foreignKeyReader.GetString(2),
+                    foreignKeyReader.IsDBNull(4) ? string.Empty : foreignKeyReader.GetString(4),
+                    foreignKeyReader.GetInt32(1)));
+            }
         }
-
-        foreach (var databaseObject in databaseObjects)
-        {
-            builder.AddNode(
-                GraphNodeKind.DatabaseObject,
-                databaseObject.CreateNodeKey(),
-                new Dictionary<string, object?>
-                {
-                    ["provider"] = databaseObject.Provider,
-                    ["database"] = databaseObject.DatabaseName,
-                    ["schema"] = databaseObject.SchemaName,
-                    ["name"] = databaseObject.ObjectName,
-                    ["object_kind"] = databaseObject.Kind.ToString(),
-                });
-        }
-
-        return builder.Build();
+        return new SqliteDatabaseCatalog(objects, columns, foreignKeys);
     }
 }

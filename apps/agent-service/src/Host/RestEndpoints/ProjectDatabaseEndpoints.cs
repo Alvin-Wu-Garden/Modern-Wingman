@@ -92,9 +92,8 @@ public static class ProjectDatabaseEndpoints
             return Results.BadRequest(new { error = validation.Error });
 
         await configurations.SaveAsync(validation.Configuration!, ct);
-        // 設定版本不應直接重建圖譜；先使專案呈現 PendingChanges，
-        // 由既有索引操作在使用者可控的時間重新連線與發布。
-        await indexing.MarkPendingChangesAsync(projectId, cancellationToken: ct);
+        // 設定版本不直接重建圖譜；標示為 Stale，等待使用者主動按下完整索引。
+        await indexing.MarkConfigurationChangedAsync(projectId, ct);
         return Results.Ok(ToDto(
             (await configurations.GetAsync(
                 projectId,
@@ -234,7 +233,7 @@ public static class ProjectDatabaseEndpoints
         if (await projects.GetAsync(projectId, ct) is null)
             return Results.NotFound();
         await configurations.DeleteAsync(projectId, provider: null, ct: ct);
-        await indexing.MarkPendingChangesAsync(projectId, cancellationToken: ct);
+        await indexing.MarkConfigurationChangedAsync(projectId, ct);
         return Results.NoContent();
     }
 
@@ -252,7 +251,7 @@ public static class ProjectDatabaseEndpoints
         if (!Enum.TryParse<ProjectDatabaseProvider>(provider, true, out var parsed))
             return Results.BadRequest(new { error = "Provider 必須是 SqlServer 或 Sqlite。" });
         await configurations.DeleteAsync(projectId, parsed, ct);
-        await indexing.MarkPendingChangesAsync(projectId, cancellationToken: ct);
+        await indexing.MarkConfigurationChangedAsync(projectId, ct);
         return Results.NoContent();
     }
 

@@ -40,6 +40,9 @@ public sealed record GraphCommunityReportV4(
     int TruncatedMemberCount,
     IReadOnlyDictionary<string, string> Attributes);
 
+/// <summary>LLM 產生的 Community 顯示文字。</summary>
+public sealed record GraphCommunityGeneratedText(string Title, string Summary);
+
 /// <summary>Neo4j 專案目前 active 與 previous immutable version 指標。</summary>
 public sealed record GraphVersionPointers(
     string ProjectId,

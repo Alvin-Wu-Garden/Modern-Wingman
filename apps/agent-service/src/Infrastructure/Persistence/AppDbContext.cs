@@ -62,6 +62,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Id).HasMaxLength(64);
             entity.Property(x => x.Name).HasMaxLength(200);
             entity.Property(x => x.RootPath).HasMaxLength(500);
+            entity.Property(x => x.SelectedSolutionPath).HasMaxLength(1000);
             entity.Property(x => x.IndexStatus).HasMaxLength(20);
             entity.Property(x => x.IndexedAt).HasConversion<string>();
             entity.Property(x => x.CreatedAt).HasConversion<string>();

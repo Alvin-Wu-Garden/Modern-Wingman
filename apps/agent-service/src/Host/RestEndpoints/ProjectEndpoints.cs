@@ -13,7 +13,6 @@ namespace AgentService.Host.RestEndpoints;
 /// POST   /api/projects                       → 新增專案
 /// DELETE /api/projects/{id}                  → 移除專案（含圖譜）
 /// POST   /api/projects/{id}/index            → 啟動全量索引（背景執行）
-/// POST   /api/projects/{id}/index/incremental → 增量索引
 /// GET    /api/projects/{id}/index/progress   → 索引進度（輪詢）
 /// GET    /api/projects/{id}/summaries/progress → 查詢背景 AI 社群摘要進度
 /// POST   /api/projects/{id}/query            → GraphRAG 問答（auto/global/local）
@@ -21,7 +20,10 @@ namespace AgentService.Host.RestEndpoints;
 /// </summary>
 public static class ProjectEndpoints
 {
-    public sealed record CreateProjectRequest(string Name, string RootPath);
+    public sealed record CreateProjectRequest(
+        string Name,
+        string RootPath,
+        string? SelectedSolutionPath = null);
     public sealed record ImportProjectRequest(
         string SourceType,
         string Name,
@@ -62,7 +64,7 @@ public static class ProjectEndpoints
         string? RepositoryPath,
         bool? Dirty,
         string? IndexManifestVersion,
-        int PendingFileCount);
+        string? SelectedSolutionPath);
 
     public static IEndpointRouteBuilder MapProjectEndpoints(this IEndpointRouteBuilder app)
     {
@@ -71,11 +73,14 @@ public static class ProjectEndpoints
         group.MapGet("/", ListProjects);
         group.MapPost("/", CreateProject);
         group.MapPost("/import", ImportProject);
+        group.MapGet("/{id}/solutions", ListProjectSolutions);
         group.MapGet("/import-progress/{operationId}", GetImportProgress);
         group.MapGet("/{id}/vcs", GetVcsBinding);
         group.MapDelete("/{id}", DeleteProject);
         group.MapPost("/{id}/index", StartIndex);
-        group.MapPost("/{id}/index/incremental", IncrementalIndex);
+        group.MapDelete("/{id}/index", CancelIndex);
+        group.MapGet("/{id}/graph/versions", ListGraphVersions);
+        group.MapPost("/{id}/graph/versions/{graphVersion}/activate", ActivateGraphVersion);
         group.MapGet("/{id}/index/progress", GetProgress);
         group.MapGet("/{id}/summaries/progress", GetSummaryProgress);
         group.MapGet("/{id}/graph/schema", GetGraphSchema);
@@ -140,7 +145,7 @@ public static class ProjectEndpoints
                 binding?.RepositoryPath,
                 dirty,
                 project.IndexManifestVersion,
-                project.PendingFileCount));
+                project.SelectedSolutionPath));
         }
         return Results.Ok(result);
     }
@@ -148,23 +153,58 @@ public static class ProjectEndpoints
     private static async Task<IResult> CreateProject(
         CreateProjectRequest request,
         IProjectRepository repo,
-        IGraphIndexWatcherRegistry watcherRegistry,
         CancellationToken ct)
     {
         if (!Directory.Exists(request.RootPath))
             return Results.BadRequest(new { error = $"目錄不存在: {request.RootPath}" });
 
+        var rootPath = Path.GetFullPath(request.RootPath);
+        string? selectedSolutionPath = null;
+        if (!string.IsNullOrWhiteSpace(request.SelectedSolutionPath))
+        {
+            selectedSolutionPath = Path.GetFullPath(request.SelectedSolutionPath);
+            if (!File.Exists(selectedSolutionPath) ||
+                !Path.GetExtension(selectedSolutionPath).Equals(".sln", StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(
+                    Path.GetDirectoryName(selectedSolutionPath),
+                    rootPath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return Results.BadRequest(new
+                {
+                    error = "指定的 Solution 必須是專案根目錄中的既有 .sln 檔案。",
+                });
+            }
+        }
+
         var project = new ProjectEntity
         {
             Name = string.IsNullOrWhiteSpace(request.Name)
-                ? Path.GetFileName(request.RootPath.TrimEnd('\\', '/'))
+                ? Path.GetFileName(rootPath.TrimEnd('\\', '/'))
                 : request.Name,
-            RootPath = request.RootPath,
+            RootPath = rootPath,
+            SelectedSolutionPath = selectedSolutionPath,
         };
         await repo.SaveAsync(project, ct);
-        // SQLite 寫入成功後立即開始監看，不再等待背景服務下一次輪詢。
-        watcherRegistry.RegisterProject(project);
         return Results.Ok(project);
+    }
+
+    /// <summary>列出專案根目錄第一層的 Solution；不遞迴搜尋子目錄。</summary>
+    private static async Task<IResult> ListProjectSolutions(
+        string id,
+        IProjectRepository projects,
+        CancellationToken ct)
+    {
+        var project = await projects.GetAsync(id, ct);
+        if (project is null) return Results.NotFound();
+        if (!Directory.Exists(project.RootPath))
+            return Results.NotFound(new { error = "專案根目錄不存在。" });
+        return Results.Ok(Directory.EnumerateFiles(
+                project.RootPath,
+                "*.sln",
+                SearchOption.TopDirectoryOnly)
+            .Select(Path.GetFullPath)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
     }
 
     private static async Task<IResult> ImportProject(
@@ -175,7 +215,6 @@ public static class ProjectEndpoints
         ISvnClient svn,
         IProjectImportProgressStore importProgress,
         ISensitiveDataRedactor redactor,
-        IGraphIndexWatcherRegistry watcherRegistry,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.DestinationPath) ||
@@ -254,8 +293,6 @@ public static class ProjectEndpoints
                 RootPath = destination,
             };
             await projects.SaveAsync(project, ct);
-            // Clone/checkout 與專案資料列均完成後，立即註冊實際 destination。
-            watcherRegistry.RegisterProject(project);
             await vcsState.SaveBindingAsync(new ProjectVcsBinding
             {
                 ProjectId = project.Id,
@@ -296,24 +333,56 @@ public static class ProjectEndpoints
     private static async Task<IResult> DeleteProject(
         string id,
         IProjectRepository repo,
+        IVcsStateRepository vcsState,
         IGraphStore graphStore,
         GraphIndexingService indexService,
-        IGraphIndexWatcherRegistry watcherRegistry,
         CancellationToken ct)
     {
+        var project = await repo.GetAsync(id, ct);
+        if (project is null) return Results.NotFound();
+        var binding = await vcsState.GetBindingAsync(id, ct);
+        await indexService.CancelAndWaitAsync(id, ct);
+        // 不可吞掉 Neo4j 刪除失敗；否則本機專案列消失後，遠端圖資料會變成
+        // 無法再由 UI 清理的孤兒資料。Graph 與 SQLite 都完成後才刪受管工作樹。
+        await graphStore.DeleteProjectAsync(id, ct);
+        indexService.ForgetProjectState(id);
+        ProjectSourceIndex.Forget(project.RootPath);
+        await repo.DeleteAsync(id, ct);
+        TryDeleteManagedWorktree(project.RootPath, binding?.RepositoryPath);
+        return Results.NoContent();
+    }
+
+    private static void TryDeleteManagedWorktree(
+        string rootPath,
+        string? boundRepositoryPath)
+    {
+        // 本機資料夾專案沒有 VCS binding，絕對不能刪除使用者原始碼。
+        if (string.IsNullOrWhiteSpace(boundRepositoryPath)) return;
+        var fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
+        var boundPath = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(boundRepositoryPath));
+        if (!fullPath.Equals(boundPath, StringComparison.OrdinalIgnoreCase)) return;
+        var wingmanRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".Wingman")));
+        var managedWorktreesRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(
+            Path.Combine(wingmanRoot, "worktrees")));
+        var managedPrefix = managedWorktreesRoot + Path.DirectorySeparatorChar;
+        // 只有 Modern Wingman 明確管理的 .Wingman\worktrees 子目錄可刪除；
+        // .Wingman 其他資料、使用者自行選取的專案與外部 clone 都不得刪除。
+        if (!fullPath.StartsWith(managedPrefix, StringComparison.OrdinalIgnoreCase) ||
+            !Directory.Exists(fullPath)) return;
         try
         {
-            await graphStore.DeleteProjectAsync(id, ct);
+            Directory.Delete(fullPath, recursive: true);
         }
-        catch
+        catch (IOException)
         {
-            // Neo4j 未啟動時仍允許移除專案記錄
+            // DB 與 Neo4j 已清乾淨；被外部程式占用的受管工作樹留待下次啟動清理。
         }
-        indexService.ForgetProjectState(id);
-        await repo.DeleteAsync(id, ct);
-        // 先完成持久化刪除，再解除監看；若 SQLite 刪除失敗，仍保留原有 Watcher。
-        watcherRegistry.UnregisterProject(id);
-        return Results.NoContent();
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 
     private static async Task<IResult> StartIndex(
@@ -322,17 +391,88 @@ public static class ProjectEndpoints
         IProjectJobQueue executionQueue,
         CancellationToken ct)
     {
-        await executionQueue.EnqueueAsync(
-            workerCt => indexService.IndexProjectAsync(id, workerCt),
-            ct);
+        if (!indexService.TryReserveIndex(id))
+            return Results.Conflict(new
+            {
+                error = "index_already_running",
+                message = "這個專案已有索引正在執行。",
+            });
+        try
+        {
+            await executionQueue.EnqueueAsync(
+                workerCt => indexService.RunReservedIndexAsync(id, workerCt),
+                ct);
+        }
+        catch
+        {
+            indexService.ReleaseReservation(id);
+            throw;
+        }
         return Results.Accepted($"/api/projects/{id}/index/progress");
     }
 
-    private static async Task<IResult> IncrementalIndex(
-        string id, GraphIndexingService indexService, CancellationToken ct)
+    private static IResult CancelIndex(string id, GraphIndexingService indexService) =>
+        indexService.CancelIndex(id)
+            ? Results.Accepted($"/api/projects/{id}/index/progress")
+            : Results.NotFound(new { error = "index_not_running" });
+
+    private static async Task<IResult> ListGraphVersions(
+        string id,
+        IProjectRepository projects,
+        IProjectIndexManifestStore manifests,
+        CancellationToken ct)
     {
-        var project = await indexService.IncrementalIndexAsync(id, ct);
-        return Results.Ok(new { changed = project is not null, project });
+        if (await projects.GetAsync(id, ct) is null) return Results.NotFound();
+        var current = await manifests.GetCurrentAsync(id, ct);
+        var versions = await manifests.ListSuccessfulAsync(id, ct);
+        return Results.Ok(versions.Select(item => new
+        {
+            item.Version,
+            item.CompletedAt,
+            item.NodeCount,
+            item.EdgeCount,
+            item.GraphSchemaVersion,
+            isActive = item.Version == current?.Version,
+        }));
+    }
+
+    private static async Task<IResult> ActivateGraphVersion(
+        string id,
+        string graphVersion,
+        IProjectRepository projects,
+        IProjectIndexManifestStore manifests,
+        IGraphStore graphStore,
+        GraphCommunityAiService communityAi,
+        CancellationToken ct)
+    {
+        var project = await projects.GetAsync(id, ct);
+        if (project is null) return Results.NotFound();
+        var selected = await manifests.GetByVersionAsync(id, graphVersion, ct);
+        if (selected is null)
+            return Results.NotFound(new { error = $"找不到可啟用的成功圖譜版本：{id}/{graphVersion}" });
+        var validation = await graphStore.ValidateVersionAsync(
+            id,
+            graphVersion,
+            selected.NodeCount,
+            selected.EdgeCount,
+            ct);
+        if (!validation.IsValid)
+            return Results.Conflict(new
+            {
+                error = "graph_version_incomplete",
+                message = $"Neo4j 圖譜版本不完整，拒絕啟用：{string.Join("；", validation.Errors)}",
+            });
+        await manifests.ActivateAsync(id, graphVersion, ct);
+        project.IndexManifestVersion = graphVersion;
+        project.NodeCount = selected?.NodeCount ?? project.NodeCount;
+        project.EdgeCount = selected?.EdgeCount ?? project.EdgeCount;
+        project.IndexStatus = ProjectIndexStatus.Indexed;
+        project.IndexError = null;
+        await projects.SaveAsync(project, ct);
+        // 切回前一版後，背景 Community 佇列也必須同步 active 版本；
+        // 舊版執行中的結果仍會由 graphVersion/cacheKey CAS 擋下。
+        await communityAi.ResumeAsync(id, graphVersion, ct);
+        return Results.Ok(selected);
     }
 
     private static IResult GetProgress(string id, GraphIndexingService indexService)

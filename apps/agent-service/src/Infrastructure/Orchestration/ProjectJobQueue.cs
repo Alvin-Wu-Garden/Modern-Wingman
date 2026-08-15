@@ -4,7 +4,7 @@ using AgentService.Application.Contracts;
 namespace AgentService.Infrastructure.Orchestration;
 
 /// <summary>
-/// 依序執行專案索引與業務摘要，避免同一個本機服務同時大量占用 CPU／Neo4j。
+/// 最多平行執行四個不同專案工作；同一專案的互斥由各協調器負責。
 /// 正常關機取消不視為失敗；單一工作失敗只記錄類型，不讓佇列停止。
 /// </summary>
 public sealed class ProjectJobQueue(
@@ -13,7 +13,7 @@ public sealed class ProjectJobQueue(
     private readonly Channel<Func<CancellationToken, Task>> _queue =
         Channel.CreateUnbounded<Func<CancellationToken, Task>>(new UnboundedChannelOptions
         {
-            SingleReader = true,
+            SingleReader = false,
             SingleWriter = false,
         });
 
@@ -24,7 +24,14 @@ public sealed class ProjectJobQueue(
         _queue.Writer.WriteAsync(work, cancellationToken);
 
     /// <summary>持續消費工作直到 Host 關機；關機取消會安靜結束。</summary>
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var workers = Enumerable.Range(0, 4)
+            .Select(_ => ConsumeAsync(stoppingToken));
+        return Task.WhenAll(workers);
+    }
+
+    private async Task ConsumeAsync(CancellationToken stoppingToken)
     {
         try
         {
