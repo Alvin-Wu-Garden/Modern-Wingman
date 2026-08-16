@@ -24,6 +24,7 @@ import { KnowledgeGraphPage } from './KnowledgeGraphPage'
 import { ProjectDatabaseModal } from './ProjectDatabaseModal'
 import { ProjectHamburgerMenu } from './ProjectHamburgerMenu'
 import { JiraAnalysisModal } from './JiraAnalysisModal'
+import { SidebarTooltip } from '@/components/layout/sidebar-navigation'
 import { useProjectsStore } from '../store/useProjectsStore'
 import { listVcsProfiles, type VcsProfile } from '@/services/agent-api/vcs'
 
@@ -213,11 +214,61 @@ export function ProjectsPage() {
           />
         </div>
 
-        {!projectSidebar.collapsed && (
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-2">
           {loading && projects.length === 0 && (
             <p className="p-3 text-xs text-ink-subtle">載入專案中…</p>
           )}
+          {projectSidebar.collapsed ? (
+            <div className="flex flex-col items-center gap-1">
+              {projects.map((project) => (
+                <SidebarTooltip key={project.id} label={project.name}>
+                  <button
+                    type="button"
+                    disabled={deletingProjectId === project.id}
+                    onClick={() => setActiveProject(project.id)}
+                    onContextMenu={(event) => {
+                      event.preventDefault()
+                      setMenu({ projectId: project.id, x: event.clientX, y: event.clientY })
+                    }}
+                    className={cn(
+                      'flex h-9 w-9 items-center justify-center rounded-xl transition-colors',
+                      project.id === activeProjectId
+                        ? 'bg-brand/10 text-brand'
+                        : 'text-ink-secondary hover:bg-surface-alt hover:text-ink',
+                      deletingProjectId === project.id && 'cursor-wait opacity-70',
+                    )}
+                  >
+                    {deletingProjectId === project.id
+                      ? <Loader2 className="h-4 w-4 animate-spin" />
+                      : <FolderGit2 className="h-4 w-4" />}
+                  </button>
+                </SidebarTooltip>
+              ))}
+
+              {activeProject && projectConversations.length > 0 && (
+                <>
+                  <div className="my-2 h-px w-6 bg-border" />
+                  {projectConversations.map((conversation) => (
+                    <SidebarTooltip key={conversation.id} label={conversation.title}>
+                      <button
+                        type="button"
+                        onClick={() => void openConversation(conversation.id, activeProjectId)}
+                        className={cn(
+                          'flex h-9 w-9 items-center justify-center rounded-xl transition-colors',
+                          conversation.id === activeConversationId
+                            ? 'bg-surface-alt text-ink'
+                            : 'text-ink-secondary hover:bg-surface-alt',
+                        )}
+                      >
+                        <MessageSquare className="h-3.5 w-3.5" />
+                      </button>
+                    </SidebarTooltip>
+                  ))}
+                </>
+              )}
+            </div>
+          ) : (
+          <>
           {projects.map((project) => (
             <div
               key={project.id}
@@ -300,8 +351,10 @@ export function ProjectsPage() {
               ))}
             </>
           )}
+          </>
+          )}
         </div>
-        )}
+
 
         <button
           type="button"

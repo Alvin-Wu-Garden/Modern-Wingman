@@ -11,7 +11,7 @@ export function AppShell({ sidebar, children, className }: AppShellProps) {
   return (
     <div
       className={cn(
-        'flex h-full bg-surface-alt overflow-hidden',
+        'flex h-full bg-surface-alt overflow-hidden border-t border-border',
         className
       )}
     >

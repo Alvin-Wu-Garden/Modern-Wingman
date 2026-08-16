@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Database, MoreHorizontal, Trash2, BarChart2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -22,7 +23,9 @@ export function ProjectHamburgerMenu({
   disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (!open) return
@@ -50,7 +53,15 @@ export function ProjectHamburgerMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         disabled={disabled}
-        onClick={(e) => { e.stopPropagation(); setOpen((s) => !s) }}
+        ref={buttonRef}
+        onClick={(e) => {
+          e.stopPropagation()
+          if (!open && buttonRef.current) {
+            const rect = buttonRef.current.getBoundingClientRect()
+            setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right })
+          }
+          setOpen((s) => !s)
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()
@@ -68,10 +79,11 @@ export function ProjectHamburgerMenu({
         <MoreHorizontal className="h-4 w-4" />
       </button>
 
-      {open && (
+      {open && menuPos && createPortal(
         <div
           role="menu"
-          className="absolute right-0 top-full z-50 mt-1 min-w-44 rounded-xl border border-border bg-surface p-1.5 shadow-xl"
+          style={{ position: 'fixed', top: menuPos.top, right: menuPos.right, zIndex: 9999 }}
+          className="min-w-44 rounded-xl border border-border bg-surface p-1.5 shadow-xl"
           onClick={(e) => e.stopPropagation()}
         >
           <button
@@ -105,7 +117,8 @@ export function ProjectHamburgerMenu({
             <Trash2 className="h-4 w-4" />
             刪除專案
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

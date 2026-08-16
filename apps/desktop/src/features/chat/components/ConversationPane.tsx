@@ -5,6 +5,7 @@ import { MarkdownRenderer } from '@/components/ui/markdown-renderer'
 import { cn } from '@/lib/utils'
 import { useChatStore } from '../store/useChatStore'
 import { ActivityTimeline } from './ActivityTimeline'
+import { CopyMessageButton } from './CopyMessageButton'
 import { MessageComposer } from './MessageComposer'
 
 interface ConversationPaneProps {
@@ -84,7 +85,7 @@ export function ConversationPane({
           <div
             key={message.id}
             className={cn(
-              'flex gap-3',
+              'group flex gap-3',
               message.role === 'user' ? 'flex-row-reverse' : 'flex-row',
             )}
           >
@@ -100,34 +101,39 @@ export function ConversationPane({
                 ? <Bot className="h-4 w-4" />
                 : <User className="h-4 w-4" />}
             </div>
-            <div
-              className={cn(
-                'max-w-[78%] rounded-2xl px-4 py-3 text-sm leading-relaxed',
-                message.role === 'assistant'
-                  ? 'bg-surface text-ink shadow-sm'
-                  : 'bg-brand text-white',
-              )}
-            >
-              {message.role === 'assistant'
-                ? <>
-                    <ActivityTimeline
-                      activities={message.activities ?? []}
-                      streaming={message.streaming ?? false}
-                    />
-                    <MarkdownRenderer content={message.content} streaming={message.streaming} />
-                  </>
-                : <p className="whitespace-pre-wrap">{message.content}</p>}
-              <p
+            <div className="flex min-w-0 max-w-[78%] flex-col">
+              <div
                 className={cn(
-                  'mt-1.5 text-xs',
-                  message.role === 'assistant' ? 'text-ink-subtle' : 'text-white/60',
+                  'rounded-2xl px-4 py-3 text-sm leading-relaxed',
+                  message.role === 'assistant'
+                    ? 'bg-surface text-ink shadow-sm'
+                    : 'bg-brand text-white',
                 )}
               >
-                {new Date(message.createdAt).toLocaleTimeString('zh-TW', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}
-              </p>
+                {message.role === 'assistant'
+                  ? <>
+                      <ActivityTimeline
+                        activities={message.activities ?? []}
+                        streaming={message.streaming ?? false}
+                      />
+                      <MarkdownRenderer content={message.content} streaming={message.streaming} />
+                    </>
+                  : <p className="whitespace-pre-wrap">{message.content}</p>}
+                <p
+                  className={cn(
+                    'mt-1.5 text-xs',
+                    message.role === 'assistant' ? 'text-ink-subtle' : 'text-white/60',
+                  )}
+                >
+                  {new Date(message.createdAt).toLocaleTimeString('zh-TW', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </p>
+              </div>
+              <div className="mt-1 flex items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                <CopyMessageButton message={message} />
+              </div>
             </div>
           </div>
         ))}

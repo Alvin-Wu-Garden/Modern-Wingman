@@ -21,192 +21,110 @@ public sealed class JiraHttpClient(
 
     // ── 連線驗證 ─────────────────────────────────────────────────────────────
 
-    public async Task<AtlassianResult<string>> ValidateConnectionAsync(
+    public Task<AtlassianResult<string>> ValidateConnectionAsync(
         AtlassianConnection conn,
-        CancellationToken ct = default)
-    {
-        using var client = BuildClient(conn);
-        var url = NormalizeUrl(conn.BaseUrl, "/rest/api/2/myself");
-
-        try
+        CancellationToken ct = default) =>
+        ExecuteWithTlsRetryAsync(conn, async (client, token) =>
         {
-            using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+            var url = NormalizeUrl(conn.BaseUrl, "/rest/api/2/myself");
+            using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token);
 
             if (!response.IsSuccessStatusCode)
-            {
-                return MapHttpError<string>(response.StatusCode, url,conn.ServiceType);
-            }
+                return MapHttpError<string>(response.StatusCode, url, conn.ServiceType);
 
-            var body = await response.Content.ReadAsStringAsync(ct);
+            var body = await response.Content.ReadAsStringAsync(token);
 
             if (IsHtmlResponse(response, body))
-            {
                 return AtlassianResult<string>.Fail(
                     AtlassianErrorCodes.AuthFailed,
-                    "JIRA 傳回 HTML（可能是 SSO 登入頁），"
-                    + "請確認驗證方式與 Token。");
-            }
+                    "JIRA 傳回 HTML（可能是 SSO 登入頁），請確認驗證方式與 Token。");
 
             try
             {
                 using var doc = JsonDocument.Parse(body);
-
                 var root = doc.RootElement;
-
                 var displayName =
-                    root.TryGetProperty(
-                        "displayName",
-                        out var displayNameElement)
-                    && displayNameElement.ValueKind
-                        == JsonValueKind.String
-                        ? displayNameElement.GetString()
-                        : null;
-
+                    root.TryGetProperty("displayName", out var displayNameElement)
+                    && displayNameElement.ValueKind == JsonValueKind.String
+                        ? displayNameElement.GetString() : null;
                 var active =
-                    !root.TryGetProperty(
-                        "active",
-                        out var activeElement)
+                    !root.TryGetProperty("active", out var activeElement)
                     || activeElement.ValueKind != JsonValueKind.False;
-
                 if (!active)
-                {
                     return AtlassianResult<string>.Fail(
                         AtlassianErrorCodes.AuthFailed,
                         "JIRA 已接受驗證資訊，但帳號目前未啟用。");
-                }
-
-                return AtlassianResult<string>.Ok(
-                    displayName ?? "（未知使用者）");
+                return AtlassianResult<string>.Ok(displayName ?? "（未知使用者）");
             }
             catch (JsonException)
             {
                 logger.LogWarning(
-                    "JIRA 驗證回傳無效 JSON。ServiceType={ServiceType}, "
-                    + "StatusCode={StatusCode}, ContentType={ContentType}",
+                    "JIRA 驗證回傳無效 JSON。ServiceType={ServiceType}, StatusCode={StatusCode}, ContentType={ContentType}",
                     conn.ServiceType,
                     (int)response.StatusCode,
                     response.Content.Headers.ContentType?.MediaType);
-
                 return AtlassianResult<string>.Fail(
                     AtlassianErrorCodes.JiraResponseInvalid,
                     "JIRA 已回傳成功狀態，但回應內容不是有效的 JSON。");
             }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (HttpRequestException ex) when (IsTlsError(ex))
-        {
-            logger.LogWarning("JIRA TLS 錯誤。ServiceType={ServiceType}", conn.ServiceType);
-            return AtlassianResult<string>.Fail(AtlassianErrorCodes.TlsError);
-        }
-        catch (TaskCanceledException)
-        {
-            return AtlassianResult<string>.Fail(AtlassianErrorCodes.Timeout);
-        }
-        catch (HttpRequestException)
-        {
-            return AtlassianResult<string>.Fail(AtlassianErrorCodes.Timeout);
-        }
-    }
+        }, ct);
 
     // ── 議題預覽 ─────────────────────────────────────────────────────────────
 
-    public async Task<AtlassianResult<JiraIssuePreview>> GetIssuePreviewAsync(
+    public Task<AtlassianResult<JiraIssuePreview>> GetIssuePreviewAsync(
         AtlassianConnection conn,
         string fullIssueKey,
-        CancellationToken ct = default)
-    {
-        using var client = BuildClient(conn);
-        var encoded = Uri.EscapeDataString(fullIssueKey);
-        var url = NormalizeUrl(conn.BaseUrl,
-            $"/rest/api/2/issue/{encoded}?fields=summary,status,issuetype,priority,assignee,updated,project");
-
-        try
+        CancellationToken ct = default) =>
+        ExecuteWithTlsRetryAsync(conn, async (client, token) =>
         {
-            using var response = await client.GetAsync(
-                url,
-                HttpCompletionOption.ResponseHeadersRead,
-                ct);
+            var encoded = Uri.EscapeDataString(fullIssueKey);
+            var url = NormalizeUrl(conn.BaseUrl,
+                $"/rest/api/2/issue/{encoded}?fields=summary,status,issuetype,priority,assignee,updated,project");
+
+            using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token);
 
             if (!response.IsSuccessStatusCode)
-            {
-                return MapHttpError<JiraIssuePreview>(
-                    response.StatusCode,
-                    url,
-                    conn.ServiceType);
-            }
+                return MapHttpError<JiraIssuePreview>(response.StatusCode, url, conn.ServiceType);
 
-            var body = await response.Content
-                .ReadAsStringAsync(ct);
+            var body = await response.Content.ReadAsStringAsync(token);
 
             if (IsHtmlResponse(response, body))
-            {
                 return AtlassianResult<JiraIssuePreview>.Fail(
                     AtlassianErrorCodes.AuthFailed,
                     "JIRA 傳回 HTML，可能是 SSO 登入頁面。");
-            }
 
             return ParseIssuePreview(body, fullIssueKey);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (HttpRequestException ex) when (IsTlsError(ex))
-        {
-            return AtlassianResult<JiraIssuePreview>.Fail(AtlassianErrorCodes.TlsError);
-        }
-        catch (TaskCanceledException)
-        {
-            return AtlassianResult<JiraIssuePreview>.Fail(AtlassianErrorCodes.Timeout);
-        }
-        catch (HttpRequestException)
-        {
-            return AtlassianResult<JiraIssuePreview>.Fail(AtlassianErrorCodes.Timeout);
-        }
-    }
+        }, ct);
 
     // ── 完整議題（含分頁留言） ────────────────────────────────────────────────
 
-    public async Task<AtlassianResult<NormalizedJiraIssue>> GetFullIssueAsync(
+    public Task<AtlassianResult<NormalizedJiraIssue>> GetFullIssueAsync(
         AtlassianConnection conn,
         string fullIssueKey,
-        CancellationToken ct = default)
-    {
-        using var client = BuildClient(conn);
-        var encoded = Uri.EscapeDataString(fullIssueKey);
-
-        // 1. 取得完整欄位（含欄位名稱對照）
-        var issueUrl = NormalizeUrl(conn.BaseUrl,
-            $"/rest/api/2/issue/{encoded}?expand=names,schema");
-
-        try
+        CancellationToken ct = default) =>
+        ExecuteWithTlsRetryAsync(conn, async (client, token) =>
         {
-            using var issueResp = await client.GetAsync(
-                issueUrl,
-                HttpCompletionOption.ResponseHeadersRead,
-                ct);
+            var encoded = Uri.EscapeDataString(fullIssueKey);
+
+            // 1. 取得完整欄位（含欄位名稱對照）
+            var issueUrl = NormalizeUrl(conn.BaseUrl,
+                $"/rest/api/2/issue/{encoded}?expand=names,schema");
+
+            using var issueResp = await client.GetAsync(issueUrl, HttpCompletionOption.ResponseHeadersRead, token);
 
             if (!issueResp.IsSuccessStatusCode)
-            {
-                return MapHttpError<NormalizedJiraIssue>(
-                    issueResp.StatusCode,
-                    issueUrl,
-                    conn.ServiceType);
-            }
+                return MapHttpError<NormalizedJiraIssue>(issueResp.StatusCode, issueUrl, conn.ServiceType);
 
-            var issueBody = await issueResp.Content
-                .ReadAsStringAsync(ct);
+            var issueBody = await issueResp.Content.ReadAsStringAsync(token);
 
             if (IsHtmlResponse(issueResp, issueBody))
-            {
                 return AtlassianResult<NormalizedJiraIssue>.Fail(AtlassianErrorCodes.AuthFailed, "JIRA 傳回 HTML，可能是 SSO 登入頁面。");
-            }
 
             if (Encoding.UTF8.GetByteCount(issueBody) > MaxIssueBodyBytes)
                 return AtlassianResult<NormalizedJiraIssue>.Fail(AtlassianErrorCodes.JiraContentTooLarge);
 
             // 2. 分頁取得所有留言
-            var comments = await GetAllCommentsAsync(client, conn.BaseUrl, encoded, ct);
+            var comments = await GetAllCommentsAsync(client, conn.BaseUrl, encoded, token);
             if (comments is null)
                 return AtlassianResult<NormalizedJiraIssue>.Fail(AtlassianErrorCodes.JiraResponseInvalid);
 
@@ -215,21 +133,7 @@ public sealed class JiraHttpClient(
                 return AtlassianResult<NormalizedJiraIssue>.Fail(AtlassianErrorCodes.JiraResponseInvalid);
 
             return AtlassianResult<NormalizedJiraIssue>.Ok(issue);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (HttpRequestException ex) when (IsTlsError(ex))
-        {
-            return AtlassianResult<NormalizedJiraIssue>.Fail(AtlassianErrorCodes.TlsError);
-        }
-        catch (TaskCanceledException)
-        {
-            return AtlassianResult<NormalizedJiraIssue>.Fail(AtlassianErrorCodes.Timeout);
-        }
-        catch (HttpRequestException)
-        {
-            return AtlassianResult<NormalizedJiraIssue>.Fail(AtlassianErrorCodes.Timeout);
-        }
-    }
+        }, ct);
 
     // ── 分頁留言 ─────────────────────────────────────────────────────────────
 
@@ -345,6 +249,52 @@ public sealed class JiraHttpClient(
     }
 
     // ── 輔助方法 ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 第一次 TLS 握手可能因企業 CRL（Certificate Revocation List）快取尚未建立而失敗；
+    /// 等待 400 ms 後重試一次，讓 Windows 憑證快取得以預熱。
+    /// </summary>
+    private async Task<AtlassianResult<T>> ExecuteWithTlsRetryAsync<T>(
+        AtlassianConnection conn,
+        Func<HttpClient, CancellationToken, Task<AtlassianResult<T>>> execute,
+        CancellationToken ct)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            if (attempt > 0)
+            {
+                logger.LogInformation(
+                    "JIRA TLS 初次握手失敗，等待 400 ms 後重試… ServiceType={ServiceType}",
+                    conn.ServiceType);
+                await Task.Delay(400, ct);
+            }
+
+            using var client = BuildClient(conn);
+            try
+            {
+                return await execute(client, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (HttpRequestException ex) when (IsTlsError(ex))
+            {
+                if (attempt == 0) continue;
+                logger.LogWarning(
+                    "JIRA TLS 握手重試後仍失敗。ServiceType={ServiceType}",
+                    conn.ServiceType);
+                return AtlassianResult<T>.Fail(AtlassianErrorCodes.TlsError);
+            }
+            catch (TaskCanceledException)
+            {
+                return AtlassianResult<T>.Fail(AtlassianErrorCodes.Timeout);
+            }
+            catch (HttpRequestException)
+            {
+                return AtlassianResult<T>.Fail(AtlassianErrorCodes.Timeout);
+            }
+        }
+
+        return AtlassianResult<T>.Fail(AtlassianErrorCodes.TlsError); // unreachable
+    }
 
     private HttpClient BuildClient(AtlassianConnection conn)
     {

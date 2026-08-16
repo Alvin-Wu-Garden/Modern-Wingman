@@ -7374,7 +7374,7 @@ export interface SessionUpdateOptionsParams {
      */
     shellInitProfile?: string;
     /**
-     * Per-shell process flags (e.g., `pwsh` arguments).
+     * Per-shell process flags (e.g., `powershell` arguments).
      */
     shellProcessFlags?: string[];
     /**

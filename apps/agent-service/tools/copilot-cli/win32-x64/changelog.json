@@ -2351,7 +2351,7 @@
     },
     {
       "type": "fixed",
-      "description": "Detect PowerShell 7 correctly when pwsh.exe is installed as a Microsoft Store App Execution Alias",
+      "description": "Detect PowerShell 7 correctly when powershell is installed as a Microsoft Store App Execution Alias",
       "related_pull_requests": ["https://github.com/github/copilot-agent-runtime/pull/8931"]
     },
     {
@@ -2552,7 +2552,7 @@
     },
     {
       "type": "fixed",
-      "description": "Detect PowerShell 7 correctly when pwsh.exe is installed as a Microsoft Store App Execution Alias",
+      "description": "Detect PowerShell 7 correctly when powershell is installed as a Microsoft Store App Execution Alias",
       "related_pull_requests": ["https://github.com/github/copilot-agent-runtime/pull/8931"]
     },
     {
@@ -3851,7 +3851,7 @@
   "1.0.46": [
     {
       "type": "fixed",
-      "description": "PowerShell starts correctly when pwsh is installed as a .NET global tool shim",
+      "description": "PowerShell starts correctly when powershell is installed as a .NET global tool shim",
       "related_pull_requests": ["https://github.com/github/copilot-agent-runtime/pull/7791"]
     },
     {
@@ -3899,7 +3899,7 @@
     },
     {
       "type": "improved",
-      "description": "Fall back to Windows PowerShell (powershell.exe) when PowerShell 7+ (pwsh) is not available on Windows",
+      "description": "Fall back to Windows PowerShell (powershell.exe) when PowerShell 7+ (powershell) is not available on Windows",
       "related_pull_requests": ["https://github.com/github/copilot-agent-runtime/pull/7714"]
     },
     {

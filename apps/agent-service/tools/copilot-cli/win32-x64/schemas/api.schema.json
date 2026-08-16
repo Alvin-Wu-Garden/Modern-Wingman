@@ -3592,7 +3592,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Per-shell process flags (e.g., `pwsh` arguments)."
+              "description": "Per-shell process flags (e.g., `powershell` arguments)."
             },
             "sandboxConfig": {
               "$ref": "#/definitions/SandboxConfig",
@@ -21241,7 +21241,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Per-shell process flags (e.g., `pwsh` arguments)."
+          "description": "Per-shell process flags (e.g., `powershell` arguments)."
         },
         "sandboxConfig": {
           "$ref": "#/definitions/SandboxConfig",
