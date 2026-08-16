@@ -15,7 +15,17 @@ public sealed record ConversationPreparation(
     /// <summary>本輪探測到的不可變 Graph 版本識別碼；僅用於證據標記與記錄。</summary>
     string? GraphVersion = null,
     /// <summary>本輪允許模型執行的工具次數；null 使用 Runtime 預設值。</summary>
-    int? MaxToolCalls = null);
+    int? MaxToolCalls = null,
+    /// <summary>本輪結束後提供診斷日誌使用的工具呼叫次數，不送到前端或持久化。</summary>
+    Func<ToolCallUsageSummary>? GetToolCallUsage = null);
+
+/// <summary>
+/// 單次對話回合結束後的工具呼叫次數統計，只給診斷 log 使用。
+/// 一般對話沒有工具可呼叫時維持 null。
+/// </summary>
+public sealed record ToolCallUsageSummary(
+    int TotalCalls,
+    IReadOnlyDictionary<string, int> CallsByCategory);
 
 /// <summary>
 /// 專案證據的編排模式。工具只作精準補查時，不會先把整份 Graph 證據預取到 Prompt，

@@ -59,8 +59,10 @@ public sealed class CopilotAgentFactory(
             Tools = context.Tools.Count == 0
                 ? null
                 : context.Tools.Cast<AIFunctionDeclaration>().ToList(),
+            // 明確指定空集合停用所有內建工具，避免 SDK 預設啟用內建工具後
+            // 被 OnPermissionRequest 拒絕，導致模型靜默返回空回應。
             AvailableTools = context.Tools.Count == 0
-                ? null
+                ? new ToolSet()
                 : new ToolSet().AddCustom("*"),
             // 自訂 Function Tool 仍會觸發 SDK 權限要求；只核准本輪明確傳入的名稱。
             OnPermissionRequest = (request, _) => Task.FromResult(

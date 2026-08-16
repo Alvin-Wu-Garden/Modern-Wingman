@@ -656,6 +656,67 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<GraphSearchHit>> ListNodesByKindAsync(
+        string projectId,
+        string kind,
+        string? nameFilter,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(graphVersion))
+            return [];
+        return await ListNodesByKindAsync(
+            projectId,
+            kind,
+            nameFilter,
+            limit,
+            graphVersion,
+            cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<GraphSearchHit>> ListNodesByKindAsync(
+        string projectId,
+        string kind,
+        string? nameFilter,
+        int limit,
+        string? graphVersion,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(kind);
+        limit = Math.Clamp(limit, 1, 200);
+        if (_driver is null || string.IsNullOrWhiteSpace(graphVersion)) return [];
+        await using var session = OpenReadSession();
+        cancellationToken.ThrowIfCancellationRequested();
+        return await session.ExecuteReadAsync(async transaction =>
+        {
+            var cursor = await transaction.RunAsync(
+                """
+                MATCH (node:GraphEntity {
+                    wingmanProjectId: $projectId,
+                    graphVersion: $graphVersion
+                })
+                WHERE $kind IN labels(node)
+                  AND ($nameFilter IS NULL
+                    OR toLower(coalesce(node.name, node.description, node.id))
+                        CONTAINS toLower($nameFilter))
+                RETURN node
+                ORDER BY coalesce(node.name, node.description, node.id)
+                LIMIT $limit
+                """,
+                new { projectId, graphVersion, kind, nameFilter, limit });
+            var result = new List<GraphSearchHit>();
+            while (await cursor.FetchAsync())
+                result.Add(new GraphSearchHit(
+                    MapNode(cursor.Current["node"].As<INode>()),
+                    1.0));
+            return (IReadOnlyList<GraphSearchHit>)result;
+        });
+    }
+
+    /// <inheritdoc />
     public async Task<(int Nodes, int Edges)> GetStatsAsync(
         string projectId,
         CancellationToken cancellationToken = default)

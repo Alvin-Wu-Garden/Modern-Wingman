@@ -203,10 +203,13 @@ public sealed class ProjectAnalysisToolsRegressionTests
                 .Select(tool => tool.Name)
                 .ToArray();
 
-            Assert.Equal(3, names.Length);
+            Assert.Equal(7, names.Length);
             Assert.DoesNotContain("search_project_graph", names);
             Assert.DoesNotContain("trace_project_graph_paths", names);
+            Assert.DoesNotContain("list_project_graph_nodes", names);
             Assert.Contains("search_project_text", names);
+            Assert.Contains("outline_csharp_file", names);
+            Assert.Contains("list_database_objects", names);
         }
         finally
         {
