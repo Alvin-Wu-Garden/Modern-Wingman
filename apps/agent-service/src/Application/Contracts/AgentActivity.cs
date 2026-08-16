@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json.Serialization;
+using System.Threading.Channels;
 
 namespace AgentService.Application.Contracts;
 
@@ -138,25 +139,36 @@ public sealed class AgentActivityReporter
             elapsedMs);
     }
 
-    private Task PublishAsync(
+    private async Task PublishAsync(
         string type,
         string activityId,
         string status,
         string label,
         string? tool,
         string? detail,
-        long? elapsedMs) =>
-        _publishAsync(new AgentActivityEvent(
-            Type: type,
-            RunId: RunId,
-            ActivityId: activityId,
-            Status: status,
-            Label: label,
-            Tool: tool,
-            Detail: detail,
-            ElapsedMs: elapsedMs,
-            Sequence: Interlocked.Increment(ref _sequence),
-            Timestamp: DateTimeOffset.UtcNow));
+        long? elapsedMs)
+    {
+        try
+        {
+            await _publishAsync(new AgentActivityEvent(
+                Type: type,
+                RunId: RunId,
+                ActivityId: activityId,
+                Status: status,
+                Label: label,
+                Tool: tool,
+                Detail: detail,
+                ElapsedMs: elapsedMs,
+                Sequence: Interlocked.Increment(ref _sequence),
+                Timestamp: DateTimeOffset.UtcNow));
+        }
+        catch (ChannelClosedException)
+        {
+            // 對話串流已經結束（使用者取消或連線中斷），已經沒有人會讀取這個事件。
+            // 活動回報只是盡力而為的 UI 提示，背景中仍在收尾的工具呼叫不該因為
+            // 找不到聽眾而讓整個 Task 變成未處理例外，安靜忽略即可。
+        }
+    }
 
     private sealed record ActivityState(
         string Type,

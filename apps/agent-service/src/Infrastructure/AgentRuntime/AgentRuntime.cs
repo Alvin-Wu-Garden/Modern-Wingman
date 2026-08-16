@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.IO.Compression;
 using System.Xml.Linq;
@@ -66,12 +67,22 @@ public sealed class AgentRuntime(
             yield break;
         }
 
-        logger.LogDebug("Agent Runtime ({Kind}) 啟動，歷史 {Count} 則，Skill 指示長度 {SkillLength}",
-            request.Profile.Kind, request.History.Count, request.SkillsPrompt.Length);
+        logger.LogInformation(
+            "[LLM 開始] Provider={Kind} Model={Model} 歷史訊息數={MessageCount} " +
+            "Instructions長度={InstructionsLen} SkillsPrompt長度={SkillsLen} 工具數={ToolCount}",
+            request.Profile.Kind,
+            request.ModelOverride ?? request.Profile.Id,
+            messages.Count,
+            request.Instructions.Length,
+            request.SkillsPrompt.Length,
+            request.Tools.Count);
 
         UsageDetails? lastUsage = null;
         string? answeringActivityId = null;
         var responseCompleted = false;
+        var streamStopwatch = Stopwatch.StartNew();
+        var streamedChars = 0;
+        var chunkCount = 0;
         try
         {
             if (request.Activity is not null && request.EmitRuntimeActivities)
@@ -87,6 +98,8 @@ public sealed class AgentRuntime(
                 if (!string.IsNullOrEmpty(text))
                 {
                     logger.LogTrace("[文字片段] {Text}", text);
+                    streamedChars += text.Length;
+                    chunkCount++;
                     yield return text;
                 }
 
@@ -106,6 +119,13 @@ public sealed class AgentRuntime(
         }
         finally
         {
+            streamStopwatch.Stop();
+            logger.LogInformation(
+                "[LLM 結束] 耗時={ElapsedMs}ms 回傳片段數={ChunkCount} 回傳字元數={StreamedChars} 已完成={Completed}",
+                streamStopwatch.ElapsedMilliseconds,
+                chunkCount,
+                streamedChars,
+                responseCompleted);
             if (answeringActivityId is not null && responseCompleted)
                 await request.Activity!.CompleteAsync(
                     answeringActivityId,

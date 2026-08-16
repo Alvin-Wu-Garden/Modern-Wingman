@@ -1078,10 +1078,10 @@ public sealed class GraphIndexWatcherService(
                                NotifyFilters.LastWrite | NotifyFilters.Size,
                 EnableRaisingEvents = true,
             };
-            watcher.Changed += (_, args) => Schedule(project.Id, args.FullPath);
-            watcher.Created += (_, args) => Schedule(project.Id, args.FullPath);
-            watcher.Deleted += (_, args) => Schedule(project.Id, args.FullPath);
-            watcher.Renamed += (_, args) => Schedule(project.Id, args.FullPath);
+            watcher.Changed += (_, args) => Schedule(project.Id, args.FullPath, structuralChange: false);
+            watcher.Created += (_, args) => Schedule(project.Id, args.FullPath, structuralChange: true);
+            watcher.Deleted += (_, args) => Schedule(project.Id, args.FullPath, structuralChange: true);
+            watcher.Renamed += (_, args) => Schedule(project.Id, args.FullPath, structuralChange: true);
             // FileSystemWatcher 的內部緩衝區溢位或底層 I/O 錯誤可能造成事件遺失。
             // 這時不能假設索引仍然是最新，先標記 PendingChanges，讓下一次索引
             // 或問答的安全流程重新建立權威 Graph。
@@ -1119,7 +1119,11 @@ public sealed class GraphIndexWatcherService(
         !string.IsNullOrWhiteSpace(projectId) && _watchers.ContainsKey(projectId);
 
     /// <summary>合併短時間異動並觸發一次完整 authority rebuild。</summary>
-    private void Schedule(string projectId, string path)
+    /// <param name="structuralChange">
+    /// 是否為新增、刪除或重新命名；只有這類事件才需要讓下一次查詢重新掃描整個專案目錄清單。
+    /// 純內容修改（Changed）只會讓該檔案自己的原始碼快取失效，避免一般存檔動作反覆觸發全專案目錄掃描。
+    /// </param>
+    private void Schedule(string projectId, string path, bool structuralChange)
     {
         if (!WatchedExtensions.Contains(Path.GetExtension(path)))
         {
@@ -1127,7 +1131,7 @@ public sealed class GraphIndexWatcherService(
         }
         // 原始碼工具共用的目錄與內容快取只失效異動檔案，下一次查詢再惰性重建；
         // 這不會觸發同步索引，也不會讓當前問答等待完整 Catch-up。
-        ProjectAnalysisTools.InvalidateFileCatalog(path);
+        ProjectAnalysisTools.InvalidateFileCatalog(path, structuralChange);
         if (_debounces.TryRemove(projectId, out var previous))
         {
             previous.Cancel();

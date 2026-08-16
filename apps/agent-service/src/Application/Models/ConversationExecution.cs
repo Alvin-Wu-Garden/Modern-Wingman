@@ -11,7 +11,17 @@ public sealed record ConversationPreparation(
     string SkillsPrompt,
     IReadOnlyList<AIFunction> Tools,
     string? GraphStatus = null,
-    string? GraphWarning = null);
+    string? GraphWarning = null,
+    Func<ToolCallUsageSummary>? GetToolCallUsage = null);
+
+/// <summary>
+/// 單次對話回合結束後的工具呼叫次數統計，只給診斷 log 使用，不會送到前端或持久化。
+/// 一般對話沒有工具可呼叫，<see cref="ConversationPreparation.GetToolCallUsage"/> 維持 null 即可。
+/// </summary>
+public sealed record ToolCallUsageSummary(
+    int TotalCalls,
+    IReadOnlyDictionary<string, int> CallsByCategory);
+
 
 /// <summary>
 /// Agent Runtime 執行單次模型回合所需的完整上下文。

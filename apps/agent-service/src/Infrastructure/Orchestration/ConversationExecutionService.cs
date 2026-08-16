@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Diagnostics;
 using System.Threading.Channels;
 using AgentService.Application.Contracts;
 using AgentService.Application.Models;
@@ -53,6 +54,7 @@ public sealed class ConversationExecutionService(
                 new ConversationActivityStreamEvent(value),
                 CancellationToken.None).AsTask());
         string? runActivityId = null;
+        var totalStopwatch = Stopwatch.StartNew();
 
         try
         {
@@ -64,6 +66,7 @@ public sealed class ConversationExecutionService(
                     tool: "runtime",
                     detail: "準備 GraphRAG 與專案工具");
             }
+            var prepareStopwatch = Stopwatch.StartNew();
             var preparation = request.Prepare is null
                 ? new ConversationPreparation(
                     request.Message.UserMessage,
@@ -71,6 +74,14 @@ public sealed class ConversationExecutionService(
                     SkillPromptBuilder.BuildSkillsPrompt(skillProvider),
                     Tools: [])
                 : await request.Prepare(activity, ct);
+            prepareStopwatch.Stop();
+            logger.LogInformation(
+                "對話準備階段完成。耗時={ElapsedMs}ms，GraphStatus={GraphStatus}，工具數={ToolCount}，" +
+                "ConversationId={ConversationId}",
+                prepareStopwatch.ElapsedMilliseconds,
+                preparation.GraphStatus,
+                preparation.Tools.Count,
+                conversation.Id);
 
             await writer.WriteAsync(
                 new ConversationStartedEvent(
@@ -92,6 +103,7 @@ public sealed class ConversationExecutionService(
                     ShortTitle(request.Message.UserMessage),
                     ct);
 
+            var streamStopwatch = Stopwatch.StartNew();
             await foreach (var token in agent.RunStreamingAsync(
                 new AgentExecutionRequest(
                     preparation.Prompt,
@@ -111,6 +123,30 @@ public sealed class ConversationExecutionService(
                 await writer.WriteAsync(
                     new ConversationTokenEvent(token),
                     CancellationToken.None);
+            }
+            streamStopwatch.Stop();
+            totalStopwatch.Stop();
+            logger.LogInformation(
+                "對話執行完成。準備={PrepareMs}ms，LLM 串流={StreamMs}ms，總計={TotalMs}ms，" +
+                "ConversationId={ConversationId}",
+                prepareStopwatch.ElapsedMilliseconds,
+                streamStopwatch.ElapsedMilliseconds,
+                totalStopwatch.ElapsedMilliseconds,
+                conversation.Id);
+            if (preparation.GetToolCallUsage is { } getToolCallUsage)
+            {
+                // 一次彙總 log，避免要逐行數 tool.completed 才能知道這輪到底呼叫了幾次工具。
+                var toolUsage = getToolCallUsage();
+                logger.LogInformation(
+                    "本輪工具呼叫統計。總次數={TotalToolCalls}，明細={ToolCallBreakdown}，" +
+                    "ConversationId={ConversationId}",
+                    toolUsage.TotalCalls,
+                    string.Join(
+                        "、",
+                        toolUsage.CallsByCategory
+                            .Where(entry => entry.Value > 0)
+                            .Select(entry => $"{entry.Key}={entry.Value}")),
+                    conversation.Id);
             }
 
             if (fullResponse.Length > 0)
@@ -159,12 +195,17 @@ public sealed class ConversationExecutionService(
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             // 使用者取消串流時不寫入未完成的 Assistant 回覆。
+            logger.LogInformation(
+                "對話已被取消。已耗時={ElapsedMs}ms，ConversationId={ConversationId}",
+                totalStopwatch.ElapsedMilliseconds,
+                conversation.Id);
         }
         catch (Exception exception)
         {
             logger.LogError(
                 exception,
-                "對話 Agent 執行失敗。ConversationId={ConversationId}, ProviderId={ProviderId}",
+                "對話 Agent 執行失敗。已耗時={ElapsedMs}ms，ConversationId={ConversationId}, ProviderId={ProviderId}",
+                totalStopwatch.ElapsedMilliseconds,
                 conversation.Id,
                 request.Profile.Id);
             if (runActivityId is not null)

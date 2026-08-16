@@ -1,4 +1,4 @@
-import { AGENT_API_BASE_URL } from './client'
+import { AGENT_API_BASE_URL, fetchWithConnectionRetry } from './client'
 
 /** 專案清單實際顯示的欄位。 */
 export interface ProjectInfo {
@@ -226,7 +226,7 @@ async function errorMessage(response: Response, fallback: string): Promise<strin
 export async function listProjects(): Promise<ProjectInfo[]> {
   let response: Response
   try {
-    response = await fetch(`${AGENT_API_BASE_URL}/api/projects`)
+    response = await fetchWithConnectionRetry(`${AGENT_API_BASE_URL}/api/projects`)
   } catch {
     throw new Error(
       `無法連線到 Agent Service（${AGENT_API_BASE_URL}）。請確認後端服務已啟動。`,

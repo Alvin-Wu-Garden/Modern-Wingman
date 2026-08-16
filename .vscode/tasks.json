@@ -10,8 +10,7 @@
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        "${workspaceFolder}/scripts/dev/start-all.ps1",
-        "-SkipBuild"
+        "${workspaceFolder}/scripts/dev/start-all.ps1"
       ],
       "problemMatcher": [],
       "presentation": {

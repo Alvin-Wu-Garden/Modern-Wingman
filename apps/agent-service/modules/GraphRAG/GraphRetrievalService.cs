@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -29,6 +30,21 @@ public sealed class GraphRetrievalOptions
     /// <summary>單次問答最多保留的圖節點數。</summary>
     public int MaximumNodes { get; set; } = 80;
 
+    /// <summary>
+    /// 問題含精確識別碼（例如菜單代號）時，針對最相關種子額外沿主幹關係深入追蹤的層數。
+    /// 這個追蹤只沿 Opens/RoutesTo/ImplementedBy/Calls/Uses/ReadsVia/WritesVia/MapsTo/ReadsData/Executes/Queries
+    /// 等主幹關係前進，因此即使層數比 <see cref="MaximumDepth"/> 深很多，展開的節點數仍受限。
+    /// 目的是讓「從菜單代號出發」的資料流程問題，第一輪 Context Pack 就直接涵蓋到資料庫層，
+    /// 不必讓 Agent 再多次呼叫 trace_project_graph_paths 才能補齊 Service/DAL/DB。
+    /// </summary>
+    public int PrimarySeedChaseDepth { get; set; } = 8;
+
+    /// <summary>主幹追蹤每個節點最多讀取的鄰接關係數；刻意比 <see cref="NeighborsPerNode"/> 窄，只保留主要鏈路。</summary>
+    public int PrimarySeedChaseNeighborsPerNode { get; set; } = 8;
+
+    /// <summary>主幹追蹤額外允許保留的節點數上限，獨立於 <see cref="MaximumNodes"/>，避免深追時吃光一般展開的預算。</summary>
+    public int PrimarySeedChaseMaximumNodes { get; set; } = 60;
+
     /// <summary>放入 LLM Prompt 的最大字元數。</summary>
     public int MaximumPromptCharacters { get; set; } = 28_000;
 
@@ -43,6 +59,21 @@ public sealed class GraphRetrievalOptions
 
     /// <summary>LLM 最多提供給 Graph 搜尋的候選詞數。</summary>
     public int MaximumLlmQueryVariants { get; set; } = 6;
+
+    /// <summary>
+    /// 「直接證據」區塊在結構鏈路與證據兩區塊可用字元預算中的基準佔比（0~1）。
+    /// 問題沒有精確識別碼、無法觸發主幹深追時使用這個較保守的比例。
+    /// </summary>
+    public double EvidenceBudgetRatio { get; set; } = 0.45;
+
+    /// <summary>
+    /// 觸發主幹深追（問題含精確識別碼）時「直接證據」的佔比；此時結構鏈路已經涵蓋完整資料流程，
+    /// 實際程式碼證據片段比更多鏈路預覽更有回答價值，因此把預算往證據傾斜。
+    /// </summary>
+    public double EvidenceBudgetRatioWithExactIdentifier { get; set; } = 0.6;
+
+    /// <summary>「直接證據」區塊最多收錄的筆數，獨立於字元預算，避免單題塞入過多雷同片段。</summary>
+    public int MaximumEvidenceItems { get; set; } = 30;
 }
 
 /// <summary>
@@ -130,6 +161,7 @@ public sealed class GraphRetrievalService
                 "搜尋知識圖譜",
                 tool: "graph_retrieval",
                 detail: "正在尋找與問題相關的 FBL 節點與鏈路");
+        var retrievalStopwatch = Stopwatch.StartNew();
         try
         {
             var graphVersion = await _store.GetActiveManifestAsync(projectId, cancellationToken);
@@ -143,6 +175,7 @@ public sealed class GraphRetrievalService
                 return BuildMissingGraphPrompt(question);
             }
 
+            var seedStopwatch = Stopwatch.StartNew();
             var seeds = await SearchSeedsAsync(
                 projectId,
                 question,
@@ -151,6 +184,12 @@ public sealed class GraphRetrievalService
                 allowLlmQueryRewrite,
                 cancellationToken,
                 activity);
+            seedStopwatch.Stop();
+            _logger.LogInformation(
+                "GraphRAG Seeds 查詢完成。耗時={ElapsedMs}ms，找到 {Count} 個候選，ProjectId={ProjectId}",
+                seedStopwatch.ElapsedMilliseconds,
+                seeds.Count,
+                projectId);
             if (seeds.Count == 0)
             {
                 if (retrievalActivityId is not null)
@@ -161,8 +200,40 @@ public sealed class GraphRetrievalService
                 return BuildMissingSeedPrompt(question, graphVersion);
             }
 
+            var expandStopwatch = Stopwatch.StartNew();
             var context = await ExpandAsync(projectId, seeds, cancellationToken);
-            var prompt = BuildContextPack(question, rootPath, graphVersion, seeds, context);
+            expandStopwatch.Stop();
+            _logger.LogInformation(
+                "GraphRAG 子圖展開完成。耗時={ElapsedMs}ms，節點數={Nodes}，關係數={Relationships}",
+                expandStopwatch.ElapsedMilliseconds,
+                context.Nodes.Count,
+                context.Relationships.Count);
+            var hasExactIdentifier = BuildQueryPlan(question, _options.MaximumQueryVariants).HasExactIdentifier;
+            if (hasExactIdentifier)
+            {
+                var primarySeed = seeds
+                    .OrderByDescending(hit => hit.Node.Kind == AuthorityGraphNodeKind.Menu ? 1 : 0)
+                    .ThenByDescending(hit => hit.Score)
+                    .First();
+                var chaseStopwatch = Stopwatch.StartNew();
+                context = await ChaseBackboneAsync(
+                    projectId,
+                    primarySeed.Node.Key,
+                    context,
+                    cancellationToken);
+                chaseStopwatch.Stop();
+                _logger.LogInformation(
+                    "GraphRAG 主幹深追完成。耗時={ElapsedMs}ms，合併後節點數={Nodes}",
+                    chaseStopwatch.ElapsedMilliseconds,
+                    context.Nodes.Count);
+            }
+            var prompt = BuildContextPack(question, rootPath, graphVersion, seeds, context, hasExactIdentifier);
+            retrievalStopwatch.Stop();
+            _logger.LogInformation(
+                "GraphRAG 檢索總耗時={ElapsedMs}ms，Prompt 字元數={PromptLength}，ProjectId={ProjectId}",
+                retrievalStopwatch.ElapsedMilliseconds,
+                prompt.Length,
+                projectId);
             if (retrievalActivityId is not null)
                 await activity!.CompleteAsync(
                     retrievalActivityId,
@@ -172,13 +243,15 @@ public sealed class GraphRetrievalService
         }
         catch (Exception exception)
         {
+            retrievalStopwatch.Stop();
             if (retrievalActivityId is not null)
                 await activity!.FailAsync(
                     retrievalActivityId,
                     "知識圖譜檢索失敗，請檢查 Graph 連線或索引狀態");
             _logger.LogWarning(
                 exception,
-                "GraphRAG 建立問答 Context 失敗，ProjectId={ProjectId}",
+                "GraphRAG 建立問答 Context 失敗，耗時={ElapsedMs}ms，ProjectId={ProjectId}",
+                retrievalStopwatch.ElapsedMilliseconds,
                 projectId);
             throw;
         }
@@ -765,6 +838,13 @@ public sealed class GraphRetrievalService
     /// 以批次 BFS 展開上下游。每個節點只展開一次，且以節點數、深度及鄰居數三層上限
     /// 防止大型共用元件造成圖爆炸。
     /// </summary>
+    /// <remarks>
+    /// <see cref="GraphRetrievalOptions.MaximumNodes"/> 是所有種子共用的全域預算；
+    /// 展開順序若只按節點 key 字母排序，只為湊多樣性補進來的低分種子可能搶先耗用
+    /// 預算，導致真正命中的高分種子（例如 Menu 精確代號）反而展不到 DAL／資料庫層。
+    /// 這裡改以種子分數（並沿路徑衰減後傳給鄰居）由高到低展開，讓預算優先花在
+    /// 最貼近問題的節點鏈路上。
+    /// </remarks>
     private async Task<RetrievalSubgraph> ExpandAsync(
         string projectId,
         IReadOnlyList<GraphSearchHit> seeds,
@@ -773,7 +853,17 @@ public sealed class GraphRetrievalService
         var nodes = seeds.ToDictionary(hit => hit.Node.Key, hit => hit.Node, StringComparer.Ordinal);
         var relationships = new Dictionary<string, AuthorityGraphRelationship>(StringComparer.Ordinal);
         var visited = new HashSet<string>(StringComparer.Ordinal);
-        var frontier = seeds.Select(hit => hit.Node.Key).Distinct(StringComparer.Ordinal).ToArray();
+        var relevance = new Dictionary<string, double>(StringComparer.Ordinal);
+        foreach (var hit in seeds)
+        {
+            if (!relevance.TryGetValue(hit.Node.Key, out var existing) || hit.Score > existing)
+                relevance[hit.Node.Key] = hit.Score;
+        }
+        var frontier = seeds
+            .Select(hit => hit.Node.Key)
+            .Distinct(StringComparer.Ordinal)
+            .OrderByDescending(key => relevance.GetValueOrDefault(key))
+            .ToArray();
 
         for (var depth = 0;
              depth < _options.MaximumDepth && frontier.Length > 0 && nodes.Count < _options.MaximumNodes;
@@ -786,7 +876,86 @@ public sealed class GraphRetrievalService
                 _options.NeighborsPerNode,
                 cancellationToken);
             var next = new List<string>();
-            foreach (var centerKey in frontier.OrderBy(value => value, StringComparer.Ordinal))
+            foreach (var centerKey in frontier
+                         .OrderByDescending(key => relevance.GetValueOrDefault(key))
+                         .ThenBy(key => key, StringComparer.Ordinal))
+            {
+                if (!visited.Add(centerKey) || !batch.TryGetValue(centerKey, out var neighbors))
+                {
+                    continue;
+                }
+
+                var centerScore = relevance.GetValueOrDefault(centerKey);
+                foreach (var neighbor in neighbors
+                             .OrderByDescending(item => RelationshipWeight(item.Relationship.Kind))
+                             .ThenBy(item => item.Relationship.Id, StringComparer.Ordinal))
+                {
+                    relationships.TryAdd(neighbor.Relationship.Id, neighbor.Relationship);
+                    // 鄰居沿用來源節點分數的衰減值，讓遠離高分種子的分支自然排到預算後段。
+                    var neighborScore = centerScore * 0.85;
+                    if (!relevance.TryGetValue(neighbor.Node.Key, out var existingScore) ||
+                        neighborScore > existingScore)
+                        relevance[neighbor.Node.Key] = neighborScore;
+                    if (!nodes.ContainsKey(neighbor.Node.Key) && nodes.Count < _options.MaximumNodes)
+                    {
+                        nodes[neighbor.Node.Key] = neighbor.Node;
+                        next.Add(neighbor.Node.Key);
+                    }
+                }
+            }
+
+            frontier = next
+                .Distinct(StringComparer.Ordinal)
+                .OrderByDescending(key => relevance.GetValueOrDefault(key))
+                .ToArray();
+        }
+
+        return new RetrievalSubgraph(
+            nodes.Values.OrderBy(node => node.Key, StringComparer.Ordinal).ToArray(),
+            relationships.Values
+                .OrderByDescending(relationship => RelationshipWeight(relationship.Kind))
+                .ThenBy(relationship => relationship.Id, StringComparer.Ordinal)
+                .ToArray(),
+            nodes.Count >= _options.MaximumNodes);
+    }
+
+    /// <summary>
+    /// 只沿主幹關係（Opens/RoutesTo/ImplementedBy/Calls/Uses/ReadsVia/WritesVia/MapsTo/
+    /// ReadsData/Executes/Queries 等 <see cref="RelationshipWeight"/> 為 100 的種類）從單一高信心
+    /// 種子（例如精確命中的 Menu 代號）向下深追，並把結果併入既有子圖。
+    /// </summary>
+    /// <remarks>
+    /// 這是專門處理「從菜單代號出發問資料流程」這類問題的捷徑：一般 <see cref="ExpandAsync"/> 的
+    /// <see cref="GraphRetrievalOptions.MaximumDepth"/> 只保護大範圍展開不爆炸，通常到不了
+    /// Service/DAL/資料庫層；讓 Agent 自己再呼叫 trace_project_graph_paths 補齊，會多花一到兩輪
+    /// 完整的 LLM 往返時間。單一種子、只沿主幹關係的深追範圍很小，在 Neo4j 端幾乎不增加延遲，
+    /// 卻能讓第一版 Context Pack 就直接涵蓋完整鏈路。
+    /// </remarks>
+    private async Task<RetrievalSubgraph> ChaseBackboneAsync(
+        string projectId,
+        string seedKey,
+        RetrievalSubgraph baseContext,
+        CancellationToken cancellationToken)
+    {
+        var nodes = baseContext.Nodes.ToDictionary(node => node.Key, StringComparer.Ordinal);
+        var relationships = baseContext.Relationships.ToDictionary(
+            relationship => relationship.Id, StringComparer.Ordinal);
+        var visited = new HashSet<string>(StringComparer.Ordinal) { seedKey };
+        var frontier = new[] { seedKey };
+        var chaseBudget = nodes.Count + _options.PrimarySeedChaseMaximumNodes;
+
+        for (var depth = 0;
+             depth < _options.PrimarySeedChaseDepth && frontier.Length > 0 && nodes.Count < chaseBudget;
+             depth++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var batch = await _store.GetNeighborsBatchAsync(
+                projectId,
+                frontier,
+                _options.PrimarySeedChaseNeighborsPerNode,
+                cancellationToken);
+            var next = new List<string>();
+            foreach (var centerKey in frontier)
             {
                 if (!visited.Add(centerKey) || !batch.TryGetValue(centerKey, out var neighbors))
                 {
@@ -794,11 +963,11 @@ public sealed class GraphRetrievalService
                 }
 
                 foreach (var neighbor in neighbors
-                             .OrderByDescending(item => RelationshipWeight(item.Relationship.Kind))
-                             .ThenBy(item => item.Relationship.Id, StringComparer.Ordinal))
+                             .Where(item => RelationshipWeight(item.Relationship.Kind) == 100)
+                             .OrderBy(item => item.Relationship.Id, StringComparer.Ordinal))
                 {
                     relationships.TryAdd(neighbor.Relationship.Id, neighbor.Relationship);
-                    if (!nodes.ContainsKey(neighbor.Node.Key) && nodes.Count < _options.MaximumNodes)
+                    if (!nodes.ContainsKey(neighbor.Node.Key) && nodes.Count < chaseBudget)
                     {
                         nodes[neighbor.Node.Key] = neighbor.Node;
                         next.Add(neighbor.Node.Key);
@@ -815,7 +984,7 @@ public sealed class GraphRetrievalService
                 .OrderByDescending(relationship => RelationshipWeight(relationship.Kind))
                 .ThenBy(relationship => relationship.Id, StringComparer.Ordinal)
                 .ToArray(),
-            nodes.Count >= _options.MaximumNodes);
+            baseContext.WasTruncated || nodes.Count >= chaseBudget);
     }
 
     /// <summary>建立有明確事實、證據與缺口區段的 Prompt，並依總字元上限裁切。</summary>
@@ -824,7 +993,8 @@ public sealed class GraphRetrievalService
         string rootPath,
         string graphVersion,
         IReadOnlyList<GraphSearchHit> seeds,
-        RetrievalSubgraph context)
+        RetrievalSubgraph context,
+        bool hasExactIdentifier)
     {
         var nodes = context.Nodes.ToDictionary(node => node.Key, StringComparer.Ordinal);
         var builder = new StringBuilder();
@@ -840,6 +1010,17 @@ public sealed class GraphRetrievalService
                                $"(nodeId: {seed.Node.Key}, score: {seed.Score:0.###})");
         }
 
+        // Token Budget Solver：結構鏈路與直接證據各自拿到獨立的字元預算上限，
+        // 避免其中一個區塊（通常是結構鏈路，項目多但單行資訊量低）把另一個擠到只剩幾行。
+        const int reservedTailCharacters = 2_000;
+        var overallCeiling = Math.Max(_options.MaximumPromptCharacters - reservedTailCharacters, builder.Length);
+        var plan = ComputeBudgetPlan(
+            Math.Max(overallCeiling - builder.Length, 0),
+            hasExactIdentifier,
+            _options.EvidenceBudgetRatio,
+            _options.EvidenceBudgetRatioWithExactIdentifier);
+        var structuralCeiling = Math.Min(builder.Length + plan.StructuralBudget, overallCeiling);
+
         builder.AppendLine();
         builder.AppendLine("## 已確認的結構鏈路");
         var appended = 0;
@@ -851,10 +1032,10 @@ public sealed class GraphRetrievalService
                 continue;
             }
 
-            var line = $"- [{source.Kind}] {DisplayName(source)} " +
+            var line = $"- [{source.Kind}] {DisplayName(source)} (nodeId: {source.Key}) " +
                        $"-({GraphSchema.GetRelationshipType(relationship.Kind)})-> " +
-                       $"[{target.Kind}] {DisplayName(target)}";
-            if (!TryAppendWithinBudget(builder, line))
+                       $"[{target.Kind}] {DisplayName(target)} (nodeId: {target.Key})";
+            if (!TryAppendWithinBudget(builder, line, structuralCeiling))
             {
                 break;
             }
@@ -867,20 +1048,24 @@ public sealed class GraphRetrievalService
 
         builder.AppendLine();
         builder.AppendLine("## 直接證據");
+        // Context Reranker：結構鏈路已被 structuralCeiling 卡住，證據區塊保證至少拿得到
+        // plan.EvidenceBudget 的預算；候選順序改用 DiversifyEvidenceOrder，去除幾乎重複的證據、
+        // 跨檔案輪流選取，避免同一個檔案的大量雷同關係把其他來源的證據擠出預算之外。
+        var evidenceCandidates = DiversifyEvidenceOrder(context.Relationships);
         var evidenceCount = 0;
-        foreach (var relationship in context.Relationships)
+        foreach (var relationship in evidenceCandidates)
         {
             var evidence = EvidenceLine(relationship);
             if (evidence is null)
             {
                 continue;
             }
-            if (!TryAppendWithinBudget(builder, $"- {evidence}"))
+            if (!TryAppendWithinBudget(builder, $"- {evidence}", overallCeiling))
             {
                 break;
             }
             evidenceCount++;
-            if (evidenceCount >= 30)
+            if (evidenceCount >= _options.MaximumEvidenceItems)
             {
                 break;
             }
@@ -894,6 +1079,8 @@ public sealed class GraphRetrievalService
         builder.AppendLine("## 回答與後續探索規則");
         builder.AppendLine("- 先根據上述權威圖回答；重要結論要指出節點、關係或來源檔案。");
         builder.AppendLine("- 若問題要求方法內細節、條件分支、最新未索引修改，或上述資料不足，必須使用唯讀工具 search_project_text、read_project_file_range、find_csharp_symbol 繼續查證。");
+        builder.AppendLine("- 「已確認的結構鏈路」每個節點後面都已附上 nodeId；需要繼續往下游追查時，直接用該 nodeId 呼叫 trace_project_graph_paths，不必先呼叫 search_project_graph 重新查一次同一個節點。");
+        builder.AppendLine("- 想從任一節點一次取得完整資料流程（Menu/Endpoint/Controller/Service/DAL/資料庫），呼叫 trace_project_graph_paths 時把 backboneOnly 設為 true、maxDepth 提高（最多 8），一次呼叫取代逐層多次呼叫。");
         builder.AppendLine("- 需要繼續沿圖導航時，使用 search_project_graph 取得 nodeId，再用 trace_project_graph_paths；不得自行捏造 nodeId。");
         builder.AppendLine("- 明確區分已確認事實、合理推論與尚未確認項目；資訊不足時不可假裝已完整涵蓋。");
         if (context.WasTruncated)
@@ -906,12 +1093,87 @@ public sealed class GraphRetrievalService
             : builder.ToString(0, _options.MaximumPromptCharacters);
     }
 
-    /// <summary>在保留尾端回答規則的前提下控制中段資料大小。</summary>
-    private bool TryAppendWithinBudget(StringBuilder builder, string line)
+    /// <summary>
+    /// 依「是否有精確識別碼觸發主幹深追」動態切分結構鏈路與直接證據兩區塊的字元預算。
+    /// 有精確識別碼時，結構鏈路已由主幹深追涵蓋完整資料流程，證據片段比大量鏈路預覽更有回答價值。
+    /// 純函式（不讀 _options），方便回歸測試直接驗證配比邏輯。
+    /// </summary>
+    internal static PromptBudgetPlan ComputeBudgetPlan(
+        int remainingCharacters,
+        bool hasExactIdentifier,
+        double evidenceRatio,
+        double evidenceRatioWithExactIdentifier)
     {
-        const int reservedTailCharacters = 2_000;
-        if (builder.Length + line.Length + Environment.NewLine.Length + reservedTailCharacters >
-            _options.MaximumPromptCharacters)
+        var ratio = hasExactIdentifier ? evidenceRatioWithExactIdentifier : evidenceRatio;
+        var evidenceBudget = (int)(remainingCharacters * ratio);
+        var structuralBudget = remainingCharacters - evidenceBudget;
+        return new PromptBudgetPlan(Math.Max(structuralBudget, 0), Math.Max(evidenceBudget, 0));
+    }
+
+    /// <summary>結構鏈路／直接證據兩區塊各自分配到的字元預算上限。</summary>
+    internal sealed record PromptBudgetPlan(int StructuralBudget, int EvidenceBudget);
+
+    /// <summary>
+    /// 依「跨檔案輪流、同檔案內維持原權重順序」重排證據候選，並剔除幾乎相同的重複描述；
+    /// 避免單一鏈路的重複證據把預算洗版、排擠其他來源檔案的證據。
+    /// </summary>
+    internal static IReadOnlyList<AuthorityGraphRelationship> DiversifyEvidenceOrder(
+        IReadOnlyList<AuthorityGraphRelationship> relationships)
+    {
+        var seenText = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var groupOrder = new List<string>();
+        var groups = new Dictionary<string, List<AuthorityGraphRelationship>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var relationship in relationships)
+        {
+            var line = EvidenceLine(relationship);
+            if (line is null || !seenText.Add(NormalizeEvidenceText(line)))
+            {
+                continue;
+            }
+
+            var fileKey = relationship.Evidence.SourceFile
+                ?? relationship.Evidence.DatabaseObject
+                ?? relationship.Evidence.XmlPath
+                ?? "(no-file)";
+            if (!groups.TryGetValue(fileKey, out var bucket))
+            {
+                bucket = [];
+                groups[fileKey] = bucket;
+                groupOrder.Add(fileKey);
+            }
+            bucket.Add(relationship);
+        }
+
+        var ordered = new List<AuthorityGraphRelationship>(seenText.Count);
+        for (var cursor = 0; ; cursor++)
+        {
+            var addedAny = false;
+            foreach (var fileKey in groupOrder)
+            {
+                var bucket = groups[fileKey];
+                if (cursor < bucket.Count)
+                {
+                    ordered.Add(bucket[cursor]);
+                    addedAny = true;
+                }
+            }
+            if (!addedAny)
+            {
+                break;
+            }
+        }
+        return ordered;
+    }
+
+    /// <summary>把證據文字正規化成去除空白差異的比較用字串，用來判斷是否為幾乎相同的重複證據。</summary>
+    private static string NormalizeEvidenceText(string evidenceLine) =>
+        Regex.Replace(evidenceLine, @"\s+", " ").Trim().ToLowerInvariant();
+
+    /// <summary>在不超過區塊字元上限的前提下嘗試附加一行內容。</summary>
+    private static bool TryAppendWithinBudget(StringBuilder builder, string line, int ceiling)
+    {
+        if (builder.Length + line.Length + Environment.NewLine.Length > ceiling)
         {
             return false;
         }
@@ -976,8 +1238,13 @@ public sealed class GraphRetrievalService
         return boost;
     }
 
-    /// <summary>讓 FBL 的主要可執行與資料鏈優先於描述性邊。</summary>
-    private static int RelationshipWeight(GraphRelationshipKind kind) => kind switch
+    /// <summary>
+    /// 讓 FBL 的主要可執行與資料鏈優先於描述性邊。
+    /// 標記為 <c>internal</c> 是刻意的：<see cref="ProjectAnalysisTools"/> 的
+    /// <c>trace_project_graph_paths</c>（<c>backboneOnly</c> 模式）需要沿用同一份
+    /// 「什麼算主幹關係」定義，避免兩處各自維護一份會逐漸不一致的 switch。
+    /// </summary>
+    internal static int RelationshipWeight(GraphRelationshipKind kind) => kind switch
     {
         GraphRelationshipKind.Opens or
         GraphRelationshipKind.RoutesTo or
@@ -1033,7 +1300,13 @@ public sealed class GraphRetrievalService
             options.MaximumPromptCharacters is < 4_000 or > 80_000 ||
             options.MaximumQueryVariants is < 1 or > 20 ||
             options.LlmQueryRewriteTimeoutSeconds is < 1 or > 30 ||
-            options.MaximumLlmQueryVariants is < 1 or > 12)
+            options.MaximumLlmQueryVariants is < 1 or > 12 ||
+            options.PrimarySeedChaseDepth is < 1 or > 12 ||
+            options.PrimarySeedChaseNeighborsPerNode is < 1 or > 30 ||
+            options.PrimarySeedChaseMaximumNodes is < 5 or > 200 ||
+            options.EvidenceBudgetRatio is <= 0 or >= 1 ||
+            options.EvidenceBudgetRatioWithExactIdentifier is <= 0 or >= 1 ||
+            options.MaximumEvidenceItems is < 5 or > 100)
         {
             throw new InvalidOperationException("GraphRAG Retrieval 設定超出安全範圍。");
         }

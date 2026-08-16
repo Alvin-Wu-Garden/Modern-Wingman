@@ -4,6 +4,30 @@
  */
 export const AGENT_API_BASE_URL = 'http://localhost:5002'
 
+// 桌面 App 啟動時，Agent Service sidecar 可能還沒完全就緒（port 尚未 listen），
+// 這時候首次讀取專案/對話清單若直接失敗且不重試，畫面會永遠停留在空白。
+// 這裡只針對「連線層失敗」（fetch 本身 throw，例如 ECONNREFUSED）做有限次重試，
+// 已經連線上但回傳 4xx/5xx 的應用層錯誤不會被這裡吞掉。
+const CONNECTION_RETRY_DELAYS_MS = [300, 800, 1500]
+
+const wait = (milliseconds: number) =>
+  new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds))
+
+/** 對初次載入類請求的連線失敗做有限次數重試；4xx/5xx 由呼叫端照常處理。 */
+export async function fetchWithConnectionRetry(
+  input: string,
+  init?: RequestInit,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fetch(input, init)
+    } catch (error) {
+      if (attempt >= CONNECTION_RETRY_DELAYS_MS.length) throw error
+      await wait(CONNECTION_RETRY_DELAYS_MS[attempt])
+    }
+  }
+}
+
 export interface ConversationSummary {
   id: string
   title: string
@@ -80,7 +104,7 @@ export interface CopilotRuntimeStatus {
 }
 
 export async function listConversations(): Promise<ConversationSummary[]> {
-  const response = await fetch(`${AGENT_API_BASE_URL}/api/conversations`)
+  const response = await fetchWithConnectionRetry(`${AGENT_API_BASE_URL}/api/conversations`)
   if (!response.ok) throw new Error(`無法載入對話：HTTP ${response.status}`)
   return response.json()
 }
@@ -89,7 +113,7 @@ export async function listConversations(): Promise<ConversationSummary[]> {
 export async function listProjectConversations(
   projectId: string,
 ): Promise<ConversationSummary[]> {
-  const response = await fetch(
+  const response = await fetchWithConnectionRetry(
     `${AGENT_API_BASE_URL}/api/projects/${encodeURIComponent(projectId)}/conversations`,
   )
   if (!response.ok) throw new Error(`無法載入專案對話：HTTP ${response.status}`)

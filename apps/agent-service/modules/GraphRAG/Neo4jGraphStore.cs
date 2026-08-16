@@ -726,6 +726,46 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<GraphSearchHit>> ListNodesByKindAsync(
+        string projectId,
+        string kind,
+        string? nameFilter,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(kind);
+        limit = Math.Clamp(limit, 1, 200);
+        if (_driver is null) return [];
+        await using var session = OpenReadSession();
+        cancellationToken.ThrowIfCancellationRequested();
+        return await session.ExecuteReadAsync(async transaction =>
+        {
+            var cursor = await transaction.RunAsync(
+                """
+                MATCH (p:ProjectGraph {projectId: $projectId})
+                MATCH (node:GraphEntity {
+                    projectId: $projectId,
+                    graphVersion: p.activeManifestVersion,
+                    kind: $kind
+                })
+                WHERE $nameFilter IS NULL
+                    OR toLower(node.name) CONTAINS toLower($nameFilter)
+                RETURN node
+                ORDER BY node.name
+                LIMIT $limit
+                """,
+                new { projectId, kind, nameFilter, limit });
+            var result = new List<GraphSearchHit>();
+            while (await cursor.FetchAsync())
+                result.Add(new GraphSearchHit(
+                    MapNode(cursor.Current["node"].As<INode>()),
+                    1.0));
+            return (IReadOnlyList<GraphSearchHit>)result;
+        });
+    }
+
+    /// <inheritdoc />
     public async Task<(int Nodes, int Edges)> GetStatsAsync(
         string projectId,
         CancellationToken cancellationToken = default)

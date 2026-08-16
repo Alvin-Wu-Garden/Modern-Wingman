@@ -50,6 +50,61 @@ public sealed class ProjectAnalysisToolsRegressionTests
         }
     }
 
+    [Fact]
+    public async Task SearchTextAsync_有界並行掃描_應找到分散在多個檔案的所有相符結果()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            const int matchingFileCount = 20;
+            for (var index = 0; index < matchingFileCount; index++)
+                await File.WriteAllTextAsync(
+                    Path.Combine(root, $"match-{index:D2}.cs"),
+                    $"// 檔案 {index}\nvar needle = \"TargetToken\";\n");
+            for (var index = 0; index < 10; index++)
+                await File.WriteAllTextAsync(
+                    Path.Combine(root, $"other-{index:D2}.cs"),
+                    "// 無相符內容\n");
+
+            var tools = CreateTools(root);
+            var result = await tools.SearchTextAsync("TargetToken", ".cs", maxResults: 100);
+
+            Assert.Equal(matchingFileCount, result.Matches.Count);
+            Assert.False(result.WasTruncated);
+            Assert.Equal(30, result.FilesScanned);
+            Assert.All(
+                result.Matches,
+                match => Assert.StartsWith("match-", match.FilePath));
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public async Task SearchTextAsync_命中數超過上限時_應提早停止且不超過上限()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            for (var index = 0; index < 20; index++)
+                await File.WriteAllTextAsync(
+                    Path.Combine(root, $"file-{index:D2}.cs"),
+                    "var needle = \"TargetToken\";\n");
+
+            var tools = CreateTools(root);
+            var result = await tools.SearchTextAsync("TargetToken", ".cs", maxResults: 5);
+
+            Assert.Equal(5, result.Matches.Count);
+            Assert.True(result.WasTruncated);
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
     private static ProjectAnalysisTools CreateTools(string root) =>
         new(
             "core-regression-project",

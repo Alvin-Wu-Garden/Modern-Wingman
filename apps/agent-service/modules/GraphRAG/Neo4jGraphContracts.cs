@@ -398,6 +398,19 @@ public interface IGraphStore
         int limit,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 依節點種類（例如 DatabaseObject、Menu、CodeClass）列出 active graph 節點，可選擇用名稱關鍵字篩選。
+    /// 供 Agent 的列舉型工具使用（例如「這個系統有哪些資料表／選單」），避免用全文搜尋亂猜關鍵字。
+    /// 測試或非 Neo4j Store 可回傳空集合，正式 Neo4j Store 必須覆寫。
+    /// </summary>
+    Task<IReadOnlyList<GraphSearchHit>> ListNodesByKindAsync(
+        string projectId,
+        string kind,
+        string? nameFilter,
+        int limit,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<GraphSearchHit>>([]);
+
     /// <summary>取得 active graph 的 node／edge 數量。</summary>
     Task<(int Nodes, int Edges)> GetStatsAsync(
         string projectId,
