@@ -10,12 +10,15 @@ import {
   sendMessage,
   type AttachmentReference,
   type ConversationSummary,
+  type ConversationStreamError,
   type MessageItem,
   type AgentActivityEvent,
 } from '@/services/agent-api/client'
 
 export interface LocalMessage extends MessageItem {
   streaming?: boolean
+  /** 串流在已有部分文字後中斷；不得把內容視為完整回答。 */
+  incomplete?: boolean
   /** 本次串流期間的活動，不會寫入對話歷史。 */
   activities?: AgentActivityEvent[]
 }
@@ -33,7 +36,7 @@ interface ChatState {
   messages: LocalMessage[]
   isLoadingList: boolean
   isStreaming: boolean
-  lastError: string | null
+  lastError: ConversationStreamError | null
   lastFailedRequest: FailedRequest | null
 
   loadConversations: (projectId?: string | null) => Promise<void>
@@ -63,6 +66,13 @@ let abortController: AbortController | null = null
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error)
 
+const unexpectedError = (error: unknown): ConversationStreamError => ({
+  message: errorMessage(error),
+  code: 'client_error',
+  retryable: false,
+  stage: null,
+})
+
 export const useChatStore = create<ChatState>((set, get) => ({
   conversations: [],
   activeConversationId: null,
@@ -86,7 +96,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return { conversations: [...retained, ...loaded] }
       })
     } catch (error) {
-      set({ lastError: errorMessage(error) })
+      set({ lastError: unexpectedError(error) })
     } finally {
       set({ isLoadingList: false })
     }
@@ -202,22 +212,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
             messages: state.messages.map((message) =>
               message.streaming ? { ...message, streaming: false } : message),
             isStreaming: false,
+            lastFailedRequest: null,
           }))
           void get().loadConversations(projectId)
         },
         onError: (error) => set((state) => ({
-          messages: state.messages.map((message) =>
-            message.streaming
-              ? { ...message, content: `[錯誤：${error}]`, streaming: false }
-              : message),
+          messages: state.messages.map((message) => {
+            if (!message.streaming) return message
+            // 已經收到模型文字時保留部分回答，只結束串流並由錯誤區顯示
+            // 「回答未完成」。沒有任何文字時才在對話泡泡中顯示錯誤。
+            return {
+              ...message,
+              content: message.content.trim().length > 0
+                ? message.content
+                : `[錯誤：${error.message}]`,
+              streaming: false,
+              incomplete: message.content.trim().length > 0,
+            }
+          }),
           isStreaming: false,
           lastError: error,
-          lastFailedRequest: {
-            text: userMessage,
-            profileId,
-            modelId,
-            attachments,
-          },
+          lastFailedRequest: error.retryable
+            ? {
+                text: userMessage,
+                profileId,
+                modelId,
+                attachments,
+              }
+            : null,
         })),
         onActivity: (activity) => set((state) => ({
           messages: state.messages.map((message) => {

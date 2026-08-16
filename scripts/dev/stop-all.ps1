@@ -8,7 +8,10 @@ param(
     [switch]$ForRestart,
 
     # 隱藏一般完成訊息；錯誤與無法釋放的 port 仍會顯示。
-    [switch]$Quiet
+    [switch]$Quiet,
+
+    # VS Code Debug 重啟時保留已驗證的 managed Neo4j，避免每次冷啟動與 recovery。
+    [switch]$PreserveNeo4j
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,7 +54,8 @@ $runtimeStatePath = Join-Path $env:TEMP "modern-wingman-debug-runtime.json"
 $viteOutputPath = Join-Path $env:TEMP "modern-wingman-vite.stdout.log"
 $viteErrorPath = Join-Path $env:TEMP "modern-wingman-vite.stderr.log"
 # 只驗證本流程明確管理的 Listener；Neo4j Browser HTTP port 不在此清單。
-$portsToVerify = @(4173, 5002, 17688)
+# Debug 保留 Neo4j 時，17688 本來就應持續監聽，不能把它當成停止失敗。
+$portsToVerify = if ($PreserveNeo4j) { @(4173, 5002) } else { @(4173, 5002, 17688) }
 $stoppedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
 
 function Get-ListeningProcessIds {
@@ -102,7 +106,8 @@ function Stop-VerifiedProcessTree {
     param(
         [Parameter(Mandatory)][int]$ProcessId,
         [Parameter(Mandatory)][scriptblock]$Validator,
-        [Parameter(Mandatory)][string]$DisplayName
+        [Parameter(Mandatory)][string]$DisplayName,
+        [switch]$ProcessOnly
     )
 
     if ($stoppedProcessIds.Contains($ProcessId)) {
@@ -120,7 +125,14 @@ function Stop-VerifiedProcessTree {
     if (-not $Quiet) {
         Write-Host "正在停止 $DisplayName（PID $ProcessId）..." -ForegroundColor Cyan
     }
-    & taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Null
+    if ($ProcessOnly) {
+        # Debug 保留 Neo4j 時，只終止 Agent 本身；其 ownership 已另外驗證，
+        # 不可讓 /T 把受管 Neo4j console 一併強制終止。
+        & taskkill.exe /PID $ProcessId /F 2>$null | Out-Null
+    }
+    else {
+        & taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Null
+    }
     [void]$stoppedProcessIds.Add($ProcessId)
 }
 
@@ -318,7 +330,29 @@ function Stop-OwnedViteProcesses {
 function Stop-KnownDebugProcesses {
     <# Debugger 正常停止後通常找不到這些程序；此處只處理中止或當機殘留。 #>
     foreach ($processId in Get-ListeningProcessIds -Port 5002) {
-        Stop-VerifiedProcessTree -ProcessId $processId -DisplayName "AgentService" -Validator ${function:Test-AgentProcess}
+        $agentSnapshot = Get-ProcessSnapshot -ProcessId $processId
+        $ownership = if ($PreserveNeo4j) { Read-ManagedNeo4jOwnership } else { $null }
+        $ownershipHome = if ($null -ne $ownership) { [string]$ownership.Home } else { "" }
+        $launcherSnapshot = if ($null -ne $ownership) {
+            Get-ProcessSnapshot -ProcessId ([int]$ownership.LauncherProcessId)
+        }
+        else {
+            $null
+        }
+        $agentOwnsManagedNeo4j = $null -ne $agentSnapshot -and
+            $null -ne $ownership -and
+            [int]$ownership.OwnerProcessId -eq $processId -and
+            [long]$ownership.OwnerProcessStartTimeUtcTicks -eq $agentSnapshot.StartTimeUtcTicks -and
+            [string]$ownership.Endpoint -ieq "127.0.0.1:17688" -and
+            (Test-PathWithinRoot -Root $neo4jRuntimeRoot -Candidate $ownershipHome) -and
+            $null -ne $launcherSnapshot -and
+            [long]$ownership.LauncherProcessStartTimeUtcTicks -eq $launcherSnapshot.StartTimeUtcTicks -and
+            (Test-Neo4jLauncher -Snapshot $launcherSnapshot -Neo4jHome $ownershipHome)
+        Stop-VerifiedProcessTree `
+            -ProcessId $processId `
+            -DisplayName "AgentService" `
+            -Validator ${function:Test-AgentProcess} `
+            -ProcessOnly:$agentOwnsManagedNeo4j
     }
 
     Get-CimInstance Win32_Process -Filter "Name = 'modern-wingman-desktop.exe'" -ErrorAction SilentlyContinue |
@@ -395,7 +429,9 @@ function Wait-ForOwnedPortsToClose {
 $state = Read-RuntimeState
 Stop-KnownDebugProcesses
 Stop-OwnedViteProcesses -State $state
-Stop-ManagedNeo4j
+if (-not $PreserveNeo4j) {
+    Stop-ManagedNeo4j
+}
 Wait-ForOwnedPortsToClose
 
 # 只有 ownership launcher 已不存在且 Bolt listener 已釋放，才能移除 ownership。

@@ -72,6 +72,15 @@ public static class ServiceRegistration
         // ── Options / BYOK 設定綁定 ────────────────────────────────────────────
         services.Configure<AgentServiceOptions>(
             configuration.GetSection(AgentServiceOptions.SectionName));
+        services.AddOptions<ConversationRuntimeOptions>()
+            .Bind(configuration.GetSection(ConversationRuntimeOptions.SectionName))
+            .Validate(
+                options => options.GeneralTimeoutSeconds is >= 30 and <= 1800,
+                "ConversationRuntime:GeneralTimeoutSeconds 必須介於 30 到 1800 秒。")
+            .Validate(
+                options => options.ProjectAnalysisTimeoutSeconds is >= 30 and <= 1800,
+                "ConversationRuntime:ProjectAnalysisTimeoutSeconds 必須介於 30 到 1800 秒。")
+            .ValidateOnStart();
 
         // ── SQLite / EF Core ──────────────────────────────────────────────────
         var connectionString = DatabasePathResolver.ResolveConnectionString(configuration, environment);

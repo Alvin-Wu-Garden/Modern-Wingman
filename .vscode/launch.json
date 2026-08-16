@@ -36,7 +36,7 @@
         "Modern Wingman Desktop（背景子程序）"
       ],
       "preLaunchTask": "modern-wingman: prepare debug",
-      "postDebugTask": "modern-wingman: stop all",
+      "postDebugTask": "modern-wingman: stop debug",
       "stopAll": true,
       "presentation": {
         "group": "modern-wingman",

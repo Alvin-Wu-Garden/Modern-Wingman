@@ -31,29 +31,6 @@ using (var scope = app.Services.CreateScope())
 
 app.MapAgentEndpoints();
 
-// Neo4j 常駐：App 啟動就開始確保 managed 子程序已啟動/連線就緒，不用等到使用者送出
-// 第一個專案問題或手動觸發索引才呼叫 EnsureAvailableAsync，避免對話當下才發現整輪
-// GraphRAG 工具都無法使用。安裝/啟動可能耗時（首次需下載 Neo4j + JRE），用背景 Task
-// 執行避免拖慢 App 啟動；任何失敗只記錄 log，仍可用原始碼工具繼續對話。
-_ = Task.Run(async () =>
-{
-    var neo4jLogger = app.Services.GetRequiredService<ILogger<Program>>();
-    try
-    {
-        var neo4jRuntime = app.Services.GetRequiredService<INeo4jRuntime>();
-        var ready = await neo4jRuntime.EnsureAvailableAsync();
-        neo4jLogger.LogInformation(
-            "Neo4j \u555f\u52d5\u6642\u9810\u5148\u78ba\u4fdd\u5b8c\u6210\u3002Ready={Ready}, Status={Status}, LastError={LastError}",
-            ready,
-            neo4jRuntime.Status,
-            neo4jRuntime.LastError);
-    }
-    catch (Exception exception)
-    {
-        neo4jLogger.LogWarning(exception, "Neo4j \u555f\u52d5\u6642\u9810\u5148\u78ba\u4fdd\u5931\u6557\uff1b\u672c\u8f2a\u5c0d\u8a71\u4ecd\u53ef\u7528\u539f\u59cb\u78bc\u5de5\u5177\u3002");
-    }
-});
-
 app.Run();
 
 // 讓隔離式整合測試可以建立最小 ASP.NET Host。

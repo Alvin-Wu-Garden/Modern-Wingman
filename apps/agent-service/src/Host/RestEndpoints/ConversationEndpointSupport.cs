@@ -65,7 +65,13 @@ internal static class ConversationEndpointSupport
                     payload = new { done = true };
                     break;
                 case ConversationErrorEvent error:
-                    payload = new { error = error.Error };
+                    payload = new
+                    {
+                        error = error.Error,
+                        code = error.Code,
+                        retryable = error.Retryable,
+                        stage = error.Stage,
+                    };
                     break;
                 default:
                     throw new InvalidOperationException("不支援的對話串流事件。");

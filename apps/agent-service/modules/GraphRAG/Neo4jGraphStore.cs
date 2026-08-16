@@ -103,11 +103,12 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         {
             throw;
         }
-        catch (Exception exception)
+        catch (Exception)
         {
-            _logger.LogDebug(
-                "Neo4j 連線檢查失敗；已遮蔽連線資訊。ExceptionType={ExceptionType}",
-                exception.GetType().Name);
+            // Ping 是 readiness 與健康狀態的布林探測。受管 Neo4j 冷啟動期間，
+            // Bolt 尚未監聽而回傳 false 是預期流程；若在這個底層方法逐次記錄，
+            // 每兩秒重試就會製造大量看似故障的 ServiceUnavailableException。
+            // 是否需要記錄成功、等待或最終失敗，交由持有重試語意的 Runtime 決定。
             return false;
         }
     }

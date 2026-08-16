@@ -117,6 +117,11 @@ export function ConversationPane({
                         streaming={message.streaming ?? false}
                       />
                       <MarkdownRenderer content={message.content} streaming={message.streaming} />
+                      {message.incomplete && (
+                        <p className="mt-2 text-xs font-medium text-red-500">
+                          回答未完成，請參考下方錯誤說明。
+                        </p>
+                      )}
                     </>
                   : <p className="whitespace-pre-wrap">{message.content}</p>}
                 <p
@@ -144,11 +149,17 @@ export function ConversationPane({
         <div className="mx-6 mb-3 flex items-start gap-2 border border-red-400/40 bg-surface p-3">
           <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
           <div className="min-w-0 flex-1">
-            <p className="text-sm text-ink">{lastError}</p>
+            <p className="text-sm text-ink">
+              {messages[messages.length - 1]?.incomplete
+                ? `回答未完成：${lastError.message}`
+                : lastError.message}
+            </p>
             <div className="mt-2 flex gap-2">
-              <Button size="sm" variant="outline" onClick={() => void retryLast()}>
-                重試
-              </Button>
+              {lastError.retryable && (
+                <Button size="sm" variant="outline" onClick={() => void retryLast()}>
+                  重試
+                </Button>
+              )}
               <Button size="sm" variant="ghost" onClick={clearLastError}>
                 關閉
               </Button>

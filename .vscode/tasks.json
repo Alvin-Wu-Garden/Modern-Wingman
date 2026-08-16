@@ -40,6 +40,27 @@
         "clear": true,
         "showReuseMessage": false
       }
+    },
+    {
+      "label": "modern-wingman: stop debug",
+      "type": "process",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/dev/stop-all.ps1",
+        "-PreserveNeo4j"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "group": "modern-wingman",
+        "clear": true,
+        "showReuseMessage": false
+      }
     }
   ]
 }

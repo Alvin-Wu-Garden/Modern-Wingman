@@ -75,8 +75,21 @@ public sealed record ConversationExecutionRequest(
     string? ModelId,
     Func<AgentActivityReporter, CancellationToken, Task<ConversationPreparation>>? Prepare = null,
     bool EmitRuntimeActivities = false,
-    /// <summary>整個對話回合的逾時；未指定時由執行服務使用兩分鐘預設值。</summary>
+    /// <summary>測試或內部流程使用的整輪逾時覆寫；一般執行使用 ConversationRuntime 設定。</summary>
     TimeSpan? ExecutionTimeout = null);
+
+/// <summary>對話串流可由前端穩定判斷的錯誤代碼。</summary>
+public static class ConversationErrorCodes
+{
+    /// <summary>Modern Wingman 設定的整輪執行期限已到。</summary>
+    public const string TurnTimeout = "turn_timeout";
+
+    /// <summary>模型、SDK 或工具在整輪期限前自行取消或逾時。</summary>
+    public const string DependencyTimeout = "dependency_timeout";
+
+    /// <summary>Agent 執行期間發生非逾時錯誤。</summary>
+    public const string AgentExecutionFailed = "agent_execution_failed";
+}
 
 /// <summary>對話串流事件的基底型別。</summary>
 public abstract record ConversationStreamEvent;
@@ -107,4 +120,8 @@ public sealed record ConversationCompletedEvent : ConversationStreamEvent;
 public sealed record ConversationErrorEvent(
     string Error,
     /// <summary>供前端以程式區分取消、逾時與一般執行錯誤。</summary>
-    string? Code = null) : ConversationStreamEvent;
+    string? Code = null,
+    /// <summary>相同輸入是否適合直接重試。</summary>
+    bool Retryable = false,
+    /// <summary>發生錯誤時最後觀察到的安全執行階段，不包含 Prompt 或工具參數。</summary>
+    string? Stage = null) : ConversationStreamEvent;

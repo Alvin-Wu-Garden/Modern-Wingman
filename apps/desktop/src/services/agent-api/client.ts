@@ -71,6 +71,14 @@ export interface AgentActivityEvent {
   timestamp: string
 }
 
+/** 後端對話串流回傳的結構化錯誤。 */
+export interface ConversationStreamError {
+  message: string
+  code: string | null
+  retryable: boolean
+  stage: string | null
+}
+
 export interface ProviderInfo {
   id: string
   displayName: string
@@ -208,7 +216,7 @@ export async function sendMessage(
   handlers: {
     onToken: (token: string) => void
     onDone: () => void
-    onError: (error: string) => void
+    onError: (error: ConversationStreamError) => void
     onActivity?: (activity: AgentActivityEvent) => void
   },
   signal?: AbortSignal,
@@ -230,12 +238,27 @@ export async function sendMessage(
       },
     )
     if (!response.ok) {
-      const body = await response.json().catch(() => null) as { error?: string } | null
-      handlers.onError(body?.error ?? `HTTP ${response.status}`)
+      const body = await response.json().catch(() => null) as {
+        error?: string
+        code?: string
+        retryable?: boolean
+        stage?: string
+      } | null
+      handlers.onError({
+        message: body?.error ?? `HTTP ${response.status}`,
+        code: body?.code ?? 'http_error',
+        retryable: body?.retryable ?? response.status >= 500,
+        stage: body?.stage ?? null,
+      })
       return
     }
     if (!response.body) {
-      handlers.onError('服務未回傳串流內容。')
+      handlers.onError({
+        message: '服務未回傳串流內容。',
+        code: 'empty_stream',
+        retryable: true,
+        stage: null,
+      })
       return
     }
 
@@ -257,20 +280,36 @@ export async function sendMessage(
             token?: string
             done?: boolean
             error?: string
+            code?: string | null
+            retryable?: boolean
+            stage?: string | null
             activity?: AgentActivityEvent
           }
           if (event.activity) handlers.onActivity?.(event.activity)
           if (typeof event.token === 'string') handlers.onToken(event.token)
           if (event.done) handlers.onDone()
-          if (event.error) handlers.onError(event.error)
+          if (event.error) {
+            handlers.onError({
+              message: event.error,
+              code: event.code ?? null,
+              retryable: event.retryable ?? false,
+              stage: event.stage ?? null,
+            })
+          }
         } catch {
           // 忽略單一格式錯誤事件，後續 SSE 仍可繼續處理。
         }
       }
     }
   } catch (error) {
-    if ((error as Error).name !== 'AbortError')
-      handlers.onError(String(error))
+    if ((error as Error).name !== 'AbortError') {
+      handlers.onError({
+        message: error instanceof Error ? error.message : String(error),
+        code: 'stream_interrupted',
+        retryable: true,
+        stage: null,
+      })
+    }
   }
 }
 

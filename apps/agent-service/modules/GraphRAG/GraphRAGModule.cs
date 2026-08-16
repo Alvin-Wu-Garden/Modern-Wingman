@@ -58,7 +58,6 @@ public static class GraphRagModule
         services.AddSingleton<Neo4jRuntime>();
         services.AddSingleton<INeo4jRuntime>(
             provider => provider.GetRequiredService<Neo4jRuntime>());
-        services.AddHostedService<Neo4jWarmupService>();
         services.AddSingleton<
             IGraphDatabaseSourceProvider,
             ProjectGraphDatabaseSourceProvider>();

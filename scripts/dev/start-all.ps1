@@ -21,9 +21,10 @@ $stopScript = Join-Path $PSScriptRoot "stop-all.ps1"
 $runtimeStatePath = Join-Path $env:TEMP "modern-wingman-debug-runtime.json"
 $viteOutputPath = Join-Path $env:TEMP "modern-wingman-vite.stdout.log"
 $viteErrorPath = Join-Path $env:TEMP "modern-wingman-vite.stderr.log"
-# 目前 Debug 流程的唯一必要 Listener：Vite、Agent REST 與 Neo4j Bolt。
-# Neo4j Browser 的 HTTP port 由 Neo4j 自身設定管理，不應在啟動腳本重複維護。
-$requiredPorts = @(4173, 5002, 17688)
+# 啟動前只要求 Vite 與 Agent REST port 為空。managed Neo4j 會跨 Debug
+# 重啟保留，AgentService 再以 ownership 驗證並安全接管；未知的 17688
+# 佔用則由 Neo4jRuntime 拒絕，不在腳本放寬安全邊界。
+$requiredPorts = @(4173, 5002)
 
 function Get-ListeningProcessIds {
     <# 取得指定 TCP port 的唯一監聽程序；沒有 listener 時回傳空陣列。 #>
@@ -125,7 +126,8 @@ function Wait-ForViteReady {
 }
 
 Write-Host "[1/4] 清理上次 Debug 遺留的 Modern Wingman 程序..." -ForegroundColor Cyan
-& powershell -NoProfile -ExecutionPolicy Bypass -File $stopScript -ForRestart -Quiet
+& powershell -NoProfile -ExecutionPolicy Bypass -File $stopScript `
+    -ForRestart -Quiet -PreserveNeo4j
 if ($LASTEXITCODE -ne 0) {
     throw "無法完成啟動前清理，請查看上方 stop-all 診斷。"
 }

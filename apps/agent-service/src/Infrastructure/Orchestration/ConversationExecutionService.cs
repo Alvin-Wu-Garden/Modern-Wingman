@@ -1,11 +1,13 @@
-using System.Runtime.CompilerServices;
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using AgentService.Application.Contracts;
 using AgentService.Application.Models;
 using AgentService.Domain.Models;
 using AgentService.Infrastructure.AgentRuntime;
 using AgentService.Infrastructure.Skills;
+using Microsoft.Extensions.Options;
 using AgentRuntimeService = AgentService.Infrastructure.AgentRuntime.AgentRuntime;
 
 namespace AgentService.Infrastructure.Orchestration;
@@ -21,6 +23,7 @@ public sealed class ConversationExecutionService(
     ISkillProvider skillProvider,
     IProjectJobQueue projectJobs,
     IServiceScopeFactory scopeFactory,
+    IOptions<ConversationRuntimeOptions> runtimeOptions,
     ILogger<ConversationExecutionService> logger)
 {
     /// <summary>執行單次對話並逐一回傳可安全送到前端的事件。</summary>
@@ -43,8 +46,13 @@ public sealed class ConversationExecutionService(
         ChannelWriter<ConversationStreamEvent> writer,
         CancellationToken ct)
     {
+        var startedAt = Stopwatch.GetTimestamp();
+        var currentStage = "preparing";
+        string? currentTool = null;
+        var activeToolActivities = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
         using var executionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var executionTimeout = request.ExecutionTimeout ?? TimeSpan.FromMinutes(2);
+        var executionTimeout = request.ExecutionTimeout ?? runtimeOptions.Value.ResolveTimeout(
+            request.Conversation.ProjectId is not null);
         if (executionTimeout > TimeSpan.Zero && executionTimeout != Timeout.InfiniteTimeSpan)
             executionCts.CancelAfter(executionTimeout);
         var runCt = executionCts.Token;
@@ -55,9 +63,34 @@ public sealed class ConversationExecutionService(
         TokenUsage? usage = null;
         var activity = new AgentActivityReporter(
             runId,
-            value => writer.WriteAsync(
-                new ConversationActivityStreamEvent(value),
-                CancellationToken.None).AsTask());
+            value =>
+            {
+                var isProjectTool = !string.IsNullOrWhiteSpace(value.Tool) &&
+                    !string.Equals(value.Tool, "runtime", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(value.Tool, "llm", StringComparison.OrdinalIgnoreCase);
+                if (isProjectTool)
+                {
+                    currentTool = value.Tool;
+                    if (string.Equals(value.Status, "started", StringComparison.OrdinalIgnoreCase))
+                        activeToolActivities.TryAdd(value.ActivityId, 0);
+                    else if (value.Status is "completed" or "failed")
+                        activeToolActivities.TryRemove(value.ActivityId, out _);
+                    currentStage = activeToolActivities.IsEmpty
+                        ? "model_execution"
+                        : "tool_execution";
+                }
+                else if (string.Equals(value.Tool, "llm", StringComparison.OrdinalIgnoreCase))
+                {
+                    currentStage = "model_execution";
+                }
+                else if (value.Type.StartsWith("run.", StringComparison.OrdinalIgnoreCase))
+                {
+                    currentStage = "preparing";
+                }
+                return writer.WriteAsync(
+                    new ConversationActivityStreamEvent(value),
+                    CancellationToken.None).AsTask();
+            });
         string? runActivityId = null;
         var totalStopwatch = Stopwatch.StartNew();
 
@@ -88,6 +121,7 @@ public sealed class ConversationExecutionService(
                 preparation.Tools.Count,
                 conversation.Id);
 
+            currentStage = "persisting_user_message";
             await writer.WriteAsync(
                 new ConversationStartedEvent(
                     request.Profile.Id,
@@ -110,6 +144,7 @@ public sealed class ConversationExecutionService(
                     runCt);
 
             var streamStopwatch = Stopwatch.StartNew();
+            currentStage = "model_execution";
             await foreach (var token in agent.RunStreamingAsync(
                 new AgentExecutionRequest(
                     preparation.Prompt,
@@ -157,11 +192,14 @@ public sealed class ConversationExecutionService(
             }
 
             if (fullResponse.Length > 0)
+            {
+                currentStage = "persisting_assistant_message";
                 await conversations.AddMessageAsync(
                     conversation.Id,
                     MessageRole.Assistant,
                     fullResponse.ToString(),
                     CancellationToken.None);
+            }
 
             if (usage is not null)
                 await writer.WriteAsync(
@@ -207,23 +245,68 @@ public sealed class ConversationExecutionService(
                 totalStopwatch.ElapsedMilliseconds,
                 conversation.Id);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException exception) when (executionCts.IsCancellationRequested)
         {
-            // 執行逾時必須明確回報，不能讓前端只看到串流中斷而誤以為仍在處理。
+            var elapsed = Stopwatch.GetElapsedTime(startedAt);
+            var failedStage = currentStage;
+            var failedTool = currentTool;
             logger.LogWarning(
-                "對話 Agent 執行逾時。ConversationId={ConversationId}, ProviderId={ProviderId}",
+                exception,
+                "對話 Agent 已達整輪執行期限。ConversationId={ConversationId}, RunId={RunId}, " +
+                "ProviderId={ProviderId}, ModelId={ModelId}, Stage={Stage}, Tool={Tool}, " +
+                "ElapsedMs={ElapsedMs}, TimeoutMs={TimeoutMs}",
                 conversation.Id,
-                request.Profile.Id);
+                runId,
+                request.Profile.Id,
+                request.ModelId,
+                failedStage,
+                failedTool,
+                (long)elapsed.TotalMilliseconds,
+                (long)executionTimeout.TotalMilliseconds);
             if (runActivityId is not null)
                 await activity.FailAsync(runActivityId, "回答逾時");
             await writer.WriteAsync(
                 new ConversationErrorEvent(
-                    "本輪對話逾時，請縮小問題範圍後重試。",
-                    "timeout"),
+                    request.Conversation.ProjectId is null
+                        ? "一般對話超過本輪執行期限，請稍後重試。"
+                        : "專案解析超過本輪執行期限，可重試或縮小查詢範圍。",
+                    ConversationErrorCodes.TurnTimeout,
+                    Retryable: true,
+                    Stage: failedStage),
+                CancellationToken.None);
+        }
+        catch (Exception exception) when (
+            exception is OperationCanceledException or TimeoutException)
+        {
+            // 外部模型、SDK 或工具可能使用自己的 CancellationToken 或 TimeoutException。
+            // 這不是 Modern Wingman 的整輪期限，必須保留成相依元件逾時，避免誤導使用者。
+            var elapsed = Stopwatch.GetElapsedTime(startedAt);
+            var failedStage = currentStage;
+            var failedTool = currentTool;
+            logger.LogWarning(
+                exception,
+                "對話相依元件提前取消或逾時。ConversationId={ConversationId}, RunId={RunId}, " +
+                "ProviderId={ProviderId}, ModelId={ModelId}, Stage={Stage}, Tool={Tool}, ElapsedMs={ElapsedMs}",
+                conversation.Id,
+                runId,
+                request.Profile.Id,
+                request.ModelId,
+                failedStage,
+                failedTool,
+                (long)elapsed.TotalMilliseconds);
+            if (runActivityId is not null)
+                await activity.FailAsync(runActivityId, "模型或工具回應逾時");
+            await writer.WriteAsync(
+                new ConversationErrorEvent(
+                    "模型或工具未在預期時間內完成，請稍後重試。",
+                    ConversationErrorCodes.DependencyTimeout,
+                    Retryable: true,
+                    Stage: failedStage),
                 CancellationToken.None);
         }
         catch (Exception exception)
         {
+            var failedStage = currentStage;
             logger.LogError(
                 exception,
                 "對話 Agent 執行失敗。已耗時={ElapsedMs}ms，ConversationId={ConversationId}, ProviderId={ProviderId}",
@@ -233,7 +316,11 @@ public sealed class ConversationExecutionService(
             if (runActivityId is not null)
                 await activity.FailAsync(runActivityId, "回答失敗");
             await writer.WriteAsync(
-                new ConversationErrorEvent(exception.Message, "agent_execution_failed"),
+                new ConversationErrorEvent(
+                    exception.Message,
+                    ConversationErrorCodes.AgentExecutionFailed,
+                    Retryable: false,
+                    Stage: failedStage),
                 CancellationToken.None);
         }
         finally

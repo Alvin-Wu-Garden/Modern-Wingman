@@ -35,6 +35,12 @@ public sealed class GraphRagNeo4jRuntimeOptions
 
     /// <summary>企業離線安裝包目錄；null 時使用本機 Wingman packages 目錄。</summary>
     public string? OfflinePackageDir { get; set; }
+
+    /// <summary>
+    /// Host 關閉時是否保留已驗證的 managed console process。只供本機 Debug
+    /// 快速重啟使用；正式環境維持 false，由 AgentService 負責回收程序。
+    /// </summary>
+    public bool PreserveManagedProcessOnShutdown { get; set; }
 }
 
 /// <summary>索引與 API 共用的 Neo4j runtime 可用性契約。</summary>
@@ -401,6 +407,7 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
         string home,
         CancellationToken cancellationToken)
     {
+        var stopwatch = Stopwatch.StartNew();
         var java = FindJavaExecutable(RuntimeRoot);
         if (java is null)
         {
@@ -409,6 +416,8 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
         }
         try
         {
+            _logger.LogInformation(
+                "正在啟動 Wingman 管理的 Neo4j；等待期間不會逐次輸出連線失敗。");
             var start = new ProcessStartInfo
             {
                 FileName = Path.Combine(home, "bin", "neo4j.bat"),
@@ -456,7 +465,7 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
             _process.BeginOutputReadLine();
             _process.BeginErrorReadLine();
 
-            var deadline = DateTimeOffset.UtcNow.AddSeconds(90);
+            var deadline = DateTimeOffset.UtcNow + ManagedReadinessTimeout;
             while (DateTimeOffset.UtcNow < deadline)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -468,11 +477,17 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
                 if (await _store.PingAsync(cancellationToken))
                 {
                     await _store.EnsureSchemaAsync(cancellationToken);
+                    _logger.LogInformation(
+                        "Wingman 管理的 Neo4j 已就緒。ElapsedMilliseconds={ElapsedMilliseconds}",
+                        stopwatch.ElapsedMilliseconds);
                     return true;
                 }
-                await Task.Delay(2_000, cancellationToken);
+                await Task.Delay(ManagedReadinessPollInterval, cancellationToken);
             }
             LastError = "Neo4j 啟動超過 90 秒仍無法連線。";
+            _logger.LogWarning(
+                "Neo4j 在等待期限內未就緒。ElapsedMilliseconds={ElapsedMilliseconds}",
+                stopwatch.ElapsedMilliseconds);
             return false;
         }
         catch (OperationCanceledException)
@@ -704,6 +719,7 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
         // readiness 等待，否則並發的 graph/schema request 會收到 503。
         Status = "starting";
         var deadline = DateTimeOffset.UtcNow + ManagedReadinessTimeout;
+        string? lastSchemaExceptionType = null;
         while (DateTimeOffset.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -732,11 +748,9 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
                 }
                 catch (Exception exception)
                 {
-                    // Bolt 已可連線但 schema transaction 仍可能正在初始化；
-                    // 繼續等待，避免把短暫的 Neo4j ready race 變成 HTTP 500。
-                    _logger.LogDebug(
-                        "Neo4j managed schema 尚未 ready；繼續等待。ExceptionType={ExceptionType}",
-                        exception.GetType().Name);
+                    // Bolt 已可連線但 schema transaction 仍可能正在初始化；只保留
+                    // 最後一次類型，deadline 到期才記錄一筆，避免 retry log 洗版。
+                    lastSchemaExceptionType = exception.GetType().Name;
                 }
             }
 
@@ -747,6 +761,9 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
         LastError =
             "Wingman 管理的 Neo4j process 仍存在，但在 90 秒內仍無法回應；" +
             "請確認 Neo4j Bolt 服務與認證設定。";
+        _logger.LogWarning(
+            "Neo4j managed readiness 等待逾時。LastSchemaExceptionType={LastSchemaExceptionType}",
+            lastSchemaExceptionType ?? "none");
         return false;
     }
 
@@ -833,6 +850,15 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
+        if (_runtime.PreserveManagedProcessOnShutdown)
+        {
+            // ownership 必須保留，下一個 AgentService instance 才能核對 endpoint、
+            // PID 與啟動時間後安全接管；只釋放目前 process handle。
+            _process?.Dispose();
+            _startGate.Dispose();
+            return;
+        }
+
         var managedProcess = _process;
         var managedProcessRunning = false;
         try
