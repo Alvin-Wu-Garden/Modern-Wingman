@@ -26,7 +26,7 @@ public static class ServiceRegistration
         IConfiguration configuration,
         IHostEnvironment environment)
     {
-        // ── REST / JSON ────────────────────────────────────────────────────────
+        // ── REST 與 JSON 基礎設定 ─────────────────────────────────────────────
         // 服務只供本機桌面 UI 使用；限制 Origin 可避免同機其他網站任意呼叫本機 Agent API。
         // 同時保留 Vite 開發來源與 Tauri production protocol，避免桌面與開發模式互相影響。
         var allowedOrigins = new[]
@@ -82,14 +82,14 @@ public static class ServiceRegistration
                 "ConversationRuntime:ProjectAnalysisTimeoutSeconds 必須介於 30 到 1800 秒。")
             .ValidateOnStart();
 
-        // ── SQLite / EF Core ──────────────────────────────────────────────────
+        // ── SQLite 與 EF Core 持久化 ──────────────────────────────────────────
         var connectionString = DatabasePathResolver.ResolveConnectionString(configuration, environment);
 
         // 只用 Factory，避免同時 AddDbContext + AddDbContextFactory 造成 Scoped/Singleton 衝突
         // Scoped services 透過 factory.CreateDbContext() 取得獨立的 DbContext instance
         services.AddDbContextFactory<AppDbContext>(opts => opts.UseSqlite(connectionString));
 
-        // ── Persistence ────────────────────────────────────────────────────────
+        // ── 持久化服務 ────────────────────────────────────────────────────────
         services.AddScoped<IConversationRepository, ConversationRepository>();
         services.AddSingleton<IProjectDatabaseConfigurationStore, ProjectDatabaseConfigurationStore>();
         services.AddSingleton<IVcsProfileRepository, VcsProfileRepository>();
@@ -114,8 +114,7 @@ public static class ServiceRegistration
             sp => sp.GetRequiredService<CopilotClientService>());
         services.AddHostedService(sp => sp.GetRequiredService<CopilotClientService>());
 
-        // ── BYOK Provider ─────────────────────────────────────────────────────
-        services.AddSingleton<ProviderConfigResolver>();
+        // ── BYOK 模型供應商 ──────────────────────────────────────────────────
         services.AddSingleton<IModelProviderService, ModelProviderService>();
         services.AddSingleton<IProviderApiKeyValidator, CopilotApiKeyValidator>();
         services.AddSingleton<IProviderApiKeyValidator, HttpProviderApiKeyValidator>();
@@ -129,7 +128,8 @@ public static class ServiceRegistration
 
         // ── MAF Agent（Strategy：依 ProviderKind 選擇工廠，OCP）────────────────
         services.AddScoped<IAgentFactory, CopilotAgentFactory>();
-        services.AddScoped<IAgentFactory, ByokAgentFactory>();
+        services.AddSingleton<ByokAgentFactory>();
+        services.AddScoped<IAgentFactory>(sp => sp.GetRequiredService<ByokAgentFactory>());
         services.AddScoped<AgentRuntimeService>();
 
         // Copilot SDK 若要求工具權限，一律拒絕，確保聊天只產生文字回覆。
@@ -148,7 +148,7 @@ public static class ServiceRegistration
         services.AddHostedService(
             provider => provider.GetRequiredService<ProjectJobQueue>());
 
-        // ── GraphRAG V4：FBL 投資系統的節點、關係與 active graph 服務 ────────
+        // ── GraphRAG：ParallelExtractor 節點、關係與 active graph 服務 ────────
         services.AddSingleton<IProjectRepository, ProjectRepository>();
         services.AddSingleton<IProjectIndexManifestStore, ProjectIndexManifestStore>();
         services.AddSingleton<ILlmCompletionService, CopilotCompletionService>();
@@ -178,7 +178,7 @@ public static class ServiceRegistration
     {
         app.UseCors();
 
-        // ── REST ───────────────────────────────────────────────────────────────
+        // ── REST 端點 ─────────────────────────────────────────────────────────
         app.MapGeneralConversationEndpoints();
         app.MapProjectConversationEndpoints();
         app.MapProviderEndpoints();

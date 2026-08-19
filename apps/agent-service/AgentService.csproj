@@ -7,8 +7,7 @@
     <RootNamespace>AgentService</RootNamespace>
     <AssemblyName>AgentService</AssemblyName>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
-    <!-- Lock the resolved dependency graph so a future restore cannot silently
-         select a different Agent Framework/Copilot combination. -->
+    <!-- 鎖定已解析的套件相依圖，避免未來 restore 靜默選到不同的 Agent Framework／Copilot 組合。 -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <!--
       CopilotSkipCliDownload 已移除：讓 SDK NuGet targets 在建置時自動下載相應平台的 CLI binary
@@ -58,16 +57,17 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- The Copilot adapter RC supplies its exact SDK dependency.  Do not add a
-         newer direct SDK reference: 1.13.0-rc1 is compiled against assembly
-         1.0.0.0 and newer strongly-named SDK assemblies are not binary-compatible. -->
+    <!-- Copilot adapter RC 會帶入相容的 SDK；不要再直接加入較新版本。
+         1.13.0-rc1 是依 assembly 1.0.0.0 編譯，與較新的強式名稱 SDK 不具二進位相容性。 -->
+    <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />
     <PackageReference Include="Microsoft.Agents.AI" Version="1.13.0" />
     <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="1.13.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Anthropic" Version="1.13.0-preview.260703.1" />
     <PackageReference Include="Microsoft.Agents.AI.GitHub.Copilot" Version="1.13.0-rc1" />
     <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.13.0" />
     <!-- 原始碼工具只需要 Roslyn 語法 API；完整抽取器及其精確套件版本隔離在 Wingman.ParallelExtractor。 -->
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.6.0" />
-    <!-- Override the vulnerable 9.x transitive dependency from Roslyn/MSBuild. -->
+    <!-- 覆寫 Roslyn／MSBuild 帶入且含已知弱點的 9.x 間接相依套件。 -->
     <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.10" NoWarn="NU1510" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
     <!-- GraphRAG V4 的 live SQL Server metadata 與業務設定抽取只使用唯讀查詢。 -->

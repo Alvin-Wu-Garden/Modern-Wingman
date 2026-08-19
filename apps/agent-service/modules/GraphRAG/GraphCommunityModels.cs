@@ -20,7 +20,7 @@ public static class GraphCommunitySummaryStates
 
 /// <summary>
 /// 可直接發布的 deterministic Community template。
-/// MemberIds 與 CacheKey 都由同一份 FBL authority document 產生，不重新推測關係。
+/// MemberIds 與 CacheKey 都由同一份專案圖譜 document 產生，不重新推測關係。
 /// </summary>
 public sealed record GraphCommunityReportV4(
     string CommunityId,
@@ -42,12 +42,6 @@ public sealed record GraphCommunityReportV4(
 
 /// <summary>LLM 產生的 Community 顯示文字。</summary>
 public sealed record GraphCommunityGeneratedText(string Title, string Summary);
-
-/// <summary>Neo4j 專案目前 active 與 previous immutable version 指標。</summary>
-public sealed record GraphVersionPointers(
-    string ProjectId,
-    string? ActiveVersion,
-    string? PreviousVersion);
 
 /// <summary>Neo4j staging 版本的節點、關係與 schema 驗證結果。</summary>
 public sealed record GraphVersionValidation(

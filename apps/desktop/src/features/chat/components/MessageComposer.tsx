@@ -196,8 +196,10 @@ export const MessageComposer = memo(function MessageComposer({
           </div>
           <div
             className={cn(
-              'overflow-hidden transition-all duration-200',
-              isExpanded ? 'max-h-14 opacity-100' : 'max-h-0 opacity-0',
+              'transition-all duration-200',
+              isExpanded
+                ? 'max-h-14 overflow-visible opacity-100'
+                : 'max-h-0 overflow-hidden opacity-0',
             )}
           >
             <div className="flex flex-wrap items-end justify-between gap-2 px-2 pb-2">

@@ -26,6 +26,9 @@ public sealed class ConversationExecutionService(
     IOptions<ConversationRuntimeOptions> runtimeOptions,
     ILogger<ConversationExecutionService> logger)
 {
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ConversationGates =
+        new(StringComparer.Ordinal);
+
     /// <summary>執行單次對話並逐一回傳可安全送到前端的事件。</summary>
     public async IAsyncEnumerable<ConversationStreamEvent> ExecuteAsync(
         ConversationExecutionRequest request,
@@ -35,10 +38,36 @@ public sealed class ConversationExecutionService(
             new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
         var execution = ExecuteCoreAsync(request, channel.Writer, ct);
 
-        await foreach (var item in channel.Reader.ReadAllAsync(CancellationToken.None))
-            yield return item;
+        try
+        {
+            // 讀取端必須使用請求取消 Token；使用 CancellationToken.None 會在瀏覽器
+            // 中斷連線後永遠等待 producer，造成「取消對話卡死」。
+            while (true)
+            {
+                bool hasData;
+                try
+                {
+                    hasData = await channel.Reader.WaitToReadAsync(ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    // 使用者中止 SSE 是正常控制流程，不應將 TaskCanceledException
+                    // 再拋回 HTTP 端點或前端；producer 仍會在 finally 清理。
+                    break;
+                }
 
-        await execution;
+                if (!hasData)
+                    break;
+                while (channel.Reader.TryRead(out var item))
+                    yield return item;
+            }
+        }
+        finally
+        {
+            // 無論讀取端先取消或正常讀完，都等待 producer 清理 semaphore 與 channel。
+            try { await execution; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        }
     }
 
     private async Task ExecuteCoreAsync(
@@ -46,6 +75,38 @@ public sealed class ConversationExecutionService(
         ChannelWriter<ConversationStreamEvent> writer,
         CancellationToken ct)
     {
+        // TurnId 在取得 gate 前就固定，這樣「對話忙碌」事件也能讓前端保留
+        // 同一個冪等識別碼；前端重試時不會意外產生第二輪。
+        var turnId = string.IsNullOrWhiteSpace(request.Message.TurnId)
+            ? Guid.NewGuid().ToString("N")
+            : request.Message.TurnId!;
+        var conversationGate = ConversationGates.GetOrAdd(
+            request.Conversation.Id,
+            _ => new SemaphoreSlim(1, 1));
+        var gateAcquired = false;
+        try
+        {
+            if (!await conversationGate.WaitAsync(0, ct))
+            {
+                await writer.WriteAsync(
+                    new ConversationErrorEvent(
+                        "此對話已有另一輪回答正在執行，請等待完成後再送出訊息。",
+                        ConversationErrorCodes.ConversationBusy,
+                        Retryable: true,
+                        Stage: "concurrency_guard",
+                        TurnId: turnId),
+                    CancellationToken.None);
+                writer.TryComplete();
+                return;
+            }
+            gateAcquired = true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            writer.TryComplete();
+            return;
+        }
+
         var startedAt = Stopwatch.GetTimestamp();
         var currentStage = "preparing";
         string? currentTool = null;
@@ -88,7 +149,7 @@ public sealed class ConversationExecutionService(
                     currentStage = "preparing";
                 }
                 return writer.WriteAsync(
-                    new ConversationActivityStreamEvent(value),
+                    new ConversationActivityStreamEvent(value, turnId),
                     CancellationToken.None).AsTask();
             });
         string? runActivityId = null;
@@ -96,6 +157,40 @@ public sealed class ConversationExecutionService(
 
         try
         {
+            // 已完成回合直接重播資料庫內容，不再次呼叫模型；這處理 SSE 斷線後
+            // 前端重試以及使用者重複點擊送出造成的重複執行。
+            var existingTurn = await conversations.GetTurnAsync(
+                conversation.Id,
+                turnId,
+                ct);
+            if (existingTurn?.Status == ConversationTurnStatus.Completed &&
+                existingTurn.AssistantMessageId is not null)
+            {
+                var savedAssistant = await conversations.GetMessageAsync(
+                    existingTurn.AssistantMessageId,
+                    ct);
+                if (savedAssistant is not null)
+                {
+                    await writer.WriteAsync(
+                        new ConversationStartedEvent(
+                            request.Profile.Id,
+                            request.ModelId,
+                            runId,
+                            null,
+                            null,
+                            null,
+                            turnId),
+                        CancellationToken.None);
+                    await writer.WriteAsync(
+                        new ConversationTokenEvent(savedAssistant.Content, turnId),
+                        CancellationToken.None);
+                    await writer.WriteAsync(
+                        new ConversationCompletedEvent(turnId),
+                        CancellationToken.None);
+                    return;
+                }
+            }
+
             if (request.EmitRuntimeActivities)
             {
                 runActivityId = await activity.StartAsync(
@@ -129,13 +224,16 @@ public sealed class ConversationExecutionService(
                     runId,
                     preparation.GraphStatus,
                     preparation.GraphWarning,
-                    preparation.GraphVersion),
+                    preparation.GraphVersion,
+                    turnId),
                 CancellationToken.None);
 
-            await conversations.AddMessageAsync(
+            await conversations.BeginTurnAsync(
                 conversation.Id,
-                MessageRole.User,
+                turnId,
                 request.Message.UserMessage,
+                request.Profile.Id,
+                request.ModelId,
                 runCt);
             if (conversation.Title == "新對話")
                 await conversations.SetTitleAsync(
@@ -163,7 +261,7 @@ public sealed class ConversationExecutionService(
             {
                 fullResponse.Append(token);
                 await writer.WriteAsync(
-                    new ConversationTokenEvent(token),
+                    new ConversationTokenEvent(token, turnId),
                     CancellationToken.None);
             }
             streamStopwatch.Stop();
@@ -191,19 +289,47 @@ public sealed class ConversationExecutionService(
                     conversation.Id);
             }
 
+            if (fullResponse.Length == 0)
+            {
+                // 沒有任何模型文字時不能送出成功完成事件，也不能讓回合永久
+                // 停在 Running；否則前端會把空內容誤判成成功，下一次又重複呼叫模型。
+                await TryFailTurnAsync(
+                    conversation.Id,
+                    turnId,
+                    ConversationTurnStatus.Failed,
+                    "empty_response");
+                if (runActivityId is not null)
+                    await activity.FailAsync(runActivityId, "模型未回傳內容");
+                await writer.WriteAsync(
+                    new ConversationErrorEvent(
+                        "模型未回傳可用內容，請稍後重試。",
+                        ConversationErrorCodes.AgentExecutionFailed,
+                        Retryable: true,
+                        Stage: currentStage,
+                        TurnId: turnId),
+                    CancellationToken.None);
+                return;
+            }
+
             if (fullResponse.Length > 0)
             {
                 currentStage = "persisting_assistant_message";
-                await conversations.AddMessageAsync(
+                var assistantMessageId = await conversations.AddMessageAsync(
                     conversation.Id,
                     MessageRole.Assistant,
                     fullResponse.ToString(),
+                    turnId,
+                    CancellationToken.None);
+                await conversations.CompleteTurnAsync(
+                    conversation.Id,
+                    turnId,
+                    assistantMessageId,
                     CancellationToken.None);
             }
 
             if (usage is not null)
                 await writer.WriteAsync(
-                    new ConversationUsageEvent(usage),
+                    new ConversationUsageEvent(usage, turnId),
                     CancellationToken.None);
 
             if (runActivityId is not null)
@@ -212,7 +338,7 @@ public sealed class ConversationExecutionService(
             // 所有活動的完成事件必須先於 done 送出，否則前端收到 done 後會停止
             // 更新串流訊息，最後的活動完成事件就會被忽略而一直顯示「處理中」。
             await writer.WriteAsync(
-                new ConversationCompletedEvent(),
+                new ConversationCompletedEvent(turnId),
                 CancellationToken.None);
 
             if (firstExchange && fullResponse.Length > 0)
@@ -240,6 +366,11 @@ public sealed class ConversationExecutionService(
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             // 使用者取消串流時不寫入未完成的 Assistant 回覆。
+            await TryFailTurnAsync(
+                conversation.Id,
+                turnId,
+                ConversationTurnStatus.Cancelled,
+                "cancelled");
             logger.LogInformation(
                 "對話已被取消。已耗時={ElapsedMs}ms，ConversationId={ConversationId}",
                 totalStopwatch.ElapsedMilliseconds,
@@ -247,6 +378,11 @@ public sealed class ConversationExecutionService(
         }
         catch (OperationCanceledException exception) when (executionCts.IsCancellationRequested)
         {
+            await TryFailTurnAsync(
+                conversation.Id,
+                turnId,
+                ConversationTurnStatus.Failed,
+                ConversationErrorCodes.TurnTimeout);
             var elapsed = Stopwatch.GetElapsedTime(startedAt);
             var failedStage = currentStage;
             var failedTool = currentTool;
@@ -272,12 +408,18 @@ public sealed class ConversationExecutionService(
                         : "專案解析超過本輪執行期限，可重試或縮小查詢範圍。",
                     ConversationErrorCodes.TurnTimeout,
                     Retryable: true,
-                    Stage: failedStage),
+                    Stage: failedStage,
+                    TurnId: turnId),
                 CancellationToken.None);
         }
         catch (Exception exception) when (
             exception is OperationCanceledException or TimeoutException)
         {
+            await TryFailTurnAsync(
+                conversation.Id,
+                turnId,
+                ConversationTurnStatus.Failed,
+                ConversationErrorCodes.DependencyTimeout);
             // 外部模型、SDK 或工具可能使用自己的 CancellationToken 或 TimeoutException。
             // 這不是 Modern Wingman 的整輪期限，必須保留成相依元件逾時，避免誤導使用者。
             var elapsed = Stopwatch.GetElapsedTime(startedAt);
@@ -301,11 +443,40 @@ public sealed class ConversationExecutionService(
                     "模型或工具未在預期時間內完成，請稍後重試。",
                     ConversationErrorCodes.DependencyTimeout,
                     Retryable: true,
-                    Stage: failedStage),
+                    Stage: failedStage,
+                    TurnId: turnId),
+                CancellationToken.None);
+        }
+        catch (AgentRuntimeException exception)
+        {
+            await TryFailTurnAsync(
+                conversation.Id,
+                turnId,
+                ConversationTurnStatus.Failed,
+                exception.Code);
+            logger.LogWarning(
+                "Agent Runtime 回報結構化錯誤。ConversationId={ConversationId}, RunId={RunId}, Code={Code}",
+                conversation.Id,
+                runId,
+                exception.Code);
+            if (runActivityId is not null)
+                await activity.FailAsync(runActivityId, "模型設定無法使用");
+            await writer.WriteAsync(
+                new ConversationErrorEvent(
+                    exception.UserMessage,
+                    exception.Code,
+                    exception.Retryable,
+                    currentStage,
+                    turnId),
                 CancellationToken.None);
         }
         catch (Exception exception)
         {
+            await TryFailTurnAsync(
+                conversation.Id,
+                turnId,
+                ConversationTurnStatus.Failed,
+                ConversationErrorCodes.AgentExecutionFailed);
             var failedStage = currentStage;
             logger.LogError(
                 exception,
@@ -317,15 +488,53 @@ public sealed class ConversationExecutionService(
                 await activity.FailAsync(runActivityId, "回答失敗");
             await writer.WriteAsync(
                 new ConversationErrorEvent(
-                    exception.Message,
+                    "對話執行失敗，請稍後重試；若持續發生，請查看後端繁體中文 Log。",
                     ConversationErrorCodes.AgentExecutionFailed,
                     Retryable: false,
-                    Stage: failedStage),
+                    Stage: failedStage,
+                    TurnId: turnId),
                 CancellationToken.None);
         }
         finally
         {
+            if (gateAcquired)
+            {
+                conversationGate.Release();
+                // 不移除 gate。若先 Release 再 TryRemove，另一個請求可能取得舊
+                // semaphore，而第三個請求取得新 semaphore，造成同一對話同時執行兩輪。
+                // 以對話識別碼為鍵保留同一個 gate，才能保證整個生命週期的互斥。
+            }
             writer.TryComplete();
+        }
+    }
+
+    /// <summary>
+    /// 失敗狀態寫回資料庫不能覆蓋原始錯誤；例如資料庫短暫不可用時，仍要
+    /// 將結構化錯誤事件送到前端，而不是在 catch 區塊再次拋例外導致 SSE 無終止事件。
+    /// </summary>
+    private async Task TryFailTurnAsync(
+        string conversationId,
+        string turnId,
+        ConversationTurnStatus status,
+        string errorCode)
+    {
+        try
+        {
+            await conversations.FailTurnAsync(
+                conversationId,
+                turnId,
+                status,
+                errorCode,
+                CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(
+                exception,
+                "對話回合狀態寫回失敗；保留原始錯誤事件。ConversationId={ConversationId}, TurnId={TurnId}, Status={Status}",
+                conversationId,
+                turnId,
+                status);
         }
     }
 

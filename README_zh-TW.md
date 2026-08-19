@@ -63,7 +63,7 @@ notepad apps\agent-service\appsettings.Development.json
 ```
 
 > 請在 Modern Wingman「設定」頁輸入 API 金鑰。後端會先向供應商驗證，再以加密形式保存於本機；Provider 金鑰不從環境變數讀取。
-> 可用的 Profile ID：`copilot-default`、`openai-byok`、`anthropic-byok`、`azure-openai-byok`、`azure-foundry-byok`、`custom-byok`
+> 可用的 Profile ID：`copilot-default`、`openai-byok`、`anthropic-byok`、`azure-openai-byok`、`custom-byok`
 
 > **注意：** `appsettings.Development.json` 已列入 `.gitignore`，不會被提交至 Git。請勿將 API 金鑰寫入任何受版控的檔案。
 

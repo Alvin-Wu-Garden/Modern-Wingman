@@ -25,7 +25,7 @@ public sealed class JiraAnalysisRunRepository(
 
         public string? JiraUpdatedAt { get; init; }
 
-        // running | completed | failed | cancelled
+        // 狀態只接受 running、completed、failed、cancelled。
         public required string Status { get; set; }
 
         public string? ErrorCode { get; set; }

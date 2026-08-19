@@ -1,17 +1,30 @@
-using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 
 namespace AgentService.Infrastructure.Persistence;
 
 /// <summary>
-/// 建立不適合映射成 EF entity 的少數資料表，並對已存在的舊 DB 補齊欄位。
-/// EnsureCreatedAsync() 只在 DB 檔案不存在時建立 schema；本 Migrator 負責
-/// 讓已存在的舊 DB 也能跟上新欄位定義。
+/// 初始化 Modern Wingman 的本機 SQLite schema。
 /// </summary>
+/// <remarks>
+/// 本機設定仍在開發階段，schema 不提供舊版欄位相容遷移。資料庫的
+/// <c>PRAGMA user_version</c> 與目前版本不同時，會先刪除整個設定庫再由 EF Core
+/// 與固定 DDL 重建，避免已移除的 <c>NOT NULL</c> 欄位繼續阻擋寫入。
+/// </remarks>
 public static class AgentSchemaMigrator
 {
+    // TurnId 與 ConversationTurns 是破壞式 schema 變更；舊設定庫會整庫重建。
+    internal const int CurrentSchemaVersion = 2;
+
+    /// <summary>套用目前唯一受支援的本機設定資料庫 schema。</summary>
+    /// <param name="db">要初始化的 EF Core 資料庫內容。</param>
+    /// <param name="ct">取消初始化作業的 Token。</param>
+    /// <returns>代表非同步初始化作業的工作。</returns>
     public static async Task ApplyAsync(AppDbContext db, CancellationToken ct = default)
     {
+        ArgumentNullException.ThrowIfNull(db);
+        await RecreateIncompatibleDatabaseAsync(db, ct);
+        await db.Database.EnsureCreatedAsync(ct);
+
         await db.Database.ExecuteSqlRawAsync("""
             CREATE TABLE IF NOT EXISTS "project_index_manifests" (
                 "Version" TEXT NOT NULL PRIMARY KEY,
@@ -178,265 +191,72 @@ public static class AgentSchemaMigrator
                 ON "jira_analysis_runs" ("WingmanProjectId", "CreatedAt" DESC);
 
             """, ct);
-
-        await EnsureConversationSchemaAsync(db.Database.GetDbConnection(), ct);
-        await EnsureProjectGraphColumnsAsync(db.Database.GetDbConnection(), ct);
-        await EnsureProjectDatabaseConfigurationSchemaAsync(db.Database.GetDbConnection(), ct);
-
-        // 目前仍不採用完整版本化 migration；只對必要的舊欄位做可重入清理，
-        // 並確保目前版本的 Atlassian 連線表存在，不覆寫既有本機資料。
-        await EnsureAtlassianConnectionTableAsync(db.Database.GetDbConnection(), ct);
+        await db.Database.ExecuteSqlRawAsync(
+            $"PRAGMA user_version = {CurrentSchemaVersion};",
+            ct);
     }
 
-    /// <summary>為既有 Projects 表補上方案選擇與圖格式遷移旗標。</summary>
-    private static async Task EnsureProjectGraphColumnsAsync(
-        DbConnection connection,
-        CancellationToken ct)
+    /// <summary>刪除版本不相容的舊設定庫，讓後續流程建立單一乾淨 schema。</summary>
+    private static async Task RecreateIncompatibleDatabaseAsync(
+        AppDbContext db,
+        CancellationToken cancellationToken)
     {
-        if (connection.State == System.Data.ConnectionState.Closed)
-            await connection.OpenAsync(ct);
-
-        await using var inspect = connection.CreateCommand();
-        inspect.CommandText = "PRAGMA table_info(\"Projects\");";
-        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        await using (var reader = await inspect.ExecuteReaderAsync(ct))
-        {
-            while (await reader.ReadAsync(ct))
-                columns.Add(reader.GetString(1));
-        }
-
-        if (!columns.Contains("SelectedSolutionPath"))
-        {
-            await using var command = connection.CreateCommand();
-            command.CommandText = "ALTER TABLE \"Projects\" ADD COLUMN \"SelectedSolutionPath\" TEXT;";
-            await command.ExecuteNonQueryAsync(ct);
-        }
-        if (!columns.Contains("GraphStorageMigrated"))
-        {
-            await using var command = connection.CreateCommand();
-            command.CommandText = "ALTER TABLE \"Projects\" ADD COLUMN \"GraphStorageMigrated\" INTEGER NOT NULL DEFAULT 0;";
-            await command.ExecuteNonQueryAsync(ct);
-        }
-    }
-
-    /// <summary>
-    /// 移除舊版 Conversations.Scope 欄位。
-    /// 對話範圍現在由一般／專案巢狀路由及 ProjectId 決定，資料表不再保存第二套狀態。
-    /// </summary>
-    private static async Task EnsureConversationSchemaAsync(
-        DbConnection connection,
-        CancellationToken ct)
-    {
-        if (connection.State == System.Data.ConnectionState.Closed)
-            await connection.OpenAsync(ct);
-
-        await using var inspect = connection.CreateCommand();
-        inspect.CommandText = "PRAGMA table_info(\"Conversations\");";
-        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        await using (var reader = await inspect.ExecuteReaderAsync(ct))
-        {
-            while (await reader.ReadAsync(ct))
-                columns.Add(reader.GetString(1));
-        }
-
-        if (!columns.Contains("Scope"))
-            return;
-
-        await using (var disableForeignKeys = connection.CreateCommand())
-        {
-            disableForeignKeys.CommandText = "PRAGMA foreign_keys = OFF;";
-            await disableForeignKeys.ExecuteNonQueryAsync(ct);
-        }
-
-        await using var transaction = await connection.BeginTransactionAsync(ct);
+        var connection = db.Database.GetDbConnection();
+        var openedHere = connection.State == System.Data.ConnectionState.Closed;
+        if (openedHere)
+            await connection.OpenAsync(cancellationToken);
+        int schemaVersion;
+        var userTables = new List<string>();
+        var userViews = new List<string>();
         try
         {
-            async Task ExecuteAsync(string sql)
-            {
-                await using var command = connection.CreateCommand();
-                command.Transaction = transaction;
-                command.CommandText = sql;
-                await command.ExecuteNonQueryAsync(ct);
-            }
+            await using var versionCommand = connection.CreateCommand();
+            versionCommand.CommandText = "PRAGMA user_version;";
+            schemaVersion = Convert.ToInt32(
+                await versionCommand.ExecuteScalarAsync(cancellationToken));
 
-            await ExecuteAsync("DROP TABLE IF EXISTS \"Conversations_new\";");
-            await ExecuteAsync("""
-                CREATE TABLE "Conversations_new" (
-                    "Id" TEXT NOT NULL CONSTRAINT "PK_Conversations_new" PRIMARY KEY,
-                    "Title" TEXT NOT NULL,
-                    "ProviderProfileId" TEXT,
-                    "ProjectId" TEXT,
-                    "CreatedAt" TEXT NOT NULL,
-                    "UpdatedAt" TEXT NOT NULL
-                );
-                """);
-            await ExecuteAsync("""
-                INSERT INTO "Conversations_new"
-                    ("Id", "Title", "ProviderProfileId", "ProjectId", "CreatedAt", "UpdatedAt")
-                SELECT "Id", "Title", "ProviderProfileId", "ProjectId", "CreatedAt", "UpdatedAt"
-                FROM "Conversations";
-                """);
-            await ExecuteAsync("DROP TABLE \"Conversations\";");
-            await ExecuteAsync("ALTER TABLE \"Conversations_new\" RENAME TO \"Conversations\";");
-            await ExecuteAsync("CREATE INDEX IF NOT EXISTS \"IX_Conversations_ProjectId_UpdatedAt\" ON \"Conversations\" (\"ProjectId\", \"UpdatedAt\");");
-            await transaction.CommitAsync(ct);
-            await using var enableForeignKeys = connection.CreateCommand();
-            enableForeignKeys.CommandText = "PRAGMA foreign_keys = ON;";
-            await enableForeignKeys.ExecuteNonQueryAsync(ct);
-        }
-        catch
-        {
-            await transaction.RollbackAsync(CancellationToken.None);
-            await using var enableForeignKeys = connection.CreateCommand();
-            enableForeignKeys.CommandText = "PRAGMA foreign_keys = ON;";
-            await enableForeignKeys.ExecuteNonQueryAsync(CancellationToken.None);
-            throw;
-        }
-    }
-
-    /// <summary>建立目前版本唯一需要額外確認的 Atlassian 連線表。</summary>
-    private static async Task EnsureAtlassianConnectionTableAsync(
-        DbConnection connection,
-        CancellationToken ct)
-    {
-        if (connection.State == System.Data.ConnectionState.Closed)
-            await connection.OpenAsync(ct);
-
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            CREATE TABLE IF NOT EXISTS atlassian_connections (
-                Id TEXT NOT NULL PRIMARY KEY,
-                ServiceType TEXT NOT NULL,
-                BaseUrl TEXT NOT NULL,
-                AuthType TEXT NOT NULL,
-                Username TEXT,
-                ProtectedSecret TEXT,
-                EncryptionScheme TEXT,
-                ApiVersion TEXT,
-                IsVerified INTEGER NOT NULL DEFAULT 0,
-                VerifiedAt TEXT,
-                VerifiedDisplayName TEXT,
-                CreatedAt TEXT NOT NULL,
-                UpdatedAt TEXT NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS IX_atlassian_connections_ServiceType
-                ON atlassian_connections (ServiceType);
-            """;
-        await command.ExecuteNonQueryAsync(ct);
-    }
-
-    /// <summary>
-    /// 將舊版每專案單列設定表升級為 Project＋Provider 複合鍵。
-    /// 這是 Modern Wingman 自身的 SQLite 設定庫，不是使用者選擇的外部資料庫；
-    /// 升級只搬移既有設定資料，不執行任何外部資料庫操作。
-    /// </summary>
-    private static async Task EnsureProjectDatabaseConfigurationSchemaAsync(
-        DbConnection connection,
-        CancellationToken ct)
-    {
-        if (connection.State == System.Data.ConnectionState.Closed)
-        {
-            await connection.OpenAsync(ct);
-        }
-
-        await using var inspect = connection.CreateCommand();
-        inspect.CommandText = "PRAGMA table_info(\"project_database_configurations\");";
-        var columns = new List<(string Name, int PrimaryKeyOrder)>();
-        await using (var reader = await inspect.ExecuteReaderAsync(ct))
-        {
-            while (await reader.ReadAsync(ct))
-            {
-                columns.Add((reader.GetString(1), reader.GetInt32(5)));
-            }
-        }
-
-        if (columns.Count == 0)
-        {
-            // 以防 EnsureCreated 尚未建立 DbSet 對應表，這裡仍補建目前的複合鍵 schema。
-            await using var create = connection.CreateCommand();
-            create.CommandText = """
-                CREATE TABLE IF NOT EXISTS "project_database_configurations" (
-                    "ProjectId" TEXT NOT NULL,
-                    "Provider" TEXT NOT NULL,
-                    "Server" TEXT,
-                    "Port" INTEGER,
-                    "DatabaseName" TEXT,
-                    "Authentication" TEXT,
-                    "Username" TEXT,
-                    "ProtectedPassword" TEXT,
-                    "EncryptionScheme" TEXT,
-                    "TrustServerCertificate" INTEGER NOT NULL DEFAULT 1,
-                    "SqlitePath" TEXT,
-                    "UpdatedAt" TEXT NOT NULL,
-                    PRIMARY KEY ("ProjectId", "Provider"),
-                    FOREIGN KEY ("ProjectId") REFERENCES "Projects" ("Id") ON DELETE CASCADE
-                );
+            await using var tableCommand = connection.CreateCommand();
+            tableCommand.CommandText = """
+                SELECT type, name
+                FROM sqlite_master
+                WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%';
                 """;
-            await create.ExecuteNonQueryAsync(ct);
-            return;
-        }
+            await using (var reader = await tableCommand.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var target = reader.GetString(0) == "view" ? userViews : userTables;
+                    target.Add(reader.GetString(1));
+                }
+            }
 
-        var isCompositeKey = columns.Any(column =>
-                column.Name.Equals("ProjectId", StringComparison.OrdinalIgnoreCase) &&
-                column.PrimaryKeyOrder > 0)
-            && columns.Any(column =>
-                column.Name.Equals("Provider", StringComparison.OrdinalIgnoreCase) &&
-                column.PrimaryKeyOrder > 0);
-        if (isCompositeKey)
+            if (userTables.Count > 0 && schemaVersion != CurrentSchemaVersion)
+            {
+                await ExecuteAsync(connection, "PRAGMA foreign_keys = OFF;", cancellationToken);
+                foreach (var view in userViews)
+                    await ExecuteAsync(connection, $"DROP VIEW IF EXISTS {QuoteIdentifier(view)};", cancellationToken);
+                foreach (var table in userTables)
+                    await ExecuteAsync(connection, $"DROP TABLE IF EXISTS {QuoteIdentifier(table)};", cancellationToken);
+                await ExecuteAsync(connection, "PRAGMA foreign_keys = ON;", cancellationToken);
+            }
+        }
+        finally
         {
-            return;
+            if (openedHere)
+                await connection.CloseAsync();
         }
-
-        var hasProviderColumn = columns.Any(column =>
-            column.Name.Equals("Provider", StringComparison.OrdinalIgnoreCase));
-
-        await using var transaction = await connection.BeginTransactionAsync(ct);
-        await ExecuteSchemaCommandAsync(connection, transaction, "ALTER TABLE \"project_database_configurations\" RENAME TO \"project_database_configurations_legacy\";", ct);
-        await ExecuteSchemaCommandAsync(connection, transaction, """
-            CREATE TABLE "project_database_configurations" (
-                "ProjectId" TEXT NOT NULL,
-                "Provider" TEXT NOT NULL,
-                "Server" TEXT,
-                "Port" INTEGER,
-                "DatabaseName" TEXT,
-                "Authentication" TEXT,
-                "Username" TEXT,
-                "ProtectedPassword" TEXT,
-                "EncryptionScheme" TEXT,
-                "TrustServerCertificate" INTEGER NOT NULL DEFAULT 1,
-                "SqlitePath" TEXT,
-                "UpdatedAt" TEXT NOT NULL,
-                PRIMARY KEY ("ProjectId", "Provider"),
-                FOREIGN KEY ("ProjectId") REFERENCES "Projects" ("Id") ON DELETE CASCADE
-            );
-            """, ct);
-        var providerExpression = hasProviderColumn
-            ? "COALESCE(NULLIF(\"Provider\", ''), 'SqlServer')"
-            : "'SqlServer'";
-        await ExecuteSchemaCommandAsync(connection, transaction, $"""
-            INSERT INTO "project_database_configurations" (
-                "ProjectId", "Provider", "Server", "Port", "DatabaseName", "Authentication",
-                "Username", "ProtectedPassword", "EncryptionScheme", "TrustServerCertificate",
-                "SqlitePath", "UpdatedAt")
-            SELECT "ProjectId", {providerExpression}, "Server", "Port",
-                   "DatabaseName", "Authentication", "Username", "ProtectedPassword",
-                   "EncryptionScheme", "TrustServerCertificate", "SqlitePath", "UpdatedAt"
-            FROM "project_database_configurations_legacy";
-            """, ct);
-        await ExecuteSchemaCommandAsync(connection, transaction, "DROP TABLE \"project_database_configurations_legacy\";", ct);
-        await transaction.CommitAsync(ct);
     }
 
-    /// <summary>在指定交易中執行內部設定庫的固定 schema 指令。</summary>
-    private static async Task ExecuteSchemaCommandAsync(
-        DbConnection connection,
-        DbTransaction transaction,
+    private static async Task ExecuteAsync(
+        System.Data.Common.DbConnection connection,
         string sql,
-        CancellationToken ct)
+        CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
         command.CommandText = sql;
-        await command.ExecuteNonQueryAsync(ct);
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    private static string QuoteIdentifier(string identifier) =>
+        $"\"{identifier.Replace("\"", "\"\"")}\"";
 }

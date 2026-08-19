@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 using AgentService.Application.Contracts;
 using AgentService.Application.Models;
 using AgentService.Domain.Models;
-using AgentService.Modules.GraphRAG.FblAuthority;
+using AgentService.Modules.GraphRAG.ExtractedGraph;
 using AgentService.Modules.GraphRAG.ParallelExtractor;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -16,7 +16,7 @@ namespace AgentService.Modules.GraphRAG;
 
 /// <summary>
 /// ParallelExtractor GraphRAG 索引的技術上限。
-/// Graph schema 固定對應移植抽取器；FBL 業務資料只在目標 SQL Server 具備相應表格時啟用。
+/// Graph schema 固定對應移植抽取器；投資系統的業務 schema 只在目標 SQL Server 具備相應表格時啟用。
 /// </summary>
 public sealed class GraphIndexingOptions
 {
@@ -408,6 +408,11 @@ public sealed class GraphIndexingService
                 await _projects.SaveAsync(project, cancellationToken);
             }
 
+            SetProgress(projectId, "snapshot", "正在建立索引前原始碼檔案快照…", 12, runId, indexMode, stopwatch);
+            var sourceSnapshot = await BuildFileSnapshotAsync(
+                project.RootPath,
+                cancellationToken);
+
             SetProgress(projectId, "extract", "正在解析原始碼與已設定資料庫物件…", 20, runId, indexMode, stopwatch);
             var extractWatch = Stopwatch.StartNew();
             var resultDocument = await BuildGraphDocumentAsync(
@@ -423,15 +428,16 @@ public sealed class GraphIndexingService
 
             SetProgress(projectId, "community", "正在執行確定性 Community 分群…", 65, runId, indexMode, stopwatch);
             var communityWatch = Stopwatch.StartNew();
-            var communities = FblAuthorityCommunityBuilder.Build(resultDocument, cancellationToken);
+            var communities = GraphCommunityBuilder.Build(resultDocument, cancellationToken);
             communityWatch.Stop();
             stageDurations["community"] = communityWatch.ElapsedMilliseconds;
 
-            SetProgress(projectId, "manifest", "正在建立原始碼檔案版本清單…", 72, runId, indexMode, stopwatch);
+            SetProgress(projectId, "manifest", "正在確認索引期間原始碼未被修改…", 72, runId, indexMode, stopwatch);
             var digest = ComputeDocumentDigest(resultDocument, fingerprint);
-            var fileSnapshot = await BuildFileSnapshotAsync(
+            var completedSourceSnapshot = await BuildFileSnapshotAsync(
                 project.RootPath,
                 cancellationToken);
+            EnsureFileSnapshotUnchanged(sourceSnapshot, completedSourceSnapshot);
 
             SetProgress(projectId, "publish", "結構驗證完成，正在原子發布 Neo4j 圖譜…", 80, runId, indexMode, stopwatch);
             var publishWatch = Stopwatch.StartNew();
@@ -439,7 +445,7 @@ public sealed class GraphIndexingService
             // 先記錄候選版本；Publish 內部若在 Promote 後發生例外，catch 仍能執行補償。
             publishedVersion = version;
             await _graphStore.PublishAsync(
-                new FblGraphSnapshot(projectId, version, digest, resultDocument, communities),
+                new ProjectGraphSnapshot(projectId, version, digest, resultDocument, communities),
                 cancellationToken);
             publishWatch.Stop();
             stageDurations["publish"] = publishWatch.ElapsedMilliseconds;
@@ -459,7 +465,7 @@ public sealed class GraphIndexingService
             await _manifests.SaveFileSnapshotAsync(
                 projectId,
                 version,
-                fileSnapshot,
+                sourceSnapshot,
                 cancellationToken);
 
             project.Languages = "csharp,javascript,typescript,aspx,sql";
@@ -971,6 +977,42 @@ public sealed class GraphIndexingService
                     hash));
             });
         return files.OrderBy(file => file.RelativePath, StringComparer.Ordinal).ToArray();
+    }
+
+    /// <summary>確認一次完整抽取前後的檔案集合與內容雜湊完全一致。</summary>
+    /// <param name="beforeExtraction">抽取開始前的檔案快照。</param>
+    /// <param name="afterExtraction">抽取與 Community 分群完成後的檔案快照。</param>
+    /// <exception cref="InvalidOperationException">檔案在索引期間新增、刪除或內容變更。</exception>
+    internal static void EnsureFileSnapshotUnchanged(
+        IReadOnlyList<ProjectIndexedFile> beforeExtraction,
+        IReadOnlyList<ProjectIndexedFile> afterExtraction)
+    {
+        var before = beforeExtraction.ToDictionary(
+            file => file.RelativePath,
+            file => file.ContentHash,
+            StringComparer.OrdinalIgnoreCase);
+        var after = afterExtraction.ToDictionary(
+            file => file.RelativePath,
+            file => file.ContentHash,
+            StringComparer.OrdinalIgnoreCase);
+        if (before.Count == after.Count && before.All(pair =>
+                after.TryGetValue(pair.Key, out var hash) &&
+                hash.Equals(pair.Value, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        var changedFiles = before.Keys
+            .Union(after.Keys, StringComparer.OrdinalIgnoreCase)
+            .Where(path => !before.TryGetValue(path, out var oldHash) ||
+                           !after.TryGetValue(path, out var newHash) ||
+                           !oldHash.Equals(newHash, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .Take(10)
+            .ToArray();
+        throw new InvalidOperationException(
+            "索引期間偵測到原始碼變更，為避免 Graph 與實體檔案版本不一致，本次索引已取消。" +
+            $"請停止修改後重試。變更檔案：{string.Join("、", changedFiles)}");
     }
 
     /// <summary>

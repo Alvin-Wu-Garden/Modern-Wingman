@@ -84,6 +84,7 @@ export interface ProviderInfo {
   displayName: string
   kind: string
   modelId: string | null
+  protocol?: 'OpenAI' | 'OpenAICompatible' | 'Anthropic' | 'AzureOpenAI' | string
   providerType: string | null
   baseUrl: string | null
   sortOrder: number
@@ -221,6 +222,7 @@ export async function sendMessage(
   },
   signal?: AbortSignal,
   projectId?: string | null,
+  turnId?: string | null,
 ): Promise<void> {
   try {
     const response = await fetch(
@@ -233,6 +235,7 @@ export async function sendMessage(
           providerProfileId,
           modelId,
           attachments,
+          turnId: turnId ?? null,
         }),
         signal,
       },
@@ -265,6 +268,7 @@ export async function sendMessage(
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    let terminalEventReceived = false
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
@@ -284,11 +288,19 @@ export async function sendMessage(
             retryable?: boolean
             stage?: string | null
             activity?: AgentActivityEvent
+            type?: 'started' | 'activity' | 'token' | 'usage' | 'completed' | 'error' | string
+            turnId?: string | null
           }
-          if (event.activity) handlers.onActivity?.(event.activity)
-          if (typeof event.token === 'string') handlers.onToken(event.token)
-          if (event.done) handlers.onDone()
-          if (event.error) {
+          if ((event.type === 'activity' || event.activity) && event.activity)
+            handlers.onActivity?.(event.activity)
+          if ((event.type === 'token' || event.token !== undefined) && typeof event.token === 'string')
+            handlers.onToken(event.token)
+          if ((event.type === 'completed' || event.done) && !terminalEventReceived) {
+            terminalEventReceived = true
+            handlers.onDone()
+          }
+          if ((event.type === 'error' || event.error) && event.error && !terminalEventReceived) {
+            terminalEventReceived = true
             handlers.onError({
               message: event.error,
               code: event.code ?? null,
@@ -300,6 +312,14 @@ export async function sendMessage(
           // 忽略單一格式錯誤事件，後續 SSE 仍可繼續處理。
         }
       }
+    }
+    if (!terminalEventReceived && !signal?.aborted) {
+      handlers.onError({
+        message: '對話串流在收到完成事件前中斷，請重試。',
+        code: 'stream_incomplete',
+        retryable: true,
+        stage: null,
+      })
     }
   } catch (error) {
     if ((error as Error).name !== 'AbortError') {
@@ -391,9 +411,35 @@ export interface ModelGroup {
   models: string[]
 }
 
+/** 模型清單端點回傳的結構化錯誤，供 UI 套用有限重試策略。 */
+export class ProviderModelsRequestError extends Error {
+  constructor(
+    message: string,
+    readonly code: string | null,
+    readonly retryable: boolean,
+    readonly status: number,
+  ) {
+    super(message)
+    this.name = 'ProviderModelsRequestError'
+  }
+}
+
 export async function listProviderModels(profileId: string, signal?: AbortSignal): Promise<ModelGroup[]> {
   const response = await fetch(`${AGENT_API_BASE_URL}/api/providers/${profileId}/models`, { signal })
-  if (!response.ok) throw new Error(`無法載入模型：HTTP ${response.status}`)
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as {
+      code?: string
+      message?: string
+      error?: string
+      retryable?: boolean
+    } | null
+    throw new ProviderModelsRequestError(
+      body?.message ?? body?.error ?? `無法載入模型：HTTP ${response.status}`,
+      body?.code ?? null,
+      body?.retryable ?? response.status >= 500,
+      response.status,
+    )
+  }
   const models = await response.json() as Array<{
     id: string
     group: string

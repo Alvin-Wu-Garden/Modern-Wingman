@@ -37,7 +37,6 @@ sealed class BackendGraphExtractor
         }
     }
 
-    /// <summary>抽取「ExtractAsync」所代表的圖譜抽取或匯入工作。</summary>
     public async Task<ParallelGraphRunResult> ExtractAsync(
         string solutionPath,
         Func<CodeGraphData, Task> graphSink,
@@ -172,7 +171,6 @@ sealed class BackendGraphExtractor
             totalTimer.Elapsed.TotalMilliseconds);
     }
 
-    /// <summary>抽取「ExtractProjectAsync」所代表的圖譜抽取或匯入工作。</summary>
     private async Task<ParallelProjectResult> ExtractProjectAsync(
         Project project,
         int ordinal,
@@ -251,7 +249,6 @@ sealed class BackendGraphExtractor
             _diagnostics.ToArray());
     }
 
-    /// <summary>建立「BuildProjectMaps」所代表的圖譜抽取或匯入工作。</summary>
     private void BuildProjectMaps(Solution solution)
     {
         var projectIds = new Dictionary<ProjectId, string>();
@@ -298,7 +295,6 @@ sealed class BackendGraphExtractor
         _projectById = projectById;
     }
 
-    /// <summary>加入「AddProject」所代表的圖譜抽取或匯入工作。</summary>
     private void AddProject(string solutionId, Project project)
     {
         var projectId = _projectIds[project.Id];
@@ -321,7 +317,6 @@ sealed class BackendGraphExtractor
         }
     }
 
-    /// <summary>處理「ProcessDocument」所代表的圖譜抽取或匯入工作。</summary>
     private void ProcessDocument(
         Project project,
         string filePath,
@@ -367,7 +362,6 @@ sealed class BackendGraphExtractor
         }
     }
 
-    /// <summary>加入「AddType」所代表的圖譜抽取或匯入工作。</summary>
     private TypeExtractionInfo AddType(
         Project project,
         string fileId,
@@ -435,7 +429,6 @@ sealed class BackendGraphExtractor
         return new TypeExtractionInfo(typeId, typeName, symbol);
     }
 
-    /// <summary>加入「AddTypeMembers」所代表的圖譜抽取或匯入工作。</summary>
     private void AddTypeMembers(
         Project project,
         string fileId,
@@ -455,7 +448,6 @@ sealed class BackendGraphExtractor
         }
     }
 
-    /// <summary>加入「AddMethod」所代表的圖譜抽取或匯入工作。</summary>
     private void AddMethod(
         Project project,
         string fileId,
@@ -557,7 +549,6 @@ sealed class BackendGraphExtractor
         }
     }
 
-    /// <summary>加入「AddTypeSemanticRelationships」所代表的圖譜抽取或匯入工作。</summary>
     private void AddTypeSemanticRelationships(string projectId, string typeId, INamedTypeSymbol symbol)
     {
         if (symbol.BaseType is not null && !IsFrameworkRootType(symbol.BaseType))
@@ -573,7 +564,6 @@ sealed class BackendGraphExtractor
         }
     }
 
-    /// <summary>取得「ResolveTypeTarget」所代表的圖譜抽取或匯入工作。</summary>
     private string ResolveTypeTarget(INamedTypeSymbol symbol, string currentProjectId)
     {
         var typeName = GraphSymbolFormatting.TypeName(symbol);
@@ -589,8 +579,8 @@ sealed class BackendGraphExtractor
                 ["projectId"] = targetProjectId,
                 ["external"] = false
             });
-            // A source declaration has the authoritative syntax kind (especially record).
-            // Only fill kind for a semantic target stub that has not been declared yet.
+            // 原始碼宣告的語法種類才是權威值，尤其是 record。
+            // 只有尚未出現正式宣告的語意目標暫存節點，才補入推導出的種類。
             targetNode.Properties.TryAdd("kind", symbol.TypeKind.ToString().ToLowerInvariant());
             return targetId;
         }
@@ -598,7 +588,6 @@ sealed class BackendGraphExtractor
         return AddExternalType(typeName, assemblyName);
     }
 
-    /// <summary>取得「ResolveMethodTarget」所代表的圖譜抽取或匯入工作。</summary>
     private string ResolveMethodTarget(IMethodSymbol symbol, string currentProjectId)
     {
         var containingType = symbol.ContainingType;
@@ -634,7 +623,6 @@ sealed class BackendGraphExtractor
         return externalId;
     }
 
-    /// <summary>判斷「TryResolveProjectId」所代表的圖譜抽取或匯入工作。</summary>
     private bool TryResolveProjectId(ISymbol symbol, string currentProjectId, out string projectId)
     {
         var assemblyName = symbol.ContainingAssembly?.Identity.Name;
@@ -648,13 +636,11 @@ sealed class BackendGraphExtractor
             && string.Equals(assemblyName, GetAssemblyName(currentProjectId), StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>取得「GetAssemblyName」所代表的圖譜抽取或匯入工作。</summary>
     private string GetAssemblyName(string projectId)
         => _projectById.Values.FirstOrDefault(project => _projectIds[project.Id] == projectId)?.AssemblyName
             ?? _projectById.Values.FirstOrDefault(project => _projectIds[project.Id] == projectId)?.Name
             ?? string.Empty;
 
-    /// <summary>加入「AddExternalType」所代表的圖譜抽取或匯入工作。</summary>
     private string AddExternalType(string displayName, string assemblyName)
     {
         var externalId = GraphIds.External("type", assemblyName, displayName);
@@ -670,7 +656,6 @@ sealed class BackendGraphExtractor
         return externalId;
     }
 
-    /// <summary>加入「AddNamespace」所代表的圖譜抽取或匯入工作。</summary>
     private string AddNamespace(string namespaceName)
     {
         var namespaceId = GraphIds.Namespace(namespaceName);
@@ -682,7 +667,6 @@ sealed class BackendGraphExtractor
         return namespaceId;
     }
 
-    /// <summary>加入「AddNamespaceDeclarations」所代表的圖譜抽取或匯入工作。</summary>
     private void AddNamespaceDeclarations(SyntaxNode root, string fileId)
     {
         foreach (var namespaceDeclaration in root.DescendantNodes().OfType<BaseNamespaceDeclarationSyntax>())
@@ -695,7 +679,6 @@ sealed class BackendGraphExtractor
         }
     }
 
-    /// <summary>加入「AddUsingRelationships」所代表的圖譜抽取或匯入工作。</summary>
     private void AddUsingRelationships(SyntaxNode root, string fileId)
     {
         foreach (var usingDirective in root.DescendantNodes().OfType<UsingDirectiveSyntax>())
@@ -711,7 +694,6 @@ sealed class BackendGraphExtractor
         }
     }
 
-    /// <summary>加入「AddChunk」所代表的圖譜抽取或匯入工作。</summary>
     private void AddChunk(string ownerId, string fileId, SyntaxNode node, string kind)
     {
         var fullText = node.ToFullString();
@@ -739,7 +721,6 @@ sealed class BackendGraphExtractor
         _graph.AddRelationship("HAS_CHUNK", ownerId, chunkId);
     }
 
-    /// <summary>判斷「IsSupportedType」所代表的圖譜抽取或匯入工作。</summary>
     private static bool IsSupportedType(BaseTypeDeclarationSyntax node)
         => node is ClassDeclarationSyntax
             or InterfaceDeclarationSyntax
@@ -747,7 +728,6 @@ sealed class BackendGraphExtractor
             or RecordDeclarationSyntax
             or EnumDeclarationSyntax;
 
-    /// <summary>判斷「IsMethodLike」所代表的圖譜抽取或匯入工作。</summary>
     private static bool IsMethodLike(SyntaxNode node)
         => node is MethodDeclarationSyntax
             or ConstructorDeclarationSyntax
@@ -755,7 +735,6 @@ sealed class BackendGraphExtractor
             or OperatorDeclarationSyntax
             or ConversionOperatorDeclarationSyntax;
 
-    /// <summary>取得「GetTypeKind」所代表的圖譜抽取或匯入工作。</summary>
     private static string GetTypeKind(BaseTypeDeclarationSyntax node)
         => node switch
         {
@@ -767,7 +746,6 @@ sealed class BackendGraphExtractor
             _ => "type"
         };
 
-    /// <summary>取得「GetMethodKind」所代表的圖譜抽取或匯入工作。</summary>
     private static string GetMethodKind(SyntaxNode node)
         => node switch
         {
@@ -778,7 +756,6 @@ sealed class BackendGraphExtractor
             _ => "method"
         };
 
-    /// <summary>取得「GetMethodName」所代表的圖譜抽取或匯入工作。</summary>
     private static string GetMethodName(SyntaxNode node, string containingTypeName)
         => node switch
         {
@@ -790,7 +767,6 @@ sealed class BackendGraphExtractor
             _ => containingTypeName.Split('.').LastOrDefault() ?? "method"
         };
 
-    /// <summary>取得「GetParameterCount」所代表的圖譜抽取或匯入工作。</summary>
     private static int GetParameterCount(SyntaxNode node)
         => node switch
         {
@@ -798,7 +774,6 @@ sealed class BackendGraphExtractor
             _ => 0
         };
 
-    /// <summary>取得「GetFallbackNamespaceName」所代表的圖譜抽取或匯入工作。</summary>
     private static string GetFallbackNamespaceName(SyntaxNode node)
     {
         var parts = node.Ancestors()
@@ -809,7 +784,6 @@ sealed class BackendGraphExtractor
         return string.Join('.', parts);
     }
 
-    /// <summary>取得「GetFallbackTypeName」所代表的圖譜抽取或匯入工作。</summary>
     private static string GetFallbackTypeName(BaseTypeDeclarationSyntax node)
     {
         var typeParts = node.Ancestors()
@@ -823,7 +797,6 @@ sealed class BackendGraphExtractor
         return string.IsNullOrWhiteSpace(namespaceName) ? typeName : $"{namespaceName}.{typeName}";
     }
 
-    /// <summary>判斷「IsFrameworkRootType」所代表的圖譜抽取或匯入工作。</summary>
     private static bool IsFrameworkRootType(INamedTypeSymbol symbol)
     {
         var fullName = GraphSymbolFormatting.TypeName(symbol);
@@ -834,7 +807,6 @@ sealed class BackendGraphExtractor
             or "System.MulticastDelegate";
     }
 
-    /// <summary>執行「LocationProperties」所代表的圖譜抽取或匯入工作。</summary>
     private static Dictionary<string, object?> LocationProperties(SyntaxNode node)
     {
         var span = GetLineSpan(node);
@@ -847,17 +819,14 @@ sealed class BackendGraphExtractor
         };
     }
 
-    /// <summary>格式化「FormatLocation」所代表的圖譜抽取或匯入工作。</summary>
     private static string FormatLocation(SyntaxNode node)
     {
         var span = GetLineSpan(node);
         return $"{span.Path}:{span.StartLinePosition.Line + 1}";
     }
 
-    /// <summary>取得「GetLineSpan」所代表的圖譜抽取或匯入工作。</summary>
     private static FileLinePositionSpan GetLineSpan(SyntaxNode node)
         => node.GetLocation().GetLineSpan();
 
-    /// <summary>定義「TypeExtractionInfo」資料結構或服務職責，供圖譜抽取流程使用。</summary>
     private sealed record TypeExtractionInfo(string TypeId, string TypeName, INamedTypeSymbol? Symbol);
 }

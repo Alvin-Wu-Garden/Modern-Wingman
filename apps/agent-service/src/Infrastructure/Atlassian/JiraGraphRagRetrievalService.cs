@@ -1,12 +1,10 @@
 using System.Diagnostics;
 using AgentService.Application.Atlassian;
 using AgentService.Modules.GraphRAG;
+using AgentService.Modules.GraphRAG.ExtractedGraph;
 using Microsoft.Extensions.Logging;
-using GraphNode = AgentService.Modules.GraphRAG.LegacyGraphNode;
-using GraphNodeKind = AgentService.Modules.GraphRAG.LegacyGraphNodeKind;
-using GraphRelationship = AgentService.Modules.GraphRAG.LegacyGraphRelationship;
-using ScoredGraphNode = AgentService.Modules.GraphRAG.LegacyScoredGraphNode;
-using GraphRetrievalContext = AgentService.Modules.GraphRAG.LegacyGraphRetrievalContext;
+using GraphNode = AgentService.Modules.GraphRAG.RetrievedGraphNode;
+using ScoredGraphNode = AgentService.Modules.GraphRAG.ScoredRetrievedGraphNode;
 
 namespace AgentService.Infrastructure.Atlassian;
 
@@ -40,15 +38,15 @@ public sealed class JiraGraphRagRetrievalService(
 
     private static readonly IReadOnlySet<string> EntryPointRoles = new HashSet<string>(
         [
-            GraphRoles.ControllerAction,
-            GraphRoles.Controller,
-            GraphRoles.WebRoute,
-            GraphRoles.MenuFeature,
-            GraphRoles.ScheduledTask,
-            GraphRoles.MessageConsumer,
-            GraphRoles.FrontendPage,
-            GraphRoles.CliCommand,
-            GraphRoles.Schedule,
+            GraphRetrievalRoles.ControllerAction,
+            GraphRetrievalRoles.Controller,
+            GraphRetrievalRoles.WebRoute,
+            GraphRetrievalRoles.MenuFeature,
+            GraphRetrievalRoles.ScheduledTask,
+            GraphRetrievalRoles.MessageConsumer,
+            GraphRetrievalRoles.FrontendPage,
+            GraphRetrievalRoles.CliCommand,
+            GraphRetrievalRoles.Schedule,
         ],
         StringComparer.Ordinal);
 
@@ -289,18 +287,27 @@ public sealed class JiraGraphRagRetrievalService(
     // ─── 私有：判斷是否為功能入口節點 ──────────────────────────────────────────
 
     private static bool IsEntryPoint(GraphNode node) =>
-        node.Kind == GraphNodeKind.EntryPoint
-        || node.Kind == GraphNodeKind.Feature
+        node.Kind is GraphNodeKind.MenuItem
+            or GraphNodeKind.ApiEndpoint
+            or GraphNodeKind.WebFormPage
+            or GraphNodeKind.View
+            or GraphNodeKind.ScriptAsset
+            or GraphNodeKind.Schedule
+            or GraphNodeKind.ScheduleTaskDefinition
         || EntryPointRoles.Contains(node.Role);
 
     private static int EntryPointSortPriority(GraphNode node) =>
         node.Kind switch
         {
-            GraphNodeKind.EntryPoint => 4,
-            GraphNodeKind.Feature => 3,
-            GraphNodeKind.Code => 2,
-            GraphNodeKind.Data => 1,
-            _ => 0,
+            GraphNodeKind.MenuItem or GraphNodeKind.ApiEndpoint or
+            GraphNodeKind.WebFormPage or GraphNodeKind.View or
+            GraphNodeKind.ScriptAsset or GraphNodeKind.Schedule or
+            GraphNodeKind.ScheduleTaskDefinition => 4,
+            GraphNodeKind.Type or GraphNodeKind.Method or
+            GraphNodeKind.FrontendComponent or GraphNodeKind.FrontendFunction => 3,
+            GraphNodeKind.Database or GraphNodeKind.DatabaseObject or
+            GraphNodeKind.DatabaseColumn or GraphNodeKind.StoredProcedureParameter => 1,
+            _ => 2,
         };
 
     // ─── 私有：分類入口為已確認 vs 候選 ────────────────────────────────────────

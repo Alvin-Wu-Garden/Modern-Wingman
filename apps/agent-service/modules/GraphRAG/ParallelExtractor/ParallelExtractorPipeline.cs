@@ -1,4 +1,4 @@
-using AgentService.Modules.GraphRAG.FblAuthority;
+using AgentService.Modules.GraphRAG.ExtractedGraph;
 
 namespace AgentService.Modules.GraphRAG.ParallelExtractor;
 

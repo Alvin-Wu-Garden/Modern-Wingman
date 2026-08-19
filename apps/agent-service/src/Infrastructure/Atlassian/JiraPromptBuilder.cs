@@ -235,9 +235,12 @@ public static class JiraPromptBuilder
         }
 
         // 主要命中節點
+        var entryNodeIds = ctx.ConfirmedEntryPoints
+            .Concat(ctx.CandidateEntryPoints)
+            .Select(entry => entry.NodeId)
+            .ToHashSet(StringComparer.Ordinal);
         var nonEntry = ctx.Hits
-            .Where(h => h.NodeKind != nameof(AgentService.Modules.GraphRAG.LegacyGraphNodeKind.EntryPoint)
-                        && h.NodeKind != nameof(AgentService.Modules.GraphRAG.LegacyGraphNodeKind.Feature))
+            .Where(hit => !entryNodeIds.Contains(hit.NodeId))
             .Take(40)
             .ToList();
 

@@ -11,7 +11,7 @@ namespace AgentService.Modules.GraphRAG;
 /// </summary>
 /// <param name="ProjectId">Modern Wingman 專案 ID。</param>
 /// <param name="GraphVersion">工作所屬 immutable graph version。</param>
-/// <param name="CommunityId">C0/C1/C2 community ID。</param>
+/// <param name="CommunityId">C0、C1 或 C2 層級的 Community 識別碼。</param>
 /// <param name="CacheKey">結構內容與 prompt version 的穩定去重鍵。</param>
 /// <param name="Work">執行單次摘要並以 cacheKey CAS 寫回的工作。</param>
 /// <param name="InitialRetryCount">

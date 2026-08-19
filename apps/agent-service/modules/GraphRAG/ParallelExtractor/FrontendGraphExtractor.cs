@@ -12,14 +12,12 @@ using TsLanguage = TreeSitter.Language;
 using TsParser = TreeSitter.Parser;
 using TsNode = TreeSitter.Node;
 
-/// <summary>定義「FrontendFileInfo」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed record FrontendFileInfo(
     string Path,
     string RelativePath,
     string Extension,
     bool IsBundle);
 
-/// <summary>定義「FrontendGraphBuildResult」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed record FrontendGraphBuildResult(
     CodeGraphData Graph,
     int ScannedFrontendFileCount,
@@ -33,10 +31,8 @@ sealed record FrontendGraphBuildResult(
     int ParseWarningCount,
     IReadOnlyList<string> Diagnostics);
 
-/// <summary>定義「FrontendFileCatalog」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class FrontendFileCatalog
 {
-    /// <summary>執行「FrontendFileCatalog」所代表的圖譜抽取或匯入工作。</summary>
     private FrontendFileCatalog(
         string sourceRoot,
         IReadOnlyList<FrontendFileInfo> frontendFiles,
@@ -58,7 +54,6 @@ sealed class FrontendFileCatalog
     public IReadOnlyList<string> CSharpFiles { get; }
     public IReadOnlyList<string> BuildConfigurationFiles { get; }
 
-    /// <summary>執行「Create」所代表的圖譜抽取或匯入工作。</summary>
     public static FrontendFileCatalog Create(string sourceRoot)
     {
         var frontendFiles = new List<FrontendFileInfo>();
@@ -97,7 +92,7 @@ sealed class FrontendFileCatalog
                 continue;
             }
 
-            // Bundles are inventory-only. The source is intentionally never read.
+            // Bundle 只建立清單節點，刻意不讀取其來源內容。
             var isBundle = lowerName.EndsWith(".bundle.js", StringComparison.Ordinal) ||
                            lowerRelative.Contains("/dist/", StringComparison.Ordinal) ||
                            lowerName.EndsWith(".min.js", StringComparison.Ordinal);
@@ -111,7 +106,6 @@ sealed class FrontendFileCatalog
             buildFiles.OrderBy(file => file, StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
-    /// <summary>取得「FindByReference」所代表的圖譜抽取或匯入工作。</summary>
     public FrontendFileInfo? FindByReference(string value)
     {
         var relative = NormalizeReference(value);
@@ -133,7 +127,6 @@ sealed class FrontendFileCatalog
             .FirstOrDefault();
     }
 
-    /// <summary>取得「ResolveView」所代表的圖譜抽取或匯入工作。</summary>
     public FrontendFileInfo? ResolveView(string controllerName, string viewName)
     {
         var clean = NormalizeReference(viewName).TrimStart('/');
@@ -161,7 +154,6 @@ sealed class FrontendFileCatalog
         return controllerMatch ?? candidates.FirstOrDefault();
     }
 
-    /// <summary>判斷「IsThirdPartySource」所代表的圖譜抽取或匯入工作。</summary>
     public static bool IsThirdPartySource(string path)
     {
         var normalized = path.Replace('\\', '/');
@@ -183,7 +175,6 @@ sealed class FrontendFileCatalog
                name.StartsWith("ext-all", StringComparison.Ordinal);
     }
 
-    /// <summary>正規化「NormalizeReference」所代表的圖譜抽取或匯入工作。</summary>
     private static string NormalizeReference(string value)
     {
         var normalized = value.Trim().Replace('\\', '/');
@@ -194,7 +185,6 @@ sealed class FrontendFileCatalog
         return normalized.TrimStart('/');
     }
 
-    /// <summary>判斷「IsBuildConfiguration」所代表的圖譜抽取或匯入工作。</summary>
     private static bool IsBuildConfiguration(string fileName)
         => fileName.Equals("package.json", StringComparison.OrdinalIgnoreCase) ||
            fileName.StartsWith("webpack", StringComparison.OrdinalIgnoreCase) ||
@@ -206,7 +196,6 @@ sealed class FrontendFileCatalog
            fileName.Equals("tsconfig.json", StringComparison.OrdinalIgnoreCase) ||
            fileName.Equals("babel.config.js", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>執行「EnumerateFiles」所代表的圖譜抽取或匯入工作。</summary>
     private static IEnumerable<string> EnumerateFiles(string root)
     {
         IEnumerable<string> files;
@@ -235,7 +224,6 @@ sealed class FrontendFileCatalog
         }
     }
 }
-/// <summary>定義「FrontendGraphExtractor」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class FrontendGraphExtractor
 {
     private static readonly Regex ScriptTagRegex = new(
@@ -254,7 +242,6 @@ sealed class FrontendGraphExtractor
     private readonly List<string> _diagnostics = new();
     private int _parseWarnings;
 
-    /// <summary>執行「FrontendGraphExtractor」所代表的圖譜抽取或匯入工作。</summary>
     public FrontendGraphExtractor(string sourceRoot, CodeGraphIndex codeIndex)
     {
         _sourceRoot = sourceRoot;
@@ -262,7 +249,6 @@ sealed class FrontendGraphExtractor
         _catalog = FrontendFileCatalog.Create(sourceRoot);
     }
 
-    /// <summary>建立「Build」所代表的圖譜抽取或匯入工作。</summary>
     public FrontendGraphBuildResult Build(
         bool parallel,
         int degree,
@@ -314,7 +300,6 @@ sealed class FrontendGraphExtractor
             _diagnostics.ToArray());
     }
 
-    /// <summary>處理「ProcessFrontendFile」所代表的圖譜抽取或匯入工作。</summary>
     private CodeGraphData ProcessFrontendFile(FrontendFileInfo file, Action<string>? progress)
     {
         var graph = new CodeGraphData();
@@ -329,7 +314,7 @@ sealed class FrontendGraphExtractor
 
         if (file.IsBundle)
         {
-            // Explicitly do not read or parse bundle content.
+            // 明確禁止讀取或解析 Bundle 內容。
             return graph;
         }
 
@@ -371,7 +356,6 @@ sealed class FrontendGraphExtractor
         return graph;
     }
 
-    /// <summary>加入「AddAssetNode」所代表的圖譜抽取或匯入工作。</summary>
     private string AddAssetNode(CodeGraphData graph, FrontendFileInfo file, string? projectId)
     {
         var label = file.Extension.Equals(".aspx", StringComparison.OrdinalIgnoreCase)
@@ -415,7 +399,6 @@ sealed class FrontendGraphExtractor
         return id;
     }
 
-    /// <summary>解析「ParsePage」所代表的圖譜抽取或匯入工作。</summary>
     private void ParsePage(CodeGraphData graph, FrontendFileInfo page, string pageId, string? projectId)
     {
         string source;
@@ -432,11 +415,10 @@ sealed class FrontendGraphExtractor
 
         try
         {
-            // ASPX embeds server expressions such as
-            // src="<% =UrlUtility.JSPath(\"/dist/page.bundle.js\") %>".
-            // A normal HTML DOM parser sees the nested quote as the end of the
-            // attribute. Scan the complete script tag instead, then extract the
-            // literal JS/TS path from the tag.
+            // ASPX 可能在 src 內嵌入伺服器運算式，例如
+            // 例如 ASP.NET Web Forms 可能把 src 寫成："<% =UrlUtility.JSPath(\"/dist/page.bundle.js\") %>"。
+            // 一般 HTML DOM Parser 會把內層引號誤判為屬性結尾，因此先掃描完整
+            // script 標籤，再從標籤中擷取 JS／TS 的字面路徑。
             foreach (Match scriptTag in ScriptTagRegex.Matches(source))
             {
                 var reference = ExtractScriptReference(scriptTag.Value);
@@ -465,7 +447,6 @@ sealed class FrontendGraphExtractor
         }
     }
 
-    /// <summary>解析「ParseJavaScript」所代表的圖譜抽取或匯入工作。</summary>
     private void ParseJavaScript(CodeGraphData graph, FrontendFileInfo file, string assetId, string source)
     {
         var parser = new JsxParser(new JsxParserOptions
@@ -487,7 +468,6 @@ sealed class FrontendGraphExtractor
         WalkJavaScriptNode(graph, file, assetId, program, null, null, null);
     }
 
-    /// <summary>解析「ParseTypeScript」所代表的圖譜抽取或匯入工作。</summary>
     private void ParseTypeScript(CodeGraphData graph, FrontendFileInfo file, string assetId, string source)
     {
         using var language = new TsLanguage(file.Extension.Equals(".tsx", StringComparison.OrdinalIgnoreCase) ? "TSX" : "TypeScript");
@@ -502,7 +482,6 @@ sealed class FrontendGraphExtractor
         WalkTypeScriptNode(graph, file, assetId, tree.RootNode, null, null);
     }
 
-    /// <summary>執行「WalkTypeScriptNode」所代表的圖譜抽取或匯入工作。</summary>
     private void WalkTypeScriptNode(
         CodeGraphData graph,
         FrontendFileInfo file,
@@ -926,7 +905,6 @@ sealed class FrontendGraphExtractor
         return id;
     }
 
-    /// <summary>加入「AddApiCall」所代表的圖譜抽取或匯入工作。</summary>
     private void AddApiCall(CodeGraphData graph, FrontendFileInfo file, string assetId, string? componentId, string? functionId, JsNode node)
     {
         var callee = GetStaticName(GetNodeProperty(node, "Callee"));
@@ -961,7 +939,6 @@ sealed class FrontendGraphExtractor
         });
     }
 
-    /// <summary>加入「AddImportRelation」所代表的圖譜抽取或匯入工作。</summary>
     private void AddImportRelation(CodeGraphData graph, FrontendFileInfo file, string assetId, string? sourceValue)
     {
         if (string.IsNullOrWhiteSpace(sourceValue) || !sourceValue.StartsWith(".", StringComparison.Ordinal))
@@ -1000,7 +977,6 @@ sealed class FrontendGraphExtractor
         });
     }
 
-    /// <summary>加入「AddBackendViewRelations」所代表的圖譜抽取或匯入工作。</summary>
     private void AddBackendViewRelations(CodeGraphData graph, CancellationToken cancellationToken)
     {
         foreach (var file in _catalog.CSharpFiles)
@@ -1062,9 +1038,9 @@ sealed class FrontendGraphExtractor
 
                     }
 
-                    // MVC actions in this codebase frequently use expression-bodied
-                    // methods, for example: `Index() => View("frmCapitalMaintain")`.
-                    // Such methods have no ReturnStatementSyntax, so handle them here.
+                    // 此程式庫的 MVC Action 經常使用 expression-bodied method，例如
+                    // `Index() => View("frmCapitalMaintain")`。這類方法沒有
+                    // ReturnStatementSyntax，因此需要在此另外處理。
                     var expressionBodyViewCalls = method.ExpressionBody?.Expression
                         .DescendantNodesAndSelf()
                         .OfType<InvocationExpressionSyntax>()
@@ -1088,7 +1064,6 @@ sealed class FrontendGraphExtractor
         }
     }
 
-    /// <summary>加入「AddViewRelation」所代表的圖譜抽取或匯入工作。</summary>
     private void AddViewRelation(
         CodeGraphData graph,
         string methodId,
@@ -1132,7 +1107,6 @@ sealed class FrontendGraphExtractor
         });
     }
 
-    /// <summary>確保「EnsurePageNode」所代表的圖譜抽取或匯入工作。</summary>
     private string EnsurePageNode(CodeGraphData graph, FrontendFileInfo page)
     {
         var projectId = _codeIndex.FindProjectForPath(page.Path);
@@ -1145,7 +1119,6 @@ sealed class FrontendGraphExtractor
         return pageId;
     }
 
-    /// <summary>加入「AddBundleComponentRelations」所代表的圖譜抽取或匯入工作。</summary>
     private void AddBundleComponentRelations(CodeGraphData graph)
     {
         var bundles = graph.Nodes.Where(node => node.Label == "FrontendBundle").ToList();
@@ -1187,7 +1160,6 @@ sealed class FrontendGraphExtractor
         }
     }
 
-    /// <summary>執行「Merge」所代表的圖譜抽取或匯入工作。</summary>
     private static void Merge(CodeGraphData target, CodeGraphData source)
     {
         foreach (var node in source.Nodes)
@@ -1210,7 +1182,6 @@ sealed class FrontendGraphExtractor
         }
     }
 
-    /// <summary>加入「AddUnresolvedAsset」所代表的圖譜抽取或匯入工作。</summary>
     private string AddUnresolvedAsset(CodeGraphData graph, string reference, string? projectId)
     {
         var isBundle = reference.EndsWith(".bundle.js", StringComparison.OrdinalIgnoreCase) ||
@@ -1234,7 +1205,6 @@ sealed class FrontendGraphExtractor
         return id;
     }
 
-    /// <summary>抽取「ExtractScriptReference」所代表的圖譜抽取或匯入工作。</summary>
     private static string ExtractScriptReference(string raw)
     {
         var match = ScriptPathRegex.Match(raw);
@@ -1246,7 +1216,6 @@ sealed class FrontendGraphExtractor
         return string.Empty;
     }
 
-    /// <summary>判斷「IsViewInvocation」所代表的圖譜抽取或匯入工作。</summary>
     private static bool IsViewInvocation(InvocationExpressionSyntax invocation)
     {
         var name = invocation.Expression switch
@@ -1259,7 +1228,6 @@ sealed class FrontendGraphExtractor
                name.Equals("PartialView", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>取得「GetViewInvocationName」所代表的圖譜抽取或匯入工作。</summary>
     private static string GetViewInvocationName(InvocationExpressionSyntax invocation)
         => invocation.Expression switch
         {
@@ -1268,7 +1236,6 @@ sealed class FrontendGraphExtractor
             _ => "View"
         };
 
-    /// <summary>取得「GetViewName」所代表的圖譜抽取或匯入工作。</summary>
     private static string? GetViewName(InvocationExpressionSyntax invocation)
         => invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression switch
         {
@@ -1277,7 +1244,6 @@ sealed class FrontendGraphExtractor
             _ => null
         };
 
-    /// <summary>取得「GetBranchInfo」所代表的圖譜抽取或匯入工作。</summary>
     private static (string Kind, int StartLine, int EndLine) GetBranchInfo(ReturnStatementSyntax returnStatement)
     {
         var ifStatement = returnStatement.Ancestors().OfType<IfStatementSyntax>().FirstOrDefault();
@@ -1297,26 +1263,21 @@ sealed class FrontendGraphExtractor
         return ("unconditional", GetLine(returnStatement), GetLine(returnStatement));
     }
 
-    /// <summary>取得「GetLine」所代表的圖譜抽取或匯入工作。</summary>
     private static int GetLine(SyntaxNode node)
         => node.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
 
-    /// <summary>執行「SafeLineCount」所代表的圖譜抽取或匯入工作。</summary>
     private static int SafeLineCount(string path)
     {
         try { return File.ReadLines(path).Count(); }
         catch { return 0; }
     }
 
-    /// <summary>判斷「IsFunctionNode」所代表的圖譜抽取或匯入工作。</summary>
     private static bool IsFunctionNode(JsNode node)
         => node.GetType().Name is "FunctionDeclaration" or "FunctionExpression" or "ArrowFunctionExpression";
 
-    /// <summary>判斷「IsComponentName」所代表的圖譜抽取或匯入工作。</summary>
     private static bool IsComponentName(string name)
         => !string.IsNullOrWhiteSpace(name) && char.IsUpper(name.TrimStart('_')[0]);
 
-    /// <summary>執行「LooksLikeApiCall」所代表的圖譜抽取或匯入工作。</summary>
     private static bool LooksLikeApiCall(string name)
         => name.Equals("fetch", StringComparison.OrdinalIgnoreCase) ||
            name.StartsWith("axios.", StringComparison.OrdinalIgnoreCase) ||
@@ -1325,7 +1286,6 @@ sealed class FrontendGraphExtractor
            name.Equals("Ext.Ajax.request", StringComparison.OrdinalIgnoreCase) ||
            name.Equals("Ext.net.DirectMethod.request", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>取得「FindStringValues」所代表的圖譜抽取或匯入工作。</summary>
     private static IEnumerable<string> FindStringValues(JsNode node)
     {
         foreach (var child in node.ChildNodes)
@@ -1343,7 +1303,6 @@ sealed class FrontendGraphExtractor
         }
     }
 
-    /// <summary>取得「GetStaticName」所代表的圖譜抽取或匯入工作。</summary>
     private static string? GetStaticName(JsNode? node)
     {
         if (node is null)
@@ -1367,7 +1326,6 @@ sealed class FrontendGraphExtractor
         return GetStringValue(node);
     }
 
-    /// <summary>取得「GetStringValue」所代表的圖譜抽取或匯入工作。</summary>
     private static string? GetStringValue(JsNode? node)
     {
         if (node is null)
@@ -1390,30 +1348,24 @@ sealed class FrontendGraphExtractor
         return null;
     }
 
-    /// <summary>取得「GetNodeProperty」所代表的圖譜抽取或匯入工作。</summary>
     private static JsNode? GetNodeProperty(JsNode node, string name)
         => node.GetType().GetProperty(name)?.GetValue(node) as JsNode;
 
-    /// <summary>取得「GetNodeList」所代表的圖譜抽取或匯入工作。</summary>
     private static IReadOnlyList<JsNode> GetNodeList(JsNode node, string name)
     {
         var value = node.GetType().GetProperty(name)?.GetValue(node) as System.Collections.IEnumerable;
         return value?.Cast<object>().OfType<JsNode>().ToArray() ?? Array.Empty<JsNode>();
     }
 
-    /// <summary>取得「GetNodePropertyValue」所代表的圖譜抽取或匯入工作。</summary>
     private static object? GetNodePropertyValue(JsNode node, string name)
         => node.GetType().GetProperty(name)?.GetValue(node);
 
-    /// <summary>取得「GetStartLine」所代表的圖譜抽取或匯入工作。</summary>
     private static int GetStartLine(JsNode node)
         => node.Location.Start.Line;
 
-    /// <summary>取得「GetEndLine」所代表的圖譜抽取或匯入工作。</summary>
     private static int GetEndLine(JsNode node)
         => node.Location.End.Line;
 
-    /// <summary>加入「AddAssetProperty」所代表的圖譜抽取或匯入工作。</summary>
     private static void AddAssetProperty(CodeGraphData graph, string assetId, string name, object value)
     {
         var node = graph.Nodes.FirstOrDefault(item => item.Id == assetId);
@@ -1423,11 +1375,9 @@ sealed class FrontendGraphExtractor
         }
     }
 
-    /// <summary>取得「GetProperty」所代表的圖譜抽取或匯入工作。</summary>
     private static string GetProperty(GraphNode node, string name)
         => node.Properties.TryGetValue(name, out var value) ? value?.ToString() ?? string.Empty : string.Empty;
 
-    /// <summary>加入「AddDiagnostic」所代表的圖譜抽取或匯入工作。</summary>
     private void AddDiagnostic(string message)
     {
         lock (_diagnostics)
@@ -1436,11 +1386,9 @@ sealed class FrontendGraphExtractor
         }
     }
 
-    /// <summary>統計「CountNodes」所代表的圖譜抽取或匯入工作。</summary>
     private static int CountNodes(CodeGraphData graph, string label)
         => graph.Nodes.Count(node => node.Label.Equals(label, StringComparison.Ordinal));
 
-    /// <summary>統計「CountRelationships」所代表的圖譜抽取或匯入工作。</summary>
     private static int CountRelationships(CodeGraphData graph, string type)
         => graph.Relationships.Count(relationship => relationship.Type.Equals(type, StringComparison.Ordinal));
 }

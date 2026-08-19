@@ -72,14 +72,14 @@ public static class ProviderModelsRequestFactory
         string apiKey,
         string? candidateBaseUrl)
     {
-        var providerType = profile.ProviderType?.Trim().ToLowerInvariant();
+        var protocol = profile.EffectiveProtocol;
         var baseUrl = ResolveBaseUrl(profile, candidateBaseUrl);
 
-        return providerType switch
+        return protocol switch
         {
-            "anthropic" => CreateAnthropicRequest(baseUrl, apiKey),
-            "azure" => CreateAzureRequest(baseUrl, profile.AzureApiVersion, apiKey),
-            "openai" => CreateBearerRequest(baseUrl, apiKey),
+            ProviderProtocol.Anthropic => CreateAnthropicRequest(baseUrl, apiKey),
+            ProviderProtocol.AzureOpenAI => CreateAzureRequest(baseUrl, profile.AzureApiVersion, apiKey),
+            ProviderProtocol.OpenAI or ProviderProtocol.OpenAICompatible => CreateBearerRequest(baseUrl, apiKey),
             _ => throw new InvalidOperationException(
                 $"Provider Profile「{profile.Id}」的類型不受支援。"),
         };
@@ -90,7 +90,7 @@ public static class ProviderModelsRequestFactory
         var value = candidateBaseUrl ?? profile.BaseUrl;
         if (string.IsNullOrWhiteSpace(value))
         {
-            value = string.Equals(profile.ProviderType, "openai", StringComparison.OrdinalIgnoreCase)
+            value = profile.EffectiveProtocol is ProviderProtocol.OpenAI or ProviderProtocol.OpenAICompatible
                 ? "https://api.openai.com/v1"
                 : null;
         }

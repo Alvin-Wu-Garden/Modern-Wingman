@@ -63,21 +63,20 @@ public sealed partial class Neo4jGraphStore
                        CASE WHEN startNode(relationship) = center
                             THEN 'outgoing' ELSE 'incoming' END AS direction
                 ORDER BY
-                    CASE type(relationship)
-                        WHEN 'OPENS' THEN 0
-                        WHEN 'ROUTES_TO' THEN 1
-                        WHEN 'IMPLEMENTED_BY' THEN 2
-                        WHEN 'RENDERS' THEN 3
-                        WHEN 'LOADS_PLUGIN_REPORT' THEN 4
-                        WHEN 'OPENS_CUSTOM_REPORT' THEN 5
-                        WHEN 'CONTAINS_DATA_SOURCE' THEN 6
-                        WHEN 'READS_VIA' THEN 7
-                        WHEN 'WRITES_VIA' THEN 8
-                        WHEN 'USES_DEFINITION' THEN 9
-                        WHEN 'MAPS_TO' THEN 10
-                        WHEN 'QUERIES' THEN 11
-                        WHEN 'CALLS' THEN 12
-                        ELSE 13
+                    CASE
+                        WHEN type(relationship) IN [
+                            'CALLS', 'INSTANTIATES', 'DERIVES_FROM', 'IMPLEMENTS',
+                            'OVERRIDES', 'IMPLEMENTS_METHOD', 'READS', 'WRITES',
+                            'EXECUTES_STORED_PROCEDURE', 'CALLS_STORED_PROCEDURE',
+                            'CALLS_UDF', 'FOREIGN_KEY_TO', 'LINKS_TO_PLUGIN_REPORT',
+                            'LINKS_TO_CUSTOM_REPORT', 'NAVIGATES_TO_ACTION',
+                            'NAVIGATES_TO_CONTROLLER'
+                        ] THEN 0
+                        WHEN type(relationship) IN [
+                            'RENDERS_VIEW', 'RETURNS_VIEW', 'CONTAINS_OBJECT',
+                            'CONTAINS_FRONTEND_ASSET'
+                        ] THEN 1
+                        ELSE 2
                     END,
                     neighbor.id
                 LIMIT $limit
@@ -193,21 +192,20 @@ public sealed partial class Neo4jGraphStore
                           THEN 'outgoing' ELSE 'incoming' END AS direction
                 ORDER BY
                     center.id,
-                    CASE type(relationship)
-                        WHEN 'OPENS' THEN 0
-                        WHEN 'ROUTES_TO' THEN 1
-                        WHEN 'IMPLEMENTED_BY' THEN 2
-                        WHEN 'RENDERS' THEN 3
-                        WHEN 'LOADS_PLUGIN_REPORT' THEN 4
-                        WHEN 'OPENS_CUSTOM_REPORT' THEN 5
-                        WHEN 'CONTAINS_DATA_SOURCE' THEN 6
-                        WHEN 'READS_VIA' THEN 7
-                        WHEN 'WRITES_VIA' THEN 8
-                        WHEN 'USES_DEFINITION' THEN 9
-                        WHEN 'MAPS_TO' THEN 10
-                        WHEN 'QUERIES' THEN 11
-                        WHEN 'CALLS' THEN 12
-                        ELSE 13
+                    CASE
+                        WHEN type(relationship) IN [
+                            'CALLS', 'INSTANTIATES', 'DERIVES_FROM', 'IMPLEMENTS',
+                            'OVERRIDES', 'IMPLEMENTS_METHOD', 'READS', 'WRITES',
+                            'EXECUTES_STORED_PROCEDURE', 'CALLS_STORED_PROCEDURE',
+                            'CALLS_UDF', 'FOREIGN_KEY_TO', 'LINKS_TO_PLUGIN_REPORT',
+                            'LINKS_TO_CUSTOM_REPORT', 'NAVIGATES_TO_ACTION',
+                            'NAVIGATES_TO_CONTROLLER'
+                        ] THEN 0
+                        WHEN type(relationship) IN [
+                            'RENDERS_VIEW', 'RETURNS_VIEW', 'CONTAINS_OBJECT',
+                            'CONTAINS_FRONTEND_ASSET'
+                        ] THEN 1
+                        ELSE 2
                     END,
                     neighbor.id
                 WITH center.id AS centerId,
@@ -225,21 +223,20 @@ public sealed partial class Neo4jGraphStore
                        item.direction AS direction
                 ORDER BY
                     centerId,
-                    CASE type(item.relationship)
-                        WHEN 'OPENS' THEN 0
-                        WHEN 'ROUTES_TO' THEN 1
-                        WHEN 'IMPLEMENTED_BY' THEN 2
-                        WHEN 'RENDERS' THEN 3
-                        WHEN 'LOADS_PLUGIN_REPORT' THEN 4
-                        WHEN 'OPENS_CUSTOM_REPORT' THEN 5
-                        WHEN 'CONTAINS_DATA_SOURCE' THEN 6
-                        WHEN 'READS_VIA' THEN 7
-                        WHEN 'WRITES_VIA' THEN 8
-                        WHEN 'USES_DEFINITION' THEN 9
-                        WHEN 'MAPS_TO' THEN 10
-                        WHEN 'QUERIES' THEN 11
-                        WHEN 'CALLS' THEN 12
-                        ELSE 13
+                    CASE
+                        WHEN type(item.relationship) IN [
+                            'CALLS', 'INSTANTIATES', 'DERIVES_FROM', 'IMPLEMENTS',
+                            'OVERRIDES', 'IMPLEMENTS_METHOD', 'READS', 'WRITES',
+                            'EXECUTES_STORED_PROCEDURE', 'CALLS_STORED_PROCEDURE',
+                            'CALLS_UDF', 'FOREIGN_KEY_TO', 'LINKS_TO_PLUGIN_REPORT',
+                            'LINKS_TO_CUSTOM_REPORT', 'NAVIGATES_TO_ACTION',
+                            'NAVIGATES_TO_CONTROLLER'
+                        ] THEN 0
+                        WHEN type(item.relationship) IN [
+                            'RENDERS_VIEW', 'RETURNS_VIEW', 'CONTAINS_OBJECT',
+                            'CONTAINS_FRONTEND_ASSET'
+                        ] THEN 1
+                        ELSE 2
                     END,
                     item.neighbor.id
                 """,

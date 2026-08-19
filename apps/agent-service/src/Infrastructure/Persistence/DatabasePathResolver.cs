@@ -2,8 +2,16 @@ using Microsoft.Data.Sqlite;
 
 namespace AgentService.Infrastructure.Persistence;
 
+/// <summary>
+/// 集中決定 Modern Wingman 自身 SQLite 資料庫位置，並確保父目錄存在。
+/// 這裡管理的是系統設定與 manifest，不是待解析專案的 SQLite。
+/// </summary>
 public static class DatabasePathResolver
 {
+    /// <summary>取得 EF Core 使用的 SQLite 連線字串。</summary>
+    /// <param name="configuration">可選的 <c>ConnectionStrings:WingmanDb</c> 設定來源。</param>
+    /// <param name="environment">用來區分開發與正式資料庫位置的執行環境。</param>
+    /// <returns>已確保父目錄存在的 SQLite 連線字串。</returns>
     public static string ResolveConnectionString(
         IConfiguration configuration,
         IHostEnvironment environment)
@@ -23,6 +31,9 @@ public static class DatabasePathResolver
         return new SqliteConnectionStringBuilder { DataSource = dbPath }.ToString();
     }
 
+    /// <summary>取得開發環境的系統 SQLite 檔案路徑。</summary>
+    /// <param name="contentRootPath">應用程式 content root，可為 repository、apps 或 agent-service 目錄。</param>
+    /// <returns>正規化後的 <c>apps/wingman_dev.db</c> 路徑。</returns>
     public static string GetDevelopmentDatabasePath(string contentRootPath)
     {
         var root = Path.GetFullPath(contentRootPath);
@@ -39,6 +50,8 @@ public static class DatabasePathResolver
         return Path.GetFullPath(Path.Combine(root, "apps", "wingman_dev.db"));
     }
 
+    /// <summary>取得正式環境的系統 SQLite 檔案路徑。</summary>
+    /// <returns>使用者家目錄下 <c>.Wingman/sqlite/wingman.db</c> 的絕對路徑。</returns>
     public static string GetProductionDatabasePath()
     {
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -67,7 +80,7 @@ public static class DatabasePathResolver
         }
         catch
         {
-            // Let UseSqlite surface invalid connection strings in the normal startup path.
+            // 無效連線字串交由 UseSqlite 在正常啟動流程回報。
         }
     }
 }

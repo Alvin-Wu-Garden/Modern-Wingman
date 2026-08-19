@@ -1,5 +1,7 @@
 using System.Text;
 using AgentService.Application.Contracts;
+using AgentService.Domain.Models;
+using AgentService.Infrastructure.AgentRuntime.Factories;
 using AgentService.Infrastructure.Orchestration;
 using GitHub.Copilot;
 using Microsoft.Agents.AI;
@@ -14,7 +16,7 @@ namespace AgentService.Infrastructure.Providers;
 public sealed class CopilotCompletionService(
     CopilotClientService copilotClientService,
     IModelProviderService providerService,
-    ProviderConfigResolver configResolver,
+    ByokAgentFactory byokAgentFactory,
     CopilotPermissionHandlerFactory permissionHandlerFactory,
     ILogger<CopilotCompletionService> logger) : ILlmCompletionService
 {
@@ -44,13 +46,29 @@ public sealed class CopilotCompletionService(
             return await CompleteAsync(prompt, ct);
 
         var profile = await providerService.GetProfileAsync(providerProfileId, ct);
-        var config = await configResolver.BuildSessionConfigAsync(
-            profile,
-            modelOverride: modelId,
-            ct: ct);
-
-        var client = copilotClientService.GetClient();
-        var agent = client.AsAIAgent(config);
+        AIAgent agent;
+        if (profile.Kind == ProviderKind.CopilotDefault)
+        {
+            // 只有 GitHub Copilot 登入路徑使用 Copilot SDK；BYOK 不再被包裝成
+            // Copilot ProviderConfig，避免背景 Query Rewrite 與主對話走不同協定。
+            var client = copilotClientService.GetClient();
+            agent = client.AsAIAgent(new SessionConfig
+            {
+                Streaming = true,
+                Model = modelId ?? profile.ModelId,
+                OnPermissionRequest = permissionHandlerFactory.Create(),
+            });
+        }
+        else
+        {
+            agent = byokAgentFactory.CreateAgent(new AgentCreationContext
+            {
+                Profile = profile,
+                ModelOverride = modelId,
+                Instructions = "請直接完成下列內部文字處理要求，僅回傳結果。",
+            }) ?? throw new InvalidOperationException(
+                $"Provider Profile「{profile.Id}」尚未設定有效 API Key。請至設定頁完成設定。");
+        }
 
         return await RunCompletionAsync(
             prompt,

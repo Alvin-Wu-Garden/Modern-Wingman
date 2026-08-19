@@ -46,6 +46,28 @@ public sealed class Neo4jLifecycleRegressionTests
         Assert.Empty(logger.Entries);
     }
 
+    [Fact]
+    public async Task DeleteProjectAsync_Neo4j未啟用時_不得假裝刪除成功()
+    {
+        var manifests = DispatchProxy.Create<
+            IProjectIndexManifestStore,
+            UnusedManifestStoreProxy>();
+        await using var store = new Neo4jGraphStore(
+            Options.Create(new GraphRagNeo4jOptions
+            {
+                Disabled = true,
+                Password = "regression-only",
+            }),
+            Options.Create(new GraphRagNeo4jRuntimeOptions { Mode = "disabled" }),
+            manifests,
+            new CollectingLogger<Neo4jGraphStore>());
+
+        var exception = await Assert.ThrowsAsync<GraphStoreException>(
+            () => store.DeleteProjectAsync("project-1"));
+
+        Assert.Equal(GraphStoreFailureKind.Unavailable, exception.FailureKind);
+    }
+
     private static int ReserveUnusedLoopbackPort()
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);

@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import {
   listProviders,
   listProviderModels,
+  ProviderModelsRequestError,
   type ProviderInfo,
   type ModelGroup,
 } from '@/services/agent-api/client'
@@ -18,6 +19,7 @@ interface Props {
 
 const PREFERRED_MODEL_ID = 'claude-sonnet-4.6'
 const LATEST_OPENAI_MODEL_ID = 'gpt-5.6'
+const COPILOT_STARTUP_RETRY_DELAYS_MS = [500, 1000, 1500, 2500, 3500, 5000]
 
 function isVerifiedProvider(provider: ProviderInfo): boolean {
   // 後端 /api/providers 已一次回傳狀態；選擇器不再逐一呼叫 key-status。
@@ -126,32 +128,63 @@ export function ProviderModelPicker({
 
     const controller = new AbortController()
     let cancelled = false
+    let retryTimer: number | null = null
     setLoadingModels(true)
     setModelError(null)
     setModelGroups([])
     onModelChange(null)
 
-    listProviderModels(selectedProviderId, controller.signal)
-      .then((groups) => {
-        if (cancelled) return
-        modelCacheRef.current.set(selectedProviderId, groups)
-        setModelGroups(groups)
-        onModelChange(selectDefaultModel(groups, providers.find((provider) => provider.id === selectedProviderId)))
-      })
-      .catch((error) => {
-        if (!cancelled && !controller.signal.aborted) {
+    const loadModels = (attempt: number) => {
+      void listProviderModels(selectedProviderId, controller.signal)
+        .then((groups) => {
+          if (cancelled) return
+
+          if (groups.length === 0) {
+            // 空清單可能是上游暫時失敗，不得快取成整個元件生命週期都無模型。
+            setModelGroups([])
+            setModelError('供應商沒有回傳可用模型，請點擊重新載入。')
+            onModelChange(null)
+            setLoadingModels(false)
+            return
+          }
+
+          modelCacheRef.current.set(selectedProviderId, groups)
+          setModelGroups(groups)
+          onModelChange(selectDefaultModel(groups, providers.find((provider) => provider.id === selectedProviderId)))
+          setLoadingModels(false)
+        })
+        .catch((error) => {
+          if (cancelled || controller.signal.aborted) return
+
+          const shouldRetryCopilotStartup =
+            error instanceof ProviderModelsRequestError
+            && error.code === 'copilot_runtime_not_ready'
+            && error.retryable
+            && attempt < COPILOT_STARTUP_RETRY_DELAYS_MS.length
+
+          if (shouldRetryCopilotStartup) {
+            retryTimer = window.setTimeout(
+              () => loadModels(attempt + 1),
+              COPILOT_STARTUP_RETRY_DELAYS_MS[attempt],
+            )
+            return
+          }
+
           setModelGroups([])
           setModelError(error instanceof Error ? error.message : '無法載入模型。')
           onModelChange(null)
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingModels(false)
-      })
+          setLoadingModels(false)
+        })
+    }
+
+    loadModels(0)
 
     return () => {
       cancelled = true
       controller.abort()
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer)
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelReloadNonce, providersLoaded, selectedProviderId, providers])

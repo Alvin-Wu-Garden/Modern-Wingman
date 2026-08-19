@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.CodeAnalysis;
@@ -12,15 +11,22 @@ namespace AgentService.Modules.GraphRAG;
 /// 專案原始碼的共用唯讀索引。
 ///
 /// 索引在同一個專案根目錄的多次工具呼叫之間共用：文字搜尋使用三字元倒排索引
-/// 先縮小候選檔案，C# 符號搜尋則重用每個檔案建立過的 Roslyn 語法資料，避免每次
-/// Agent 呼叫都重新讀取全部檔案及逐行掃描。索引有記憶體上限，並只在工具查詢時惰性建立。
+/// 先縮小候選檔案，C# 符號搜尋則重用已合併的 Roslyn 符號位置，避免每次 Agent
+/// 呼叫都重新解析全部檔案。索引不保存整份來源內容，實際命中仍回讀本機檔案確認。
 /// </summary>
 internal sealed class ProjectSourceIndex
 {
-    private const int MaximumSearchFileBytes = 4 * 1024 * 1024;
-    private const long MaximumIndexedSourceBytes = 64 * 1024 * 1024;
+    // 單一原始碼檔案超過 16 MiB 時不建立 trigram 與 Roslyn 索引，
+    // 但文字搜尋仍會以串流方式掃描，避免大型 SQL 或產生檔形成漏搜。
+    private const int MaximumSearchFileBytes = 16 * 1024 * 1024;
+    // 索引建立以 CPU 與磁碟都能承受的有界平行度執行。搜尋只平行讀取 trigram
+    // 篩選後的候選檔案，不會在每次工具呼叫重新掃描整個專案。
+    private static readonly int IndexBuildConcurrency = Math.Clamp(
+        Environment.ProcessorCount,
+        2,
+        6);
+    private const int CandidateSearchConcurrency = 8;
     private const int TrigramLength = 3;
-    private static readonly TimeSpan IndexLifetime = TimeSpan.FromSeconds(30);
     private static readonly HashSet<string> SearchableExtensions = new(
         [
             ".cs", ".csproj", ".sln",
@@ -36,13 +42,14 @@ internal sealed class ProjectSourceIndex
             "packages", "dist", "build", "out", "target", "vendor",
         ],
         StringComparer.OrdinalIgnoreCase);
-    private static readonly ConcurrentDictionary<string, Lazy<Task<ProjectSourceIndex>>> Indexes = new(
-        StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<SourceIndexCacheKey, SourceIndexCacheEntry> Indexes = new();
+    private static long _cacheSequence;
 
     private readonly IReadOnlyList<IndexedFile> _files;
-    private readonly IReadOnlyDictionary<string, int> _fileNumbers;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<int>> _trigramPostings;
+    private readonly IReadOnlyList<int> _unindexedFileNumbers;
     private readonly string _snapshotIdentity;
+    private readonly CancellationToken _lifetimeToken;
     private readonly object _symbolGate = new();
     private Task _symbolIndexTask = Task.CompletedTask;
     private bool _symbolIndexStarted;
@@ -50,127 +57,112 @@ internal sealed class ProjectSourceIndex
 
     private ProjectSourceIndex(
         IReadOnlyList<IndexedFile> files,
-        IReadOnlyDictionary<string, int> fileNumbers,
         IReadOnlyDictionary<string, IReadOnlyList<int>> trigramPostings,
-        string snapshotIdentity)
+        IReadOnlyList<int> unindexedFileNumbers,
+        string snapshotIdentity,
+        CancellationToken lifetimeToken)
     {
         _files = files;
-        _fileNumbers = fileNumbers;
         _trigramPostings = trigramPostings;
+        _unindexedFileNumbers = unindexedFileNumbers;
         _snapshotIdentity = snapshotIdentity;
+        _lifetimeToken = lifetimeToken;
     }
 
-    /// <summary>目前索引包含的檔案數；超過大小限制而未載入的檔案也會列在清單中。</summary>
-    public int FileCount => _files.Count;
-
-    /// <summary>目前實際載入內容的檔案數。</summary>
-    public int IndexedFileCount => _files.Count(file => file.Content is not null);
-
-    /// <summary>目前索引建立時間，供惰性快取生命週期判斷。</summary>
-    public DateTime CreatedAtUtc { get; } = DateTime.UtcNow;
-
     /// <summary>
-    /// 取得單一專案的共享索引。相同 root 的併發請求只會建立一次索引工作。
+    /// 取得單一專案版本的共享索引。相同 root 與 snapshot 的併發請求
+    /// 只會建立一次索引工作。
     /// </summary>
+    /// <param name="rootPath">專案原始碼根目錄。</param>
+    /// <param name="expectedFiles">固定 Graph 版本的相對路徑與 SHA-256；未提供時使用當前檔案系統。</param>
+    /// <param name="cancellationToken">取消當前等待的 token，不會取消其他呼叫者共用的建立工作。</param>
+    /// <returns>與指定專案版本一致的唯讀索引。</returns>
+    /// <exception cref="InvalidOperationException">檔案已刪除、內容與 snapshot 不一致，或 snapshot 路徑超出專案根目錄。</exception>
     public static async Task<ProjectSourceIndex> GetOrCreateAsync(
         string rootPath,
         IReadOnlyDictionary<string, string>? expectedFiles = null,
         CancellationToken cancellationToken = default)
     {
         rootPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
-        while (Indexes.TryGetValue(rootPath, out var existing))
-        {
-            ProjectSourceIndex index;
-            try
-            {
-                index = await existing.Value.WaitAsync(cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch
-            {
-                // 建置失敗不可把 faulted Lazy 永久留在全域快取；下一次工具呼叫
-                // 應能重新建立索引，而不是每次都重播同一個例外。
-                Indexes.TryRemove(new KeyValuePair<string, Lazy<Task<ProjectSourceIndex>>>(
-                    rootPath,
-                    existing));
-                throw;
-            }
-            if (DateTime.UtcNow - index.CreatedAtUtc <= IndexLifetime &&
-                index._snapshotIdentity == BuildSnapshotIdentity(expectedFiles))
-                return index;
-            Indexes.TryRemove(new KeyValuePair<string, Lazy<Task<ProjectSourceIndex>>>(
-                rootPath,
-                existing));
-        }
-
-        var created = new Lazy<Task<ProjectSourceIndex>>(
-            () => BuildAsync(rootPath, expectedFiles),
-            LazyThreadSafetyMode.ExecutionAndPublication);
-        var selected = Indexes.GetOrAdd(rootPath, created);
+        var snapshotIdentity = BuildSnapshotIdentity(expectedFiles);
+        var key = new SourceIndexCacheKey(rootPath, snapshotIdentity);
+        var created = new SourceIndexCacheEntry(
+            Interlocked.Increment(ref _cacheSequence),
+            token => BuildAsync(rootPath, expectedFiles, token));
+        var selected = Indexes.GetOrAdd(key, created);
+        if (!ReferenceEquals(selected, created))
+            created.Dispose();
+        var selectedTask = selected.Build.Value;
+        _ = selectedTask.ContinueWith(
+            task => RemoveFailedBuild(key, selected, task),
+            CancellationToken.None,
+            TaskContinuationOptions.NotOnRanToCompletion |
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
         ProjectSourceIndex result;
         try
         {
-            result = await selected.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+            result = await selectedTask.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
+            if (!cancellationToken.IsCancellationRequested)
+                RemoveEntry(key, selected);
             throw;
         }
         catch
         {
-            Indexes.TryRemove(new KeyValuePair<string, Lazy<Task<ProjectSourceIndex>>>(
-                rootPath,
-                selected));
+            RemoveEntry(key, selected);
             throw;
         }
-        if (DateTime.UtcNow - result.CreatedAtUtc > IndexLifetime)
-        {
-            Indexes.TryRemove(new KeyValuePair<string, Lazy<Task<ProjectSourceIndex>>>(
-                rootPath,
-                selected));
-            return await GetOrCreateAsync(rootPath, expectedFiles, cancellationToken).ConfigureAwait(false);
-        }
+        PruneOldSnapshots(key);
         return result;
     }
 
-    /// <summary>
-    /// 只取得已完成且仍有效的索引，不觸發全專案建立工作。
-    /// 讀取單一檔案區段時優先使用此方法，避免一次讀入整個專案。
-    /// </summary>
-    public static async Task<ProjectSourceIndex?> GetExistingAsync(
-        string rootPath,
-        CancellationToken cancellationToken = default)
+    private static void RemoveFailedBuild(
+        SourceIndexCacheKey key,
+        SourceIndexCacheEntry entry,
+        Task<ProjectSourceIndex> failedTask)
     {
-        rootPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
-        if (!Indexes.TryGetValue(rootPath, out var lazy) || !lazy.IsValueCreated)
-            return null;
-        var task = lazy.Value;
-        if (!task.IsCompletedSuccessfully)
-            return null;
-        var value = await task.WaitAsync(cancellationToken).ConfigureAwait(false);
-        if (DateTime.UtcNow - value.CreatedAtUtc > IndexLifetime)
-        {
-            Indexes.TryRemove(new KeyValuePair<string, Lazy<Task<ProjectSourceIndex>>>(
-                rootPath,
-                lazy));
-            return null;
-        }
-        return value;
+        _ = failedTask.Exception;
+        RemoveEntry(key, entry);
     }
 
     /// <summary>
-    /// 專案刪除時立即移除該根目錄的惰性索引；不等待 30 秒生命週期，
-    /// 確保已刪專案的來源內容不再留在服務程序記憶體。
+    /// 刪除專案時，明確移除該根目錄的所有版本索引。
+    /// 系統不使用 TTL 或背景檔案偵測，其餘回收由 current／previous 保留策略處理。
     /// </summary>
+    /// <param name="rootPath">要從記憶體移除的專案根目錄。</param>
     public static void Forget(string rootPath)
     {
         if (string.IsNullOrWhiteSpace(rootPath)) return;
         var normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
-        Indexes.TryRemove(normalized, out _);
+        foreach (var pair in Indexes.Where(pair =>
+                     pair.Key.RootPath.Equals(normalized, StringComparison.OrdinalIgnoreCase)))
+        {
+            RemoveEntry(pair.Key, pair.Value);
+        }
+    }
+
+    /// <summary>每個專案只保留最新兩份來源索引，與 Graph 的 current／previous 保留策略一致。</summary>
+    private static void PruneOldSnapshots(SourceIndexCacheKey currentKey)
+    {
+        var staleEntries = Indexes
+            .Where(pair => pair.Key.RootPath.Equals(
+                currentKey.RootPath,
+                StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(pair => pair.Value.Sequence)
+            .Skip(2)
+            .ToArray();
+        foreach (var pair in staleEntries)
+            RemoveEntry(pair.Key, pair.Value);
+    }
+
+    private static void RemoveEntry(SourceIndexCacheKey key, SourceIndexCacheEntry entry)
+    {
+        if (!Indexes.TryRemove(new KeyValuePair<SourceIndexCacheKey, SourceIndexCacheEntry>(key, entry)))
+            return;
+        entry.Dispose();
     }
 
     /// <summary>文字搜尋的結果及實際檢查的檔案統計。</summary>
@@ -198,105 +190,67 @@ internal sealed class ProjectSourceIndex
         string? Container,
         string Preview);
 
-    /// <summary>從索引讀取檔案區段；檔案不存在或尚未被索引時回傳 null。</summary>
-    public sealed record FileRangeResult(
-        IReadOnlyList<FileLine> Lines,
-        bool HasMore);
-
-    /// <summary>一基行號的檔案內容。</summary>
-    public sealed record FileLine(int Line, string Text);
-
     /// <summary>
-    /// 搜尋專案文字。長查詢會以三字元倒排索引縮小檔案候選，只有候選檔案需要逐行比對；
-    /// 小於三字元的查詢仍會受有界索引檔案清單限制，並回報被大小上限略過的檔案數。
+    /// 搜尋專案文字。三字元倒排索引只負責選出候選檔案；真正命中仍從本機實體檔案
+    /// 逐行確認，避免把索引內容誤當成最後答案。候選分批平行讀取，結果再按檔案與
+    /// 行號確定性合併，因此不會因 worker 完成順序改變回答證據。
     /// </summary>
-    public TextSearchResult SearchText(
+    public async Task<TextSearchResult> SearchTextAsync(
         string query,
         string? extension,
         int maximumResults,
         CancellationToken cancellationToken)
     {
         var normalizedQuery = query.Trim();
-        var candidates = FindTextCandidates(normalizedQuery);
-        var matches = new List<TextMatch>(Math.Min(maximumResults, 100));
+        var candidates = FindTextCandidates(normalizedQuery)
+            .Where(fileNumber => extension is null ||
+                Path.GetExtension(_files[fileNumber].FullPath).Equals(
+                    extension,
+                    StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        var matches = new List<TextMatch>(Math.Min(maximumResults + 1, 101));
         var filesScanned = 0;
-        foreach (var fileNumber in candidates)
+        var filesSkipped = 0;
+
+        // 以固定大小批次執行：同一批最多八個磁碟讀取，批次之間依路徑順序合併。
+        // 這兼顧 SSD 與網路磁碟，不會像無界 Task.WhenAll 一次開啟數千個檔案。
+        for (var offset = 0;
+             offset < candidates.Length && matches.Count <= maximumResults;
+             offset += CandidateSearchConcurrency)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var file = _files[fileNumber];
-            if (extension is not null &&
-                !Path.GetExtension(file.FullPath).Equals(extension, StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (file.Content is null)
-                continue;
-
-            filesScanned++;
-            for (var index = 0; index < file.Lines.Length; index++)
+            var batch = candidates
+                .Skip(offset)
+                .Take(CandidateSearchConcurrency)
+                .Select(fileNumber => ScanTextFileAsync(
+                    _files[fileNumber],
+                    normalizedQuery,
+                    maximumResults + 1,
+                    cancellationToken))
+                .ToArray();
+            var results = await Task.WhenAll(batch).ConfigureAwait(false);
+            foreach (var result in results)
             {
-                var line = file.Lines[index];
-                var column = line.IndexOf(normalizedQuery, StringComparison.OrdinalIgnoreCase);
-                if (column < 0)
-                    continue;
-                matches.Add(new TextMatch(
-                    file.FullPath,
-                    index + 1,
-                    column + 1,
-                    Truncate(line.Trim(), 500)));
-                if (matches.Count >= maximumResults)
+                if (result.Skipped)
                 {
-                    return new TextSearchResult(
-                        matches,
-                        filesScanned,
-                        _files.Count(candidate => candidate.Content is null),
-                        true);
+                    filesSkipped++;
+                    continue;
+                }
+                filesScanned++;
+                foreach (var match in result.Matches)
+                {
+                    if (matches.Count > maximumResults)
+                        break;
+                    matches.Add(match);
                 }
             }
         }
 
         return new TextSearchResult(
-            matches,
+            matches.Take(maximumResults).ToArray(),
             filesScanned,
-            _files.Count(candidate => candidate.Content is null),
-            false);
-    }
-
-    /// <summary>
-    /// 由索引讀取檔案區段。已建立內容快取時不再從第一行讀到 startLine，
-    /// 讓讀取大型檔案的高行號區段保持有界且快速。
-    /// </summary>
-    public FileRangeResult? ReadFileRange(
-        string fullPath,
-        int startLine,
-        int lineCount)
-    {
-        if (!_fileNumbers.TryGetValue(fullPath, out var fileNumber))
-            return null;
-        var file = _files[fileNumber];
-        if (file.Content is null)
-            return null;
-        try
-        {
-            var info = new FileInfo(fullPath);
-            // 讀取快取行號前做一次輕量 metadata 驗證，避免工具回傳已被修改的舊內容。
-            if (!info.Exists ||
-                info.Length != file.ByteLength ||
-                info.LastWriteTimeUtc != file.LastWriteUtc)
-                return null;
-        }
-        catch (IOException)
-        {
-            return null;
-        }
-
-        var lines = file.Lines;
-        if (startLine > lines.Length)
-            return new FileRangeResult([], false);
-        var first = startLine - 1;
-        var count = Math.Min(lineCount, lines.Length - first);
-        var result = new FileLine[count];
-        for (var index = 0; index < count; index++)
-            result[index] = new FileLine(startLine + index, lines[first + index]);
-        return new FileRangeResult(result, first + count < lines.Length);
+            filesSkipped,
+            matches.Count > maximumResults);
     }
 
     /// <summary>以已建立的 Roslyn 符號倒排索引尋找 C# 定義及引用。</summary>
@@ -316,11 +270,11 @@ internal sealed class ProjectSourceIndex
         {
             return new SymbolSearchResult(
                 [],
-                _files.Count(file => file.IsCSharp && file.Content is not null),
+                _files.Count(file => file.IsCSharp && file.IsIndexed),
                 false);
         }
 
-        var matches = new List<SymbolMatch>(Math.Min(maximumResults, occurrences.Count));
+        var matches = new List<SymbolMatch>(Math.Min(maximumResults + 1, occurrences.Count));
         foreach (var occurrence in occurrences)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -337,14 +291,57 @@ internal sealed class ProjectSourceIndex
                 occurrence.Classification,
                 occurrence.Container,
                 occurrence.Preview));
-            if (matches.Count >= maximumResults)
+            if (matches.Count > maximumResults)
                 break;
         }
 
         return new SymbolSearchResult(
-            matches,
-            _files.Count(file => file.IsCSharp && file.Content is not null),
-            matches.Count >= maximumResults);
+            matches.Take(maximumResults).ToArray(),
+            _files.Count(file => file.IsCSharp && file.IsIndexed),
+            matches.Count > maximumResults);
+    }
+
+    /// <summary>從單一候選檔案確認 literal 命中；檔案過大或無法讀取時回報 skipped。</summary>
+    private static async Task<TextFileScanResult> ScanTextFileAsync(
+        IndexedFile file,
+        string query,
+        int maximumResults,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var stream = new FileStream(
+                file.FullPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await VerifyStreamHashAsync(file, stream, cancellationToken).ConfigureAwait(false);
+            using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true);
+            var matches = new List<TextMatch>(Math.Min(maximumResults, 100));
+            var lineNumber = 0;
+            while (await reader.ReadLineAsync(cancellationToken) is { } line)
+            {
+                lineNumber++;
+                var column = line.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+                if (column < 0)
+                    continue;
+                matches.Add(new TextMatch(
+                    file.FullPath,
+                    lineNumber,
+                    column + 1,
+                    Truncate(line.Trim(), 500)));
+                if (matches.Count >= maximumResults)
+                    break;
+            }
+            return new TextFileScanResult(matches, false);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or DecoderFallbackException)
+        {
+            return new TextFileScanResult([], true);
+        }
     }
 
     private IReadOnlyList<int> FindTextCandidates(string query)
@@ -357,13 +354,18 @@ internal sealed class ProjectSourceIndex
         foreach (var trigram in GetTrigrams(normalized))
         {
             if (!_trigramPostings.TryGetValue(trigram, out var postings))
-                return [];
+                return _unindexedFileNumbers;
             candidates ??= new HashSet<int>(postings);
             if (candidates.Count == 0)
-                return [];
+                return _unindexedFileNumbers;
             candidates.IntersectWith(postings);
         }
-        return candidates?.OrderBy(value => value).ToArray() ?? [];
+        if (_unindexedFileNumbers.Count > 0)
+        {
+            candidates ??= [];
+            candidates.UnionWith(_unindexedFileNumbers);
+        }
+        return candidates?.OrderBy(value => value).ToArray() ?? _unindexedFileNumbers;
     }
 
     private async Task EnsureSymbolIndexAsync(CancellationToken cancellationToken)
@@ -374,39 +376,104 @@ internal sealed class ProjectSourceIndex
             if (!_symbolIndexStarted)
             {
                 _symbolIndexStarted = true;
-                _symbolIndexTask = BuildSymbolIndexAsync();
+                _symbolIndexTask = BuildSymbolIndexAsync(_lifetimeToken);
+                var startedTask = _symbolIndexTask;
+                _ = startedTask.ContinueWith(
+                    _ => ResetFailedSymbolIndex(startedTask),
+                    CancellationToken.None,
+                    TaskContinuationOptions.NotOnRanToCompletion |
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
             }
             build = _symbolIndexTask;
         }
         await build.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private Task BuildSymbolIndexAsync() => Task.Run(() =>
+    /// <summary>只有真正失敗或取消的共享工作能重設狀態；單一等待者取消不影響其他呼叫。</summary>
+    private void ResetFailedSymbolIndex(Task failedTask)
     {
-        var symbols = new Dictionary<string, List<SymbolOccurrence>>(StringComparer.Ordinal);
-        foreach (var file in _files.Where(file => file.IsCSharp && file.Content is not null))
+        _ = failedTask.Exception;
+        lock (_symbolGate)
         {
-            var tree = CSharpSyntaxTree.ParseText(file.Content!);
-            var root = tree.GetRoot();
-            file.SyntaxTree = tree;
-            foreach (var token in root.DescendantTokens())
+            if (ReferenceEquals(_symbolIndexTask, failedTask))
             {
-                if (!token.IsKind(SyntaxKind.IdentifierToken))
-                    continue;
-                var occurrence = new SymbolOccurrence(
-                    file.FullPath,
-                    tree.GetLineSpan(token.Span).StartLinePosition.Line + 1,
-                    tree.GetLineSpan(token.Span).StartLinePosition.Character + 1,
-                    ClassifyIdentifier(token),
-                    GetContainerName(token.Parent),
-                    Truncate(token.Parent?.Parent?.ToString()
-                        .ReplaceLineEndings(" ").Trim() ?? token.ValueText, 500));
-                if (!symbols.TryGetValue(token.ValueText, out var list))
+                _symbolIndexStarted = false;
+                _symbolIndexTask = Task.CompletedTask;
+                _symbols = null;
+            }
+        }
+    }
+
+    /// <summary>有界平行解析 C# 檔案，再依檔案順序合併，兼顧速度與結果確定性。</summary>
+    private async Task BuildSymbolIndexAsync(CancellationToken cancellationToken)
+    {
+        var csharpFiles = _files
+            .Where(file => file.IsCSharp && file.IsIndexed)
+            .ToArray();
+        var fileOccurrences = new IReadOnlyList<(string Identifier, SymbolOccurrence Occurrence)>?[csharpFiles.Length];
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, csharpFiles.Length),
+            new ParallelOptions
+            {
+                CancellationToken = cancellationToken,
+                MaxDegreeOfParallelism = IndexBuildConcurrency,
+            },
+            async (fileNumber, workerCancellationToken) =>
+            {
+                var file = csharpFiles[fileNumber];
+                try
+                {
+                    var content = await ReadVerifiedTextAsync(
+                        file,
+                        workerCancellationToken).ConfigureAwait(false);
+                    var tree = CSharpSyntaxTree.ParseText(
+                        content,
+                        cancellationToken: workerCancellationToken);
+                    var root = await tree.GetRootAsync(workerCancellationToken).ConfigureAwait(false);
+                    var occurrences = new List<(string, SymbolOccurrence)>();
+                    foreach (var token in root.DescendantTokens())
+                    {
+                        workerCancellationToken.ThrowIfCancellationRequested();
+                        if (!token.IsKind(SyntaxKind.IdentifierToken))
+                            continue;
+                        var position = tree.GetLineSpan(token.Span).StartLinePosition;
+                        occurrences.Add((
+                            token.ValueText,
+                            new SymbolOccurrence(
+                                file.FullPath,
+                                position.Line + 1,
+                                position.Character + 1,
+                                ClassifyIdentifier(token),
+                                GetContainerName(token.Parent),
+                                Truncate(token.Parent?.Parent?.ToString()
+                                    .ReplaceLineEndings(" ").Trim() ?? token.ValueText, 500))));
+                    }
+                    fileOccurrences[fileNumber] = occurrences;
+                }
+                catch (OperationCanceledException) when (workerCancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException or DecoderFallbackException)
+                {
+                    // 單一檔案在索引後被鎖定或刪除時只略過該檔案，不讓整個符號工具失敗。
+                    fileOccurrences[fileNumber] = [];
+                }
+            }).ConfigureAwait(false);
+
+        var symbols = new Dictionary<string, List<SymbolOccurrence>>(StringComparer.Ordinal);
+        foreach (var occurrences in fileOccurrences)
+        {
+            foreach (var item in occurrences ?? [])
+            {
+                if (!symbols.TryGetValue(item.Identifier, out var list))
                 {
                     list = [];
-                    symbols[token.ValueText] = list;
+                    symbols[item.Identifier] = list;
                 }
-                list.Add(occurrence);
+                list.Add(item.Occurrence);
             }
         }
 
@@ -417,92 +484,59 @@ internal sealed class ProjectSourceIndex
                 pair => (IReadOnlyList<SymbolOccurrence>)pair.Value,
                 StringComparer.Ordinal);
         }
-    });
+    }
 
     private static async Task<ProjectSourceIndex> BuildAsync(
         string rootPath,
-        IReadOnlyDictionary<string, string>? expectedFiles)
+        IReadOnlyDictionary<string, string>? expectedFiles,
+        CancellationToken cancellationToken)
     {
-        var files = new List<IndexedFile>();
-        var fileNumbers = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var postings = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
-        long indexedBytes = 0;
+        // 先建立確定性路徑清單，再平行處理內容；合併一律依陣列順序執行，
+        // 因此相同 snapshot 不會因 worker 排程不同而改變 postings 順序。
         var sourceFiles = expectedFiles is null
             ? EnumerateSearchableFiles(rootPath)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray()
             : expectedFiles.Keys
                 .Where(relativePath => SearchableExtensions.Contains(Path.GetExtension(relativePath)))
                 .Select(relativePath => Path.GetFullPath(Path.Combine(rootPath, relativePath)))
-                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase);
-        foreach (var fullPath in sourceFiles)
+                .Where(path => IsInsideRoot(rootPath, path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        var builtFiles = new IndexedFileBuildResult?[sourceFiles.Length];
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, sourceFiles.Length),
+            new ParallelOptions
+            {
+                CancellationToken = cancellationToken,
+                MaxDegreeOfParallelism = IndexBuildConcurrency,
+            },
+            async (fileNumber, workerCancellationToken) =>
+            {
+                builtFiles[fileNumber] = await BuildFileAsync(
+                    rootPath,
+                    sourceFiles[fileNumber],
+                    expectedFiles,
+                    workerCancellationToken).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+        var files = new List<IndexedFile>(sourceFiles.Length);
+        var postings = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+        var unindexedFileNumbers = new List<int>();
+        foreach (var built in builtFiles)
         {
-            FileInfo info;
-            try
+            if (built is null)
+                continue;
+            var fileNumber = files.Count;
+            files.Add(built.File);
+            if (!built.File.IsIndexed)
             {
-                info = new FileInfo(fullPath);
-                if (!info.Exists)
-                    continue;
-            }
-            catch (IOException)
-            {
+                unindexedFileNumbers.Add(fileNumber);
                 continue;
             }
-
-            var isCSharp = Path.GetExtension(fullPath).Equals(".cs", StringComparison.OrdinalIgnoreCase);
-            string? content = null;
-            ImmutableArray<string> lines = [];
-            if (info.Length <= MaximumSearchFileBytes &&
-                indexedBytes + info.Length <= MaximumIndexedSourceBytes)
+            foreach (var trigram in built.Trigrams)
             {
-                try
-                {
-                    if (expectedFiles is not null)
-                    {
-                        var relativePath = Path.GetRelativePath(rootPath, fullPath)
-                            .Replace('\\', '/');
-                        if (!expectedFiles.TryGetValue(relativePath, out var expectedHash))
-                            throw new InvalidOperationException(
-                                $"檔案不屬於目前圖譜版本：{relativePath}；請重新索引。");
-                        await using var stream = new FileStream(
-                            fullPath,
-                            FileMode.Open,
-                            FileAccess.Read,
-                            FileShare.ReadWrite | FileShare.Delete,
-                            64 * 1024,
-                            FileOptions.Asynchronous | FileOptions.SequentialScan);
-                        var actualHash = Convert.ToHexStringLower(
-                            await SHA256.HashDataAsync(stream).ConfigureAwait(false));
-                        if (!actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
-                            throw new InvalidOperationException(
-                                $"檔案已在索引後變更：{relativePath}；請重新索引。");
-                    }
-                    content = await File.ReadAllTextAsync(fullPath).ConfigureAwait(false);
-                    lines = SplitLines(content);
-                    indexedBytes += Encoding.UTF8.GetByteCount(content);
-                }
-                catch (Exception exception) when (
-                    exception is IOException or UnauthorizedAccessException or DecoderFallbackException)
-                {
-                    content = null;
-                }
-            }
-
-            var file = new IndexedFile(
-                fullPath,
-                info.LastWriteTimeUtc,
-                info.Length,
-                isCSharp,
-                content,
-                lines);
-            fileNumbers[fullPath] = files.Count;
-            files.Add(file);
-            if (content is null)
-                continue;
-            var fileNumber = files.Count - 1;
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var trigram in GetTrigrams(content.ToUpperInvariant()))
-            {
-                if (!seen.Add(trigram))
-                    continue;
                 if (!postings.TryGetValue(trigram, out var list))
                 {
                     list = [];
@@ -514,21 +548,176 @@ internal sealed class ProjectSourceIndex
 
         return new ProjectSourceIndex(
             files,
-            fileNumbers,
             postings.ToDictionary(
                 pair => pair.Key,
                 pair => (IReadOnlyList<int>)pair.Value.ToArray(),
                 StringComparer.Ordinal),
-            BuildSnapshotIdentity(expectedFiles));
+            unindexedFileNumbers,
+            BuildSnapshotIdentity(expectedFiles),
+            cancellationToken);
     }
 
+    /// <summary>
+    /// 單一 worker 只讀取檔案一次：同一份 bytes 同時計算 SHA-256、解碼文字並建立
+    /// trigram，避免舊實作先雜湊再 ReadAllText 造成雙倍磁碟 I/O。
+    /// </summary>
+    private static async Task<IndexedFileBuildResult?> BuildFileAsync(
+        string rootPath,
+        string fullPath,
+        IReadOnlyDictionary<string, string>? expectedFiles,
+        CancellationToken cancellationToken)
+    {
+        FileInfo info;
+        try
+        {
+            info = new FileInfo(fullPath);
+            if (!info.Exists)
+            {
+                if (expectedFiles is not null)
+                    throw CreateSnapshotFileUnavailableException(rootPath, fullPath);
+                return null;
+            }
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            if (expectedFiles is not null)
+                throw CreateSnapshotFileUnavailableException(rootPath, fullPath, exception);
+            return null;
+        }
+
+        var relativePath = Path.GetRelativePath(rootPath, fullPath).Replace('\\', '/');
+        string? expectedHash = null;
+        if (expectedFiles is not null &&
+            !expectedFiles.TryGetValue(relativePath, out expectedHash))
+        {
+            throw new InvalidOperationException(
+                $"檔案不屬於目前圖譜版本：{relativePath}；請重新索引。");
+        }
+
+        var isCSharp = Path.GetExtension(fullPath)
+            .Equals(".cs", StringComparison.OrdinalIgnoreCase);
+        if (info.Length > MaximumSearchFileBytes)
+        {
+            return new IndexedFileBuildResult(
+                new IndexedFile(fullPath, isCSharp, HasTrigramIndex: false, expectedHash),
+                new HashSet<string>(StringComparer.Ordinal));
+        }
+
+        try
+        {
+            var bytes = await File.ReadAllBytesAsync(fullPath, cancellationToken)
+                .ConfigureAwait(false);
+            if (expectedFiles is not null)
+            {
+                var actualHash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+                if (!actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        $"檔案已在索引後變更：{relativePath}；請重新索引。");
+            }
+
+            var content = DecodeText(bytes);
+            var trigrams = GetTrigrams(content.ToUpperInvariant())
+                .ToHashSet(StringComparer.Ordinal);
+            return new IndexedFileBuildResult(
+                new IndexedFile(fullPath, isCSharp, HasTrigramIndex: true, expectedHash),
+                trigrams);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or DecoderFallbackException)
+        {
+            if (expectedFiles is not null)
+                throw CreateSnapshotFileUnavailableException(rootPath, fullPath, exception);
+            return new IndexedFileBuildResult(
+                new IndexedFile(fullPath, isCSharp, HasTrigramIndex: false, expectedHash),
+                new HashSet<string>(StringComparer.Ordinal));
+        }
+    }
+
+    private static InvalidOperationException CreateSnapshotFileUnavailableException(
+        string rootPath,
+        string fullPath,
+        Exception? innerException = null)
+    {
+        var relativePath = Path.GetRelativePath(rootPath, fullPath).Replace('\\', '/');
+        return new InvalidOperationException(
+            $"圖譜版本的檔案已刪除或無法讀取：{relativePath}；請重新索引。",
+            innerException);
+    }
+
+    /// <summary>從實體檔案讀取文字，並在固定 Graph 版本下先驗證內容雜湊。</summary>
+    private static async Task<string> ReadVerifiedTextAsync(
+        IndexedFile file,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(
+            file.FullPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await VerifyStreamHashAsync(file, stream, cancellationToken).ConfigureAwait(false);
+        using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true);
+        return await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task VerifyStreamHashAsync(
+        IndexedFile file,
+        Stream stream,
+        CancellationToken cancellationToken)
+    {
+        if (file.ExpectedHash is not null)
+        {
+            var actualHash = Convert.ToHexStringLower(
+                await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
+            if (!actualHash.Equals(file.ExpectedHash, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"檔案已在索引後變更：{file.FullPath}；請重新索引。");
+            }
+        }
+        stream.Position = 0;
+    }
+
+    private static string DecodeText(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var reader = new StreamReader(
+            stream,
+            Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: true);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>將檔案清單壓成固定長度識別碼，避免把數千個路徑與雜湊長期保留成大字串。</summary>
     private static string BuildSnapshotIdentity(
-        IReadOnlyDictionary<string, string>? expectedFiles) =>
-        expectedFiles is null
-            ? "live"
-            : string.Join('\n', expectedFiles
-                .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
-                .Select(pair => $"{pair.Key}\0{pair.Value}"));
+        IReadOnlyDictionary<string, string>? expectedFiles)
+    {
+        if (expectedFiles is null)
+            return "live";
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (var pair in expectedFiles.OrderBy(
+                     pair => pair.Key,
+                     StringComparer.OrdinalIgnoreCase))
+        {
+            hash.AppendData(Encoding.UTF8.GetBytes(pair.Key));
+            hash.AppendData([0]);
+            hash.AppendData(Encoding.UTF8.GetBytes(pair.Value));
+            hash.AppendData([10]);
+        }
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
+    }
+
+    private static bool IsInsideRoot(string rootPath, string candidatePath)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
+        var candidate = Path.GetFullPath(candidatePath);
+        return candidate.Equals(root, StringComparison.OrdinalIgnoreCase) ||
+               candidate.StartsWith(
+                   root + Path.DirectorySeparatorChar,
+                   StringComparison.OrdinalIgnoreCase);
+    }
 
     private static IEnumerable<string> EnumerateSearchableFiles(string rootPath)
     {
@@ -569,15 +758,6 @@ internal sealed class ProjectSourceIndex
                     yield return Path.GetFullPath(file);
             }
         }
-    }
-
-    private static ImmutableArray<string> SplitLines(string content)
-    {
-        var builder = ImmutableArray.CreateBuilder<string>();
-        using var reader = new StringReader(content);
-        while (reader.ReadLine() is { } line)
-            builder.Add(line);
-        return builder.ToImmutable();
     }
 
     private static IEnumerable<string> GetTrigrams(string value)
@@ -630,22 +810,24 @@ internal sealed class ProjectSourceIndex
     private static string Truncate(string value, int maximumLength) =>
         value.Length <= maximumLength ? value : value[..maximumLength] + "…";
 
-    private sealed class IndexedFile(
-        string fullPath,
-        DateTime lastWriteUtc,
-        long byteLength,
-        bool isCSharp,
-        string? content,
-        ImmutableArray<string> lines)
+    private sealed record IndexedFile(
+        string FullPath,
+        bool IsCSharp,
+        bool HasTrigramIndex,
+        string? ExpectedHash)
     {
-        public string FullPath { get; } = fullPath;
-        public DateTime LastWriteUtc { get; } = lastWriteUtc;
-        public long ByteLength { get; } = byteLength;
-        public bool IsCSharp { get; } = isCSharp;
-        public string? Content { get; } = content;
-        public ImmutableArray<string> Lines { get; } = lines;
-        public SyntaxTree? SyntaxTree { get; set; }
+        public bool IsIndexed => HasTrigramIndex;
     }
+
+    /// <summary>單一檔案建立完成後的局部結果；由主執行緒確定性合併。</summary>
+    private sealed record IndexedFileBuildResult(
+        IndexedFile File,
+        IReadOnlySet<string> Trigrams);
+
+    /// <summary>候選檔案的逐行確認結果。</summary>
+    private sealed record TextFileScanResult(
+        IReadOnlyList<TextMatch> Matches,
+        bool Skipped);
 
     private sealed record SymbolOccurrence(
         string FilePath,
@@ -654,4 +836,41 @@ internal sealed class ProjectSourceIndex
         string Classification,
         string? Container,
         string Preview);
+
+    private sealed record SourceIndexCacheKey(string RootPath, string SnapshotIdentity)
+    {
+        public bool Equals(SourceIndexCacheKey? other) =>
+            other is not null &&
+            RootPath.Equals(other.RootPath, StringComparison.OrdinalIgnoreCase) &&
+            SnapshotIdentity.Equals(other.SnapshotIdentity, StringComparison.Ordinal);
+
+        public override int GetHashCode() => HashCode.Combine(
+            StringComparer.OrdinalIgnoreCase.GetHashCode(RootPath),
+            StringComparer.Ordinal.GetHashCode(SnapshotIdentity));
+    }
+
+    private sealed class SourceIndexCacheEntry : IDisposable
+    {
+        private readonly CancellationTokenSource _lifetime = new();
+
+        public SourceIndexCacheEntry(
+            long sequence,
+            Func<CancellationToken, Task<ProjectSourceIndex>> factory)
+        {
+            Sequence = sequence;
+            Build = new Lazy<Task<ProjectSourceIndex>>(
+                () => factory(_lifetime.Token),
+                LazyThreadSafetyMode.ExecutionAndPublication);
+        }
+
+        public long Sequence { get; }
+
+        public Lazy<Task<ProjectSourceIndex>> Build { get; }
+
+        public void Dispose()
+        {
+            _lifetime.Cancel();
+            _lifetime.Dispose();
+        }
+    }
 }

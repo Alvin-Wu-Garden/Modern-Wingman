@@ -21,7 +21,7 @@ public static class ProjectDatabaseEndpoints
     /// 註冊專案資料庫設定端點。設定異動只標記既有 Graph 索引失效，
     /// 不在 HTTP request 內啟動耗時的重新索引。
     /// </summary>
-    /// <param name="app">ASP.NET Core endpoint builder。</param>
+    /// <param name="app">ASP.NET Core 端點路由建構器。</param>
     /// <returns>原始 builder，供 host 繼續註冊其他端點。</returns>
     public static IEndpointRouteBuilder MapProjectDatabaseEndpoints(
         this IEndpointRouteBuilder app)

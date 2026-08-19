@@ -23,4 +23,7 @@ public sealed class ConversationEntity
 
     /// <summary>導覽屬性。</summary>
     public List<MessageEntity> Messages { get; set; } = [];
+
+    /// <summary>此對話的冪等回合。</summary>
+    public List<ConversationTurnEntity> Turns { get; set; } = [];
 }

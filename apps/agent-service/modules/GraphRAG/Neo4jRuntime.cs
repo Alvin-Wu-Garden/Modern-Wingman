@@ -370,7 +370,7 @@ public sealed class Neo4jRuntime : INeo4jRuntime, IAsyncDisposable
         var port = ManagedPort();
         SetConfiguration(lines, "server.bolt.listen_address", $"127.0.0.1:{port}");
         SetConfiguration(lines, "server.bolt.advertised_address", $"127.0.0.1:{port}");
-        // ParallelExtractor 的 FBL 完整圖約有百萬級寫入命令；1 GiB heap
+        // ParallelExtractor 的大型完整圖約有百萬級寫入命令；1 GiB heap
         // 在中斷後的 transaction-log reverse recovery 會發生 OOM。上限 4 GiB
         // 同時足以完成復原與大型發布，且不會在啟動時一次全數佔用。
         SetConfiguration(lines, "server.memory.heap.initial_size", "1g");

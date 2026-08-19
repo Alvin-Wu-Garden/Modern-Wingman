@@ -177,6 +177,13 @@ public sealed class CopilotClientService : IHostedService, IAsyncDisposable, ICo
 
     public CopilotRuntimeStatus GetRuntimeStatus() => Volatile.Read(ref _status);
 
+    /// <summary>
+    /// 取得 Copilot SDK Client 是否已完成啟動且可接受模型清單與對話請求。
+    /// 認證狀態可能比 Client 就緒狀態早一個極短的時間完成，因此端點不得只判斷
+    /// <see cref="CopilotRuntimeStatus.IsAuthenticated"/>。
+    /// </summary>
+    public bool IsReady => _ready && _client is not null;
+
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         if (Volatile.Read(ref _disposed) != 0) return;

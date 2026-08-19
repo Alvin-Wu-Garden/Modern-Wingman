@@ -9,17 +9,17 @@ using AgentService.Application.Contracts;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Neo4j.Driver;
-using AuthorityGraphNode = AgentService.Modules.GraphRAG.FblAuthority.GraphNode;
-using AuthorityGraphRelationship = AgentService.Modules.GraphRAG.FblAuthority.GraphRelationship;
-using AuthorityGraphNodeKind = AgentService.Modules.GraphRAG.FblAuthority.GraphNodeKind;
-using AuthorityGraphRelationshipKind = AgentService.Modules.GraphRAG.FblAuthority.GraphRelationshipKind;
-using AuthorityGraphSchema = AgentService.Modules.GraphRAG.FblAuthority.GraphSchema;
-using ProjectGraphVersions = AgentService.Modules.GraphRAG.FblAuthority.ProjectGraphVersions;
+using ExtractedGraphNode = AgentService.Modules.GraphRAG.ExtractedGraph.GraphNode;
+using ExtractedGraphRelationship = AgentService.Modules.GraphRAG.ExtractedGraph.GraphRelationship;
+using ExtractedGraphNodeKind = AgentService.Modules.GraphRAG.ExtractedGraph.GraphNodeKind;
+using ExtractedGraphRelationshipKind = AgentService.Modules.GraphRAG.ExtractedGraph.GraphRelationshipKind;
+using ExtractedGraphSchema = AgentService.Modules.GraphRAG.ExtractedGraph.GraphSchema;
+using ProjectGraphVersions = AgentService.Modules.GraphRAG.ExtractedGraph.ProjectGraphVersions;
 
 namespace AgentService.Modules.GraphRAG;
 
 /// <summary>
-/// FBL authority graph 的 Neo4j 核心持久化實作，負責 immutable version、
+/// ParallelExtractor 專案圖譜的 Neo4j 核心持久化實作，負責 immutable version、
 /// active/previous pointer、節點關係批次寫入與版本清理。
 /// </summary>
 public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
@@ -27,7 +27,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     // 高連結節點 DETACH DELETE 會為一個節點生成大量 command；
     // 500 節點一批可避免百萬級圖在清理時形成過大 transaction log。
     // 500 筆會讓百萬級舊版本清理產生數千次 transaction；5,000 筆已在 2 GiB
-    // Neo4j heap 的完整 FBL 圖實測通過，並可把切版後清理縮短到合理時間。
+    // Neo4j heap 的完整投資系統圖譜實測通過，並可把切版後清理縮短到合理時間。
     private const int CleanupBatchSize = 5_000;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -63,6 +63,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     /// </summary>
     /// <param name="options">Neo4j 連線設定。</param>
     /// <param name="runtimeOptions">用來判斷 lifecycle 是否明確停用。</param>
+    /// <param name="manifests">保存各專案 active／previous 圖版本的 SQLite manifest。</param>
     /// <param name="logger">結構化 logger；任何訊息都不得包含 Password。</param>
     public Neo4jGraphStore(
         IOptions<GraphRagNeo4jOptions> options,
@@ -189,7 +190,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
 
     /// <inheritdoc />
     public async Task PublishAsync(
-        FblGraphSnapshot snapshot,
+        ProjectGraphSnapshot snapshot,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
@@ -221,7 +222,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
 
     /// <inheritdoc />
     public async Task StageVersionAsync(
-        FblGraphSnapshot snapshot,
+        ProjectGraphSnapshot snapshot,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
@@ -265,7 +266,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
 
     /// <inheritdoc />
     public async Task PromoteVersionAsync(
-        FblGraphSnapshot snapshot,
+        ProjectGraphSnapshot snapshot,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
@@ -279,27 +280,6 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             throw new InvalidOperationException(
                 $"Neo4j staging 不完整，禁止 Promote：{string.Join("；", validation.Errors)}");
         // active 指標由 Modern Wingman SQLite manifest 保存；Neo4j 不建立 ProjectGraph。
-    }
-
-    /// <inheritdoc />
-    public async Task<GraphVersionPointers> GetVersionPointersAsync(
-        string projectId,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
-        var versions = await _manifests.ListSuccessfulAsync(projectId, cancellationToken);
-        var active = await _manifests.GetCurrentAsync(projectId, cancellationToken);
-        return new GraphVersionPointers(
-            projectId,
-            active?.Version,
-            versions.FirstOrDefault(item => item.Version != active?.Version)?.Version);
-    }
-
-    /// <inheritdoc />
-    public async Task<IReadOnlyList<GraphVersionPointers>> ListVersionPointersAsync(
-        CancellationToken cancellationToken = default)
-    {
-        return [];
     }
 
     /// <inheritdoc />
@@ -366,7 +346,12 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
-        if (_driver is null) return;
+        if (_driver is null)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.Unavailable,
+                "Neo4j 尚未建立連線，無法確認專案圖譜已完整刪除。");
+        }
         await CleanupRetiredVersionsAsync(projectId, cancellationToken);
     }
 
@@ -385,53 +370,77 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
-        if (_driver is null) return;
-        await using var session = OpenWriteSession();
-        while (true)
+        if (_driver is null)
+            throw new GraphStoreException(
+                GraphStoreFailureKind.Unavailable,
+                "Neo4j 尚未建立連線，無法確認專案圖譜已刪除。");
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var deleted = await session.ExecuteWriteAsync(async transaction =>
+            await using var session = OpenWriteSession();
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var deleted = await session.ExecuteWriteAsync(async transaction =>
+                {
+                    var cursor = await transaction.RunAsync(
+                        $$"""
+                        MATCH (n:GraphEntity {wingmanProjectId: $projectId})
+                        WITH n LIMIT {{CleanupBatchSize}}
+                        DETACH DELETE n
+                        RETURN count(*) AS deleted
+                        """,
+                        new { projectId });
+                    return (await cursor.SingleAsync())["deleted"].As<int>();
+                });
+                if (deleted == 0) break;
+            }
+            await session.ExecuteWriteAsync(async transaction =>
             {
                 var cursor = await transaction.RunAsync(
-                    $$"""
-                    MATCH (n:GraphEntity {wingmanProjectId: $projectId})
-                    WITH n LIMIT {{CleanupBatchSize}}
+                    """
+                    MATCH (n)
+                    WHERE (n:ProjectGraph OR n:CommunityReport OR n:GraphCommunity)
+                      AND (n.projectId = $projectId OR n.wingmanProjectId = $projectId)
                     DETACH DELETE n
-                    RETURN count(*) AS deleted
                     """,
                     new { projectId });
-                return (await cursor.SingleAsync())["deleted"].As<int>();
+                await cursor.ConsumeAsync();
             });
-            if (deleted == 0) break;
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var deleted = await session.ExecuteWriteAsync(async transaction =>
+                {
+                    var cursor = await transaction.RunAsync(
+                        $$"""
+                        MATCH (n:GraphEntity {projectId: $projectId})
+                        WITH n LIMIT {{CleanupBatchSize}}
+                        DETACH DELETE n
+                        RETURN count(*) AS deleted
+                        """,
+                        new { projectId });
+                    return (await cursor.SingleAsync())["deleted"].As<int>();
+                });
+                if (deleted == 0) break;
+            }
         }
-        await session.ExecuteWriteAsync(async transaction =>
+        catch (OperationCanceledException)
         {
-            var cursor = await transaction.RunAsync(
-                """
-                MATCH (n)
-                WHERE (n:ProjectGraph OR n:CommunityReport OR n:GraphCommunity)
-                  AND (n.projectId = $projectId OR n.wingmanProjectId = $projectId)
-                DETACH DELETE n
-                """,
-                new { projectId });
-            await cursor.ConsumeAsync();
-        });
-        while (true)
+            throw;
+        }
+        catch (ServiceUnavailableException exception)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var deleted = await session.ExecuteWriteAsync(async transaction =>
-            {
-                var cursor = await transaction.RunAsync(
-                    $$"""
-                    MATCH (n:GraphEntity {projectId: $projectId})
-                    WITH n LIMIT {{CleanupBatchSize}}
-                    DETACH DELETE n
-                    RETURN count(*) AS deleted
-                    """,
-                    new { projectId });
-                return (await cursor.SingleAsync())["deleted"].As<int>();
-            });
-            if (deleted == 0) break;
+            throw new GraphStoreException(
+                GraphStoreFailureKind.Unavailable,
+                "Neo4j 無法提供圖譜刪除服務。",
+                exception);
+        }
+        catch (Exception exception)
+        {
+            throw new GraphStoreException(
+                GraphStoreFailureKind.QueryFailed,
+                "Neo4j 圖譜刪除失敗。",
+                exception);
         }
     }
 
@@ -639,7 +648,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                         WHEN node:ApiEndpoint THEN 1
                         WHEN node:Method THEN 2
                         WHEN node:Type THEN 3
-                        WHEN 'DatabaseObject' THEN 4
+                        WHEN node:DatabaseObject THEN 4
                         ELSE 5
                     END,
                     degree DESC,
@@ -756,17 +765,17 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     }
 
     /// <summary>
-    /// 將 authority node 直接投影成 :GraphEntity 加精確 authority label。
+    /// 將 抽取節點 直接投影成 :GraphEntity 加精確 抽取標籤。
     /// envelope 欄位供版本隔離與 UI 使用；原始 Properties 同時保留為 Neo4j property 與 JSON，避免舊模型轉譯失真。
     /// </summary>
     private async Task WriteNodesAsync(
-        FblGraphSnapshot snapshot,
+        ProjectGraphSnapshot snapshot,
         CancellationToken cancellationToken)
     {
         await using var session = OpenWriteSession();
         foreach (var kindGroup in snapshot.Document.Nodes.GroupBy(node => node.Kind))
         {
-            var authorityLabel = AuthorityGraphSchema.GetNodeLabel(kindGroup.Key);
+            var extractedLabel = ExtractedGraphSchema.GetNodeLabel(kindGroup.Key);
             foreach (var batch in kindGroup.Chunk(_options.WriteBatchSize))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -780,7 +789,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                     var cursor = await transaction.RunAsync(
                     $$"""
                     UNWIND $rows AS row
-                    CREATE (n:GraphEntity:{{authorityLabel}} {
+                    CREATE (n:GraphEntity:{{extractedLabel}} {
                         wingmanProjectId: $projectId,
                         graphVersion: $graphVersion,
                         id: row.id
@@ -799,9 +808,9 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         }
     }
 
-    /// <summary>依 authority relationship enum 分組，使用其唯一外部名稱建立 Neo4j relationship。</summary>
+    /// <summary>依 抽取關係 enum 分組，使用其唯一外部名稱建立 Neo4j relationship。</summary>
     private async Task WriteEdgesAsync(
-        FblGraphSnapshot snapshot,
+        ProjectGraphSnapshot snapshot,
         CancellationToken cancellationToken)
     {
         await using var session = OpenWriteSession();
@@ -848,7 +857,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     }
 
     private async Task ValidateStagingAsync(
-        FblGraphSnapshot snapshot,
+        ProjectGraphSnapshot snapshot,
         CancellationToken cancellationToken)
     {
         await using var session = OpenReadSession();
@@ -911,9 +920,9 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         CancellationToken cancellationToken)
     {
         if (_driver is null) throw new InvalidOperationException("Neo4j V4 已停用。");
-        var pointers = await GetVersionPointersAsync(projectId, cancellationToken);
+        var activeManifest = await _manifests.GetCurrentAsync(projectId, cancellationToken);
         if (string.Equals(
-                pointers.ActiveVersion,
+                activeManifest?.Version,
                 graphVersion,
                 StringComparison.Ordinal))
             throw new InvalidOperationException(
@@ -1238,7 +1247,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         IReadOnlyList<string>? kinds)
     {
         if (kinds is null || kinds.Count == 0) return [];
-        var allowed = Enum.GetNames<AuthorityGraphNodeKind>()
+        var allowed = Enum.GetNames<ExtractedGraphNodeKind>()
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var result = kinds.Where(value => !string.IsNullOrWhiteSpace(value))
             .Select(value => value.Trim())
@@ -1248,7 +1257,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         if (invalid is not null)
             throw new ArgumentException($"不允許的 V4 NodeKind filter：{invalid}。");
         return result.Select(value =>
-                Enum.Parse<AuthorityGraphNodeKind>(value, ignoreCase: true).ToString())
+                Enum.Parse<ExtractedGraphNodeKind>(value, ignoreCase: true).ToString())
             .ToList();
     }
 
@@ -1256,7 +1265,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         IReadOnlyList<string>? relationships)
     {
         if (relationships is null || relationships.Count == 0) return [];
-        var allowed = Enum.GetValues<AuthorityGraphRelationshipKind>()
+        var allowed = Enum.GetValues<ExtractedGraphRelationshipKind>()
             .ToDictionary(RelationshipType, kind => kind, StringComparer.OrdinalIgnoreCase);
         var result = relationships.Where(value => !string.IsNullOrWhiteSpace(value))
             .Select(value => value.Trim())
@@ -1398,7 +1407,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
     private static GraphVisualNode MapVisualNode(INode node, int degree) =>
         MapVisualNode(MapNode(node), degree);
 
-    private static GraphVisualNode MapVisualNode(AuthorityGraphNode node, int degree) =>
+    private static GraphVisualNode MapVisualNode(ExtractedGraphNode node, int degree) =>
         new(
             node.Key,
             node.Kind.ToString(),
@@ -1430,78 +1439,78 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             edge.Properties);
     }
 
-    /// <summary>由 :GraphEntity envelope 還原未經簡化的 authority node。</summary>
-    private static AuthorityGraphNode MapNode(INode node)
+    /// <summary>由 :GraphEntity envelope 還原未經簡化的 抽取節點。</summary>
+    private static ExtractedGraphNode MapNode(INode node)
     {
         var properties = node.Properties;
         var kindLabel = node.Labels.FirstOrDefault(label =>
             !label.Equals("GraphEntity", StringComparison.Ordinal))
             ?? throw new InvalidOperationException("GraphEntity 缺少 ParallelExtractor 原始 label。");
-        return new AuthorityGraphNode(
+        return new ExtractedGraphNode(
             RequiredString(properties, "id"),
             ParseNodeKind(kindLabel),
             ExtractDomainProperties(properties, NodeEnvelopeProperties));
     }
 
-    private static AuthorityGraphNodeKind ParseNodeKind(string value) =>
-        AuthorityGraphSchema.TryParseNodeLabel(value, out var kind)
+    private static ExtractedGraphNodeKind ParseNodeKind(string value) =>
+        ExtractedGraphSchema.TryParseNodeLabel(value, out var kind)
             ? kind
             : throw new InvalidOperationException($"Neo4j 出現未允許的 ParallelExtractor label：{value}。");
 
-    /// <summary>由 Neo4j relationship 還原 authority relationship 與完整 evidence。</summary>
-    private static AuthorityGraphRelationship MapEdge(
+    /// <summary>由 Neo4j relationship 還原 抽取關係 與完整 evidence。</summary>
+    private static ExtractedGraphRelationship MapEdge(
         IRelationship relationship,
         string sourceId,
         string targetId)
     {
         var properties = relationship.Properties;
         var kind = ParseRelationshipType(relationship.Type);
-        return new AuthorityGraphRelationship(
-            AuthorityGraphRelationship.Create(kind, sourceId, targetId).Id,
+        return new ExtractedGraphRelationship(
+            ExtractedGraphRelationship.Create(kind, sourceId, targetId).Id,
             sourceId,
             targetId,
             kind,
             ExtractDomainProperties(properties, RelationshipEnvelopeProperties));
     }
 
-    private static string RelationshipType(AuthorityGraphRelationshipKind kind) =>
-        AuthorityGraphSchema.GetRelationshipType(kind);
+    private static string RelationshipType(ExtractedGraphRelationshipKind kind) =>
+        ExtractedGraphSchema.GetRelationshipType(kind);
 
-    private static AuthorityGraphRelationshipKind ParseRelationshipType(string type)
+    private static ExtractedGraphRelationshipKind ParseRelationshipType(string type)
     {
-        foreach (var kind in Enum.GetValues<AuthorityGraphRelationshipKind>())
+        foreach (var kind in Enum.GetValues<ExtractedGraphRelationshipKind>())
         {
             if (string.Equals(
-                    AuthorityGraphSchema.GetRelationshipType(kind),
+                    ExtractedGraphSchema.GetRelationshipType(kind),
                     type,
                     StringComparison.Ordinal))
                 return kind;
         }
 
-        throw new InvalidOperationException($"Neo4j 出現未允許的 authority relationship type：{type}。");
+        throw new InvalidOperationException($"Neo4j 出現未允許的 抽取關係 type：{type}。");
     }
 
-    /// <summary>在任何寫入前驗證 authority snapshot 的識別、端點與 schema 完整性。</summary>
-    private static void ValidateAuthoritySnapshot(FblGraphSnapshot snapshot)
+    /// <summary>在任何寫入前驗證 抽取圖譜 snapshot 的識別、端點與 schema 完整性。</summary>
+    private static void ValidateAuthoritySnapshot(ProjectGraphSnapshot snapshot)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(snapshot.ProjectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(snapshot.GraphVersion);
         ArgumentException.ThrowIfNullOrWhiteSpace(snapshot.ContentDigest);
         ArgumentNullException.ThrowIfNull(snapshot.Document);
-        AuthorityGraphSchema.EnsureCompleteMappings();
+        ExtractedGraphSchema.EnsureCompleteMappings();
 
         var nodeKeys = snapshot.Document.Nodes
             .Select(node => node.Key)
             .ToHashSet(StringComparer.Ordinal);
         if (nodeKeys.Count != snapshot.Document.Nodes.Count)
-            throw new InvalidOperationException("FBL authority snapshot 包含重複 node key。");
+            throw new InvalidOperationException("專案圖譜 snapshot 包含重複 node key。");
         if (snapshot.Document.Relationships.Any(edge =>
                 !nodeKeys.Contains(edge.SourceKey) || !nodeKeys.Contains(edge.TargetKey)))
-            throw new InvalidOperationException("FBL authority snapshot 存在端點缺失的 relationship。");
+            throw new InvalidOperationException("專案圖譜 snapshot 存在端點缺失的 relationship。");
     }
 
     /// <summary>取得節點供 UI 與全文索引顯示的穩定短名稱。</summary>
-    private static string DisplayName(AuthorityGraphNode node)
+    private static string DisplayName(ExtractedGraphNode node)
     {
         foreach (var key in new[]
                  {
@@ -1576,7 +1585,7 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             .Where(pair => !envelope.Contains(pair.Key))
             .ToDictionary(pair => pair.Key, pair => (object?)pair.Value, StringComparer.Ordinal);
 
-    /// <summary>由 JSON 還原 authority properties；JSON element 保留精確的 primitive 值。</summary>
+    /// <summary>由 JSON 還原 抽取屬性；JSON element 保留精確的 primitive 值。</summary>
     private static IReadOnlyDictionary<string, object?> DeserializeAuthorityProperties(string? json) =>
         string.IsNullOrWhiteSpace(json)
             ? new Dictionary<string, object?>(StringComparer.Ordinal)

@@ -18,6 +18,9 @@ public sealed class MessageEntity
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
+    /// <summary>所屬的用戶端回合；相同回合重試時用來避免重複插入訊息。</summary>
+    public string? TurnId { get; set; }
+
     /// <summary>導覽屬性。</summary>
     public ConversationEntity? Conversation { get; set; }
 }

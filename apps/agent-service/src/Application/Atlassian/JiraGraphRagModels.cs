@@ -2,7 +2,7 @@ namespace AgentService.Application.Atlassian;
 
 /// <summary>
 /// 從 GraphRAG 檢索結果對應到 JIRA 分析用途的單筆命中。
-/// 欄位值直接對應 <see cref="AgentService.Modules.GraphRAG.GraphNode"/> 屬性，
+/// 欄位值直接對應 <see cref="AgentService.Modules.GraphRAG.ExtractedGraph.GraphNode"/> 屬性，
 /// 避免重複抽象化現有 Graph Domain Model。
 /// </summary>
 public sealed record JiraGraphRagHit(

@@ -197,7 +197,7 @@ public sealed class SpeechModelManager(
         }
         catch
         {
-            // Best effort cleanup for partial model files.
+            // 對未下載完成的模型檔採 best effort 清理。
         }
     }
 }

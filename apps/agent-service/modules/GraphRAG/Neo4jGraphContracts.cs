@@ -5,9 +5,9 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Neo4j.Driver;
-using AuthorityGraphDocument = AgentService.Modules.GraphRAG.FblAuthority.GraphDocument;
-using AuthorityGraphNode = AgentService.Modules.GraphRAG.FblAuthority.GraphNode;
-using AuthorityGraphRelationship = AgentService.Modules.GraphRAG.FblAuthority.GraphRelationship;
+using ExtractedGraphDocument = AgentService.Modules.GraphRAG.ExtractedGraph.GraphDocument;
+using ExtractedGraphNode = AgentService.Modules.GraphRAG.ExtractedGraph.GraphNode;
+using ExtractedGraphRelationship = AgentService.Modules.GraphRAG.ExtractedGraph.GraphRelationship;
 
 namespace AgentService.Modules.GraphRAG;
 
@@ -48,8 +48,8 @@ public sealed class GraphRagNeo4jOptions
 
 /// <summary>BM25 搜尋命中的 V4 node。</summary>
 /// <param name="Node">完整 domain node。</param>
-/// <param name="Score">Neo4j full-text score。</param>
-public sealed record GraphSearchHit(AuthorityGraphNode Node, double Score);
+/// <param name="Score">Neo4j full-text 查詢回傳的相關性分數。</param>
+public sealed record GraphSearchHit(ExtractedGraphNode Node, double Score);
 
 /// <summary>Graph 檢索失敗的可辨識類型，避免把基礎設施錯誤誤報成查無結果。</summary>
 public enum GraphStoreFailureKind
@@ -84,23 +84,23 @@ public sealed class GraphStoreException : Exception
 
 /// <summary>一個中心節點的一階關係，供 relation-aware BFS 使用。</summary>
 /// <param name="Node">鄰接 node。</param>
-/// <param name="Relationship">連接中心與鄰接 node 的 authority relationship。</param>
+/// <param name="Relationship">連接中心與鄰接 node 的 抽取關係。</param>
 /// <param name="Direction">outgoing 或 incoming。</param>
 public sealed record GraphNeighbor(
-    AuthorityGraphNode Node,
-    AuthorityGraphRelationship Relationship,
+    ExtractedGraphNode Node,
+    ExtractedGraphRelationship Relationship,
     string Direction);
 
 /// <summary>
-/// Neo4j 唯一允許發布的 FBL 權威圖快照。
+/// Neo4j 唯一允許發布的專案圖譜快照。
 /// ProjectId 與 GraphVersion 負責隔離 immutable staging；ContentDigest 驗證發布內容未被替換；
-/// Document 則直接使用 FBL authority schema，不再經過舊 GraphModel 的四種節點與九種關係轉譯。
+/// Document 直接使用 ParallelExtractor schema，不經過舊 GraphModel 的四種節點與九種關係轉譯。
 /// </summary>
-public sealed record FblGraphSnapshot(
+public sealed record ProjectGraphSnapshot(
     string ProjectId,
     string GraphVersion,
     string ContentDigest,
-    AuthorityGraphDocument Document,
+    ExtractedGraphDocument Document,
     IReadOnlyList<GraphCommunityReportV4> Communities);
 
 /// <summary>知識圖譜瀏覽器使用的 V4 node。</summary>
@@ -238,7 +238,7 @@ public sealed record GraphVisualSchema(
 
     /// <summary>
     /// 將既有 nodeKinds／relationshipTypes 投影為通用 facet，
-    /// 讓新版 Viewer 不必綁定 Neo4j 或 FBL 內部欄位名稱。
+    /// 讓新版 Viewer 不必綁定 Neo4j 或抽取器內部欄位名稱。
     /// </summary>
     public IReadOnlyList<GraphViewerFacetDescriptor> Facets =>
     [
@@ -338,7 +338,7 @@ public sealed record GraphCommunityAcceptanceDiagnostics(
     string MembershipDigest);
 
 /// <summary>
-/// GraphRAG FBL authority 儲存契約。Store 只接受已完成 Preflight 的 authority snapshot，
+/// GraphRAG 專案圖譜儲存契約。Store 只接受已完成 Preflight 的完整 snapshot，
 /// 並以 immutable graphVersion 加 active anchor 達成失敗不污染上一版的原子發布。
 /// </summary>
 public interface IGraphStore
@@ -350,7 +350,7 @@ public interface IGraphStore
     Task EnsureSchemaAsync(CancellationToken cancellationToken = default);
 
     /// <summary>將完整 snapshot staging、驗證並原子切換為 active。</summary>
-    Task PublishAsync(FblGraphSnapshot snapshot, CancellationToken cancellationToken = default);
+    Task PublishAsync(ProjectGraphSnapshot snapshot, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Neo4j active 與本機 manifest／Project 都完成後，才移除 previous 指標並清理舊版。

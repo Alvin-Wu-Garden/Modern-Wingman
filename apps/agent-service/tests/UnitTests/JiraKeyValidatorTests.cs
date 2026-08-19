@@ -5,7 +5,7 @@ namespace AgentService.UnitTests;
 /// <summary>驗證 JIRA Key 格式規則（含前綴補齊與邊界值）。</summary>
 public sealed class JiraKeyValidatorTests
 {
-    // ── IsValidUserInput ──────────────────────────────────────────────────────
+    // ── 驗證使用者輸入 ──────────────────────────────────────────────────────
 
     [Theory]
     [InlineData("HD-1")]
@@ -37,7 +37,7 @@ public sealed class JiraKeyValidatorTests
     public void IsValidUserInput_InvalidKeys_ReturnsFalse(string? input) =>
         Assert.False(JiraKeyValidator.IsValidUserInput(input));
 
-    // ── ToFullKey ─────────────────────────────────────────────────────────────
+    // ── 轉成完整議題鍵值 ────────────────────────────────────────────────────
 
     [Theory]
     [InlineData("HD-1128", "INNES1HD-1128")]
@@ -47,7 +47,7 @@ public sealed class JiraKeyValidatorTests
     public void ToFullKey_AppendsCorrectPrefix(string input, string expected) =>
         Assert.Equal(expected, JiraKeyValidator.ToFullKey(input));
 
-    // ── IsValidFullKey ────────────────────────────────────────────────────────
+    // ── 驗證完整議題鍵值 ────────────────────────────────────────────────────
 
     [Theory]
     [InlineData("INNES1HD-1")]

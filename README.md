@@ -64,7 +64,7 @@ Minimum required config:
 ```
 
 > Enter each API key in Modern Wingman Settings. The backend validates it against the provider and stores only an encrypted local value; provider keys are not read from environment variables.
-> Available profile IDs: `copilot-default`, `openai-byok`, `anthropic-byok`, `azure-openai-byok`, `azure-foundry-byok`, `custom-byok`
+> Available profile IDs: `copilot-default`, `openai-byok`, `anthropic-byok`, `azure-openai-byok`, `custom-byok`
 
 > **Note:** `appsettings.Development.json` is excluded from git (`.gitignore`). Never commit API keys.
 

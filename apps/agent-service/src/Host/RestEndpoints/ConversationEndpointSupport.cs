@@ -29,55 +29,70 @@ internal static class ConversationEndpointSupport
         http.Response.Headers["X-Accel-Buffering"] = "no";
         http.Response.Headers.AccessControlAllowOrigin = "*";
 
-        await foreach (var item in events.WithCancellation(ct))
+        try
         {
-            object payload;
-            switch (item)
+            await foreach (var item in events.WithCancellation(ct))
             {
-                case ConversationStartedEvent started:
-                    payload = new
-                    {
-                        resolvedProviderId = started.ResolvedProviderId,
-                        resolvedModelId = started.ResolvedModelId,
-                        started.RunId,
-                        graphStatus = started.GraphStatus,
-                        graphWarning = started.GraphWarning,
-                    };
-                    break;
-                case ConversationActivityStreamEvent activity:
-                    payload = new { activity = activity.Activity };
-                    break;
-                case ConversationTokenEvent token:
-                    payload = new { token = token.Token };
-                    break;
-                case ConversationUsageEvent usage:
-                    payload = new
-                    {
-                        usage = new
+                object payload;
+                switch (item)
+                {
+                    case ConversationStartedEvent started:
+                        payload = new
                         {
-                            inputTokens = usage.Usage.InputTokens,
-                            outputTokens = usage.Usage.OutputTokens,
-                            totalTokens = usage.Usage.TotalTokens,
-                        },
-                    };
-                    break;
-                case ConversationCompletedEvent:
-                    payload = new { done = true };
-                    break;
-                case ConversationErrorEvent error:
-                    payload = new
-                    {
-                        error = error.Error,
-                        code = error.Code,
-                        retryable = error.Retryable,
-                        stage = error.Stage,
-                    };
-                    break;
-                default:
-                    throw new InvalidOperationException("不支援的對話串流事件。");
-            }
+                            type = "started",
+                            resolvedProviderId = started.ResolvedProviderId,
+                            resolvedModelId = started.ResolvedModelId,
+                            started.RunId,
+                            graphStatus = started.GraphStatus,
+                            graphWarning = started.GraphWarning,
+                            graphVersion = started.GraphVersion,
+                            turnId = started.TurnId,
+                        };
+                        break;
+                    case ConversationActivityStreamEvent activity:
+                        payload = new { type = "activity", activity = activity.Activity, turnId = activity.TurnId };
+                        break;
+                    case ConversationTokenEvent token:
+                        payload = new { type = "token", token = token.Token, turnId = token.TurnId };
+                        break;
+                    case ConversationUsageEvent usage:
+                        payload = new
+                        {
+                            type = "usage",
+                            usage = new
+                            {
+                                inputTokens = usage.Usage.InputTokens,
+                                outputTokens = usage.Usage.OutputTokens,
+                                totalTokens = usage.Usage.TotalTokens,
+                            },
+                            turnId = usage.TurnId,
+                        };
+                        break;
+                    case ConversationCompletedEvent completed:
+                        payload = new { type = "completed", done = true, turnId = completed.TurnId };
+                        break;
+                    case ConversationErrorEvent error:
+                        payload = new
+                        {
+                            type = "error",
+                            error = error.Error,
+                            code = error.Code,
+                            retryable = error.Retryable,
+                            stage = error.Stage,
+                            turnId = error.TurnId,
+                        };
+                        break;
+                    default:
+                        throw new InvalidOperationException("不支援的對話串流事件。");
+                }
 
-            await WriteSseAsync(http, payload, ct);
+                await WriteSseAsync(http, payload, ct);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 瀏覽器關閉串流時是正常取消，不應把 TaskCanceledException 當成
+            // 未處理的後端錯誤寫入 ASP.NET 例外 Log。
         }
     }
 

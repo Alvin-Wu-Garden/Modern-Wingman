@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using AgentService.Application.Contracts;
 using AgentService.Domain.Models;
-using AgentService.Modules.GraphRAG.FblAuthority;
+using AgentService.Modules.GraphRAG.ExtractedGraph;
 using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
 
@@ -279,7 +279,7 @@ public sealed class ProjectGraphDatabaseExtractor
 
     /// <summary>
     /// 以 SQLite 系統目錄建立唯讀 DB Object 清單。
-    /// SQLite 沒有 FBL 菜單與 CustomReport authority tables，因此只回傳實際存在的使用者物件。
+    /// SQLite 不包含投資系統的菜單與 CustomReport 業務表，因此只回傳實際存在的 schema 物件。
     /// </summary>
     public async Task<SqliteDatabaseCatalog> LoadSqliteDatabaseObjectsAsync(
         GraphDatabaseSource source,

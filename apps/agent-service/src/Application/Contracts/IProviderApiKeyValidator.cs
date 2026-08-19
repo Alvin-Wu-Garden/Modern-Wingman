@@ -24,7 +24,7 @@ public interface IProviderCredentialService
 }
 
 /// <summary>
-/// Minimal Copilot credential surface used by validation and persistence orchestration.
+/// 提供驗證與持久化協調流程所需的最小 Copilot 憑證操作介面。
 /// </summary>
 public interface ICopilotCredentialRuntime
 {

@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using AgentService.Modules.GraphRAG.FblAuthority;
+using AgentService.Modules.GraphRAG.ExtractedGraph;
 using AgentService.Modules.GraphRAG.ParallelExtractor;
 
 namespace AgentService.Modules.GraphRAG;
@@ -15,7 +15,7 @@ public static class GraphRagModule
     /// <summary>
     /// 註冊完整 V4 module。此方法只綁定技術 budget 與連線設定，不提供任何 schema profile。
     /// </summary>
-    /// <param name="services">Agent Service DI container。</param>
+    /// <param name="services">Agent Service 使用的 DI 服務容器。</param>
     /// <param name="configuration">應用程式設定；Neo4j 密碼由本機設定與 DPAPI 生命週期管理。</param>
     /// <returns>同一個 service collection，供 fluent registration 使用。</returns>
     public static IServiceCollection AddGraphRagV4(

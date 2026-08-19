@@ -71,6 +71,7 @@ public static class ProviderEndpoints
                 p.DisplayName,
                 p.Kind,
                 p.ModelId,
+                Protocol = p.EffectiveProtocol.ToString(),
                 p.ProviderType,
                 p.BaseUrl,
                 HasStoredKey = settingMap.TryGetValue(p.Id, out var setting)
@@ -145,18 +146,77 @@ public static class ProviderEndpoints
         if (string.IsNullOrWhiteSpace(apiKey))
             return Results.Ok(Array.Empty<ProviderModelDto>());
 
-        var models = profile.Kind switch
+        if (profile.Kind == ProviderKind.CopilotDefault)
         {
-            ProviderKind.CopilotDefault => await ListCopilotModelsAsync(copilotClientService, ct),
-            _ => await ListByokModelsAsync(
-                profile,
-                apiKey,
-                settingStore,
-                httpClientFactory,
-                ct),
-        };
+            var runtime = copilotClientService.GetRuntimeStatus();
+            var availabilityError = GetCopilotModelsAvailabilityError(
+                runtime,
+                copilotClientService.IsReady);
+            if (availabilityError is not null)
+            {
+                return Results.Json(
+                    availabilityError,
+                    statusCode: availabilityError.Retryable
+                        ? StatusCodes.Status503ServiceUnavailable
+                        : StatusCodes.Status409Conflict);
+            }
+
+            try
+            {
+                return Results.Ok(await ListCopilotModelsAsync(copilotClientService, ct));
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return Results.StatusCode(499);
+            }
+            catch
+            {
+                // SDK 或上游服務的原始例外可能含連線資訊，不直接回傳給前端。
+                return Results.Json(
+                    new ProviderModelsErrorDto(
+                        "copilot_models_query_failed",
+                        "Copilot 模型清單暫時無法取得，請稍後重試。",
+                        Retryable: true),
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+        }
+
+        var models = await ListByokModelsAsync(
+            profile,
+            apiKey,
+            settingStore,
+            httpClientFactory,
+            ct);
 
         return Results.Ok(models);
+    }
+
+    /// <summary>
+    /// 判斷 Copilot 模型清單端點目前是否可用。Runtime 可能已完成認證，但 SDK Client
+    /// 尚未切換成就緒狀態；這段極短的競態仍屬於可重試的啟動階段。
+    /// </summary>
+    /// <param name="runtime">目前不含憑證的 Runtime 狀態。</param>
+    /// <param name="isReady">SDK Client 是否可立即接受請求。</param>
+    /// <returns>可用時回傳 <see langword="null"/>；否則回傳結構化錯誤。</returns>
+    internal static ProviderModelsErrorDto? GetCopilotModelsAvailabilityError(
+        CopilotRuntimeStatus runtime,
+        bool isReady)
+    {
+        if (isReady)
+            return null;
+
+        var isStarting = runtime.IsAuthenticated || string.Equals(
+            runtime.State,
+            "validating",
+            StringComparison.OrdinalIgnoreCase);
+        return new ProviderModelsErrorDto(
+            isStarting
+                ? "copilot_runtime_not_ready"
+                : "copilot_runtime_unavailable",
+            isStarting
+                ? "Copilot Runtime 正在啟動，請稍候。"
+                : runtime.Error ?? "Copilot Runtime 尚未就緒，請檢查 GitHub PAT 設定。",
+            Retryable: isStarting);
     }
 
     /// <summary>
@@ -167,34 +227,23 @@ public static class ProviderEndpoints
         CopilotClientService copilotClientService,
         CancellationToken ct)
     {
-        try
-        {
-            var client = copilotClientService.GetClient();
-            var sdkModels = await client.ListModelsAsync(ct);
+        var client = copilotClientService.GetClient();
+        var sdkModels = await client.ListModelsAsync(ct);
 
-            var result = new List<ProviderModelDto>();
-            foreach (var m in sdkModels)
-            {
-                var modelId = m.Id ?? string.Empty;
-                if (string.IsNullOrWhiteSpace(modelId)) continue;
-
-                result.Add(new ProviderModelDto(
-                    Id: modelId,
-                    DisplayName: m.Name ?? modelId,
-                    Group: InferModelGroup(modelId)
-                ));
-            }
-
-            return [.. result.OrderBy(m => m.Group).ThenBy(m => m.Id)];
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        var result = new List<ProviderModelDto>();
+        foreach (var m in sdkModels)
         {
-            throw;
+            var modelId = m.Id ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(modelId)) continue;
+
+            result.Add(new ProviderModelDto(
+                Id: modelId,
+                DisplayName: m.Name ?? modelId,
+                Group: InferModelGroup(modelId)
+            ));
         }
-        catch
-        {
-            return [];
-        }
+
+        return [.. result.OrderBy(m => m.Group).ThenBy(m => m.Id)];
     }
 
     private static async Task<List<ProviderModelDto>> ListByokModelsAsync(

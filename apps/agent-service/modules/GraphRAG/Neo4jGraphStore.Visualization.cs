@@ -31,7 +31,7 @@ public sealed partial class Neo4jGraphStore
 
     /// <summary>
     /// 以 V4 full-text index 執行 bounded 全域搜尋，供圖譜 Viewer 在既有初始子圖之外
-    /// 尋找遠端節點。搜尋結果仍使用 authority node 投影，不建立任何新的 graph entity。
+    /// 尋找遠端節點。搜尋結果仍使用抽取節點投影，不建立任何新的 graph entity。
     /// </summary>
     public async Task<GraphViewerSearchResult> SearchVisualGraphAsync(
         string projectId,

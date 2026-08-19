@@ -46,11 +46,11 @@ public static partial class JiraMarkdownConverter
         return result.ToString().TrimEnd();
     }
 
-    // ── Code blocks ──────────────────────────────────────────────────────────
+    // ── 程式碼區塊 ──────────────────────────────────────────────────────────
 
     private static string ConvertCodeBlocks(string text)
     {
-        // {code:java} ... {code}  →  ```java\n...\n```
+        // 例如：{code:java} ... {code} 會轉成 ```java\n...\n```。
         return CodeBlockPattern().Replace(text, match =>
         {
             var lang = match.Groups[1].Value.Trim();
@@ -63,7 +63,7 @@ public static partial class JiraMarkdownConverter
         NoformatPattern().Replace(text, match =>
             $"```\n{match.Groups[1].Value.Trim()}\n```");
 
-    // ── Panel / Quote ─────────────────────────────────────────────────────────
+    // ── 面板與引言 ──────────────────────────────────────────────────────────
 
     private static string ConvertPanel(string text) =>
         PanelPattern().Replace(text, match =>
@@ -80,12 +80,12 @@ public static partial class JiraMarkdownConverter
             return $"> {content}";
         });
 
-    // ── Color strip ──────────────────────────────────────────────────────────
+    // ── 色彩標記 ────────────────────────────────────────────────────────────
 
     private static string ConvertColorStrip(string text) =>
         ColorPattern().Replace(text, match => match.Groups[1].Value);
 
-    // ── Note / Warning / Info ────────────────────────────────────────────────
+    // ── 備註、警告與資訊區塊 ────────────────────────────────────────────────
 
     private static string ConvertNoteWarningInfo(string text)
     {
@@ -153,7 +153,7 @@ public static partial class JiraMarkdownConverter
     {
         // 連結：[text|url] → [text](url)
         line = LinkPattern().Replace(line, m => $"[{m.Groups[1].Value}]({m.Groups[2].Value})");
-        // URL without text：[url] → <url>
+        // 沒有顯示文字的 URL：[url] → <url>。
         line = BareUrlPattern().Replace(line, m => $"<{m.Groups[1].Value}>");
         // 圖片：!image.png|params! → [圖片: image.png]
         line = ImagePattern().Replace(line, m => $"[圖片: {m.Groups[1].Value}]");
@@ -170,7 +170,7 @@ public static partial class JiraMarkdownConverter
         return line;
     }
 
-    // ── Generated Regex ───────────────────────────────────────────────────────
+    // ── 編譯期產生的 Regex ──────────────────────────────────────────────────
 
     [GeneratedRegex(@"\{code(?::([^}]*))?\}(.*?)\{code\}", RegexOptions.Singleline, 500)]
     private static partial Regex CodeBlockPattern();

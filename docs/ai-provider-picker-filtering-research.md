@@ -99,7 +99,7 @@ GET /api/providers/{id}/models
 |---|---|---|
 | GitHub Copilot | SDK `ListModelsAsync`；失敗改用硬編碼 fallback | 成功時可以，fallback 不可以 |
 | OpenRouter | 帶已存 key 呼叫 `/models`；失敗改用硬編碼 fallback | 成功時由 provider 回報，fallback 不可以 |
-| OpenAI、Anthropic、Azure、Foundry、Custom | 直接回傳 `GetByokFixedModels` | 不可以 |
+| OpenAI、Anthropic、Azure、Custom | 直接回傳 `GetByokFixedModels` | 不可以 |
 
 對應來源：[ProviderEndpoints.cs:132](../apps/agent-service/src/Host/RestEndpoints/ProviderEndpoints.cs#L132) [ProviderEndpoints.cs:181](../apps/agent-service/src/Host/RestEndpoints/ProviderEndpoints.cs#L181) [ProviderEndpoints.cs:235](../apps/agent-service/src/Host/RestEndpoints/ProviderEndpoints.cs#L235)
 

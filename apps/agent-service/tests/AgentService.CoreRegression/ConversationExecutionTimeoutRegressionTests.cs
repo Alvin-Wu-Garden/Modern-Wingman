@@ -120,6 +120,79 @@ public sealed class ConversationExecutionTimeoutRegressionTests
         Assert.Contains("\"stage\":\"tool_execution\"", payload, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Sse開始事件會傳遞固定GraphVersion()
+    {
+        var context = new DefaultHttpContext();
+        await using var body = new MemoryStream();
+        context.Response.Body = body;
+
+        await ConversationEndpointSupport.WriteStreamAsync(
+            context,
+            SingleEventAsync(new ConversationStartedEvent(
+                "provider",
+                "model",
+                "run-id",
+                "ready",
+                null,
+                "graph-fixed")),
+            CancellationToken.None);
+
+        body.Position = 0;
+        var payload = await new StreamReader(body, Encoding.UTF8).ReadToEndAsync();
+        Assert.Contains("\"graphVersion\":\"graph-fixed\"", payload, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task 未預期例外不得把內部訊息傳給前端()
+    {
+        using var serviceProvider = new ServiceCollection().BuildServiceProvider();
+        var service = CreateService(serviceProvider);
+        var request = CreateRequest(
+            (_, _) => Task.FromException<ConversationPreparation>(
+                new InvalidOperationException("D:\\secret\\provider.json")),
+            TimeSpan.FromSeconds(5));
+
+        var events = await CollectAsync(service.ExecuteAsync(request));
+
+        var error = Assert.Single(events.OfType<ConversationErrorEvent>());
+        Assert.Equal(ConversationErrorCodes.AgentExecutionFailed, error.Code);
+        Assert.DoesNotContain("secret", error.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("provider.json", error.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task 同一對話已有執行中要求時_第二個要求應立即回傳Busy()
+    {
+        using var serviceProvider = new ServiceCollection().BuildServiceProvider();
+        var service = CreateService(serviceProvider);
+        var conversation = new ConversationEntity();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var firstCancellation = new CancellationTokenSource();
+        var firstRequest = CreateRequest(
+            async (_, cancellationToken) =>
+            {
+                entered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                throw new InvalidOperationException("測試預期應先取消等待。");
+            },
+            TimeSpan.FromSeconds(5)) with { Conversation = conversation };
+        var secondRequest = CreateRequest(
+            (_, _) => Task.FromResult(new ConversationPreparation(
+                "測試問題", "測試指示", string.Empty, [])),
+            TimeSpan.FromSeconds(5)) with { Conversation = conversation };
+
+        var firstExecution = CollectAsync(service.ExecuteAsync(firstRequest, firstCancellation.Token));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var secondEvents = await CollectAsync(service.ExecuteAsync(secondRequest));
+        firstCancellation.Cancel();
+        await firstExecution;
+
+        var error = Assert.Single(secondEvents.OfType<ConversationErrorEvent>());
+        Assert.Equal(ConversationErrorCodes.ConversationBusy, error.Code);
+        Assert.True(error.Retryable);
+    }
+
     private static ConversationExecutionService CreateService(IServiceProvider serviceProvider) =>
         new(
             new NoOpConversationRepository(),
@@ -226,6 +299,57 @@ public sealed class ConversationExecutionTimeoutRegressionTests
             string content,
             CancellationToken ct = default) =>
             Task.FromResult(Guid.NewGuid().ToString("N"));
+
+        public Task<string> AddMessageAsync(
+            string conversationId,
+            MessageRole role,
+            string content,
+            string? turnId,
+            CancellationToken ct = default) =>
+            Task.FromResult(Guid.NewGuid().ToString("N"));
+
+        public Task<ConversationTurnEntity?> GetTurnAsync(
+            string conversationId,
+            string turnId,
+            CancellationToken ct = default) =>
+            Task.FromResult<ConversationTurnEntity?>(null);
+
+        public Task<ConversationTurnEntity> BeginTurnAsync(
+            string conversationId,
+            string turnId,
+            string userMessage,
+            string providerProfileId,
+            string? modelId,
+            CancellationToken ct = default) =>
+            Task.FromResult(new ConversationTurnEntity
+            {
+                Id = turnId,
+                ConversationId = conversationId,
+                UserMessageId = Guid.NewGuid().ToString("N"),
+                ProviderProfileId = providerProfileId,
+                ModelId = modelId,
+                UserMessageHash = "test",
+            });
+
+        public Task<MessageEntity?> GetMessageAsync(
+            string messageId,
+            CancellationToken ct = default) =>
+            Task.FromResult<MessageEntity?>(null);
+
+        public Task CompleteTurnAsync(
+            string conversationId,
+            string turnId,
+            string assistantMessageId,
+            CancellationToken ct = default) =>
+            Task.CompletedTask;
+
+        public Task FailTurnAsync(
+            string conversationId,
+            string turnId,
+            ConversationTurnStatus status,
+            string errorCode,
+            CancellationToken ct = default) =>
+            Task.CompletedTask;
 
         public Task SetTitleAsync(
             string conversationId,

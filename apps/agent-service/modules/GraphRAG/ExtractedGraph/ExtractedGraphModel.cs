@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace AgentService.Modules.GraphRAG.FblAuthority;
+namespace AgentService.Modules.GraphRAG.ExtractedGraph;
 
 /// <summary>
 /// ParallelExtractor 會產生的原始節點標籤。

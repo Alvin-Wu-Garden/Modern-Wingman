@@ -1,13 +1,12 @@
 using System.Reflection;
-using System.Collections.Concurrent;
 using AgentService.Application.Contracts;
 using AgentService.Modules.GraphRAG;
-using AgentService.Modules.GraphRAG.FblAuthority;
+using AgentService.Modules.GraphRAG.ExtractedGraph;
 using AgentService.Modules.GraphRAG.ParallelExtractor;
 using Microsoft.Data.Sqlite;
 using Xunit;
-using AuthorityGraphNode = AgentService.Modules.GraphRAG.FblAuthority.GraphNode;
-using AuthorityGraphRelationship = AgentService.Modules.GraphRAG.FblAuthority.GraphRelationship;
+using ExtractedGraphNode = AgentService.Modules.GraphRAG.ExtractedGraph.GraphNode;
+using ExtractedGraphRelationship = AgentService.Modules.GraphRAG.ExtractedGraph.GraphRelationship;
 
 namespace AgentService.CoreRegression;
 
@@ -94,7 +93,7 @@ public sealed class ParallelExtractorRegressionTests
     }
 
     [Fact]
-    public void BackendFragments_必須依Solution順序合併而不是依Worker完成順序()
+    public void BackendFragments_必須依原版Writer收到的順序合併()
     {
         var initial = new CodeGraphData();
         initial.AddNode("Solution", "solution");
@@ -105,6 +104,7 @@ public sealed class ParallelExtractorRegressionTests
         project1.AddNode("Method", "shared-method", new Dictionary<string, object?>
         {
             ["kind"] = "method",
+            ["fileId"] = "file-1",
         });
         project1.AddRelationship("CONTAINS_FILE", "project-1", "file-1");
         var project2 = new CodeGraphData();
@@ -114,17 +114,39 @@ public sealed class ParallelExtractorRegressionTests
         });
         project2.AddRelationship("CONTAINS_FILE", "project-2", "file-2");
 
-        // 刻意以完成順序的反序放入；結果仍必須由 Solution 順序決定。
-        var fragments = new ConcurrentDictionary<string, CodeGraphData>(StringComparer.Ordinal)
-        {
-            ["project-2"] = project2,
-            ["project-1"] = project1,
-        };
-        var merged = ParallelExtractionEngine.MergeBackendFragmentsInSolutionOrder(initial, fragments);
+        // 原版以 writeGate 串行寫入，但不會把平行完成結果重新排成 Solution 順序。
+        var fragments = new[] { project2, project1 };
+        var merged = ParallelExtractionEngine.MergeBackendFragmentsInWriteOrder(initial, fragments);
 
         var method = Assert.Single(merged.Nodes, node => node.Id == "shared-method");
-        Assert.Equal("ordinary", method.Properties["kind"]);
-        Assert.Empty(fragments);
+        Assert.Equal("method", method.Properties["kind"]);
+    }
+
+    [Fact]
+    public void BackendFragments_語意Stub不得覆寫Method正式宣告種類()
+    {
+        var initial = new CodeGraphData();
+        var declaration = new CodeGraphData();
+        declaration.AddNode("Method", "shared-method", new Dictionary<string, object?>
+        {
+            ["kind"] = "method",
+            ["fileId"] = "file-1",
+            ["startLine"] = 10,
+        });
+        var semanticStub = new CodeGraphData();
+        semanticStub.AddNode("Method", "shared-method", new Dictionary<string, object?>
+        {
+            ["kind"] = "ordinary",
+            ["external"] = false,
+        });
+
+        var merged = ParallelExtractionEngine.MergeBackendFragmentsInWriteOrder(
+            initial,
+            new[] { declaration, semanticStub });
+
+        var method = Assert.Single(merged.Nodes);
+        Assert.Equal("method", method.Properties["kind"]);
+        Assert.Equal("file-1", method.Properties["fileId"]);
     }
 
     [Fact]
@@ -145,8 +167,8 @@ public sealed class ParallelExtractorRegressionTests
         };
         var document = new GraphDocument(Metadata(), nodes, relationships);
 
-        var first = FblAuthorityCommunityBuilder.Build(document);
-        var second = FblAuthorityCommunityBuilder.Build(document);
+        var first = GraphCommunityBuilder.Build(document);
+        var second = GraphCommunityBuilder.Build(document);
 
         Assert.Equal(
             first.Select(report => (report.CommunityId, string.Join('|', report.MemberIds))),
@@ -166,7 +188,7 @@ public sealed class ParallelExtractorRegressionTests
             [Relationship("a", "b", 1)]);
 
         Assert.Throws<OperationCanceledException>(() =>
-            FblAuthorityCommunityBuilder.Build(document, cancellation.Token));
+            GraphCommunityBuilder.Build(document, cancellation.Token));
     }
 
     [Fact]
@@ -297,11 +319,11 @@ public sealed class ParallelExtractorRegressionTests
             Neo4jGraphStore.EnsureReadOnlyCypher(unsafeScope));
     }
 
-    private static AuthorityGraphNode Node(string key, string name) =>
-        AuthorityGraphNode.Create(GraphNodeKind.Type, key, new Dictionary<string, object?> { ["name"] = name });
+    private static ExtractedGraphNode Node(string key, string name) =>
+        ExtractedGraphNode.Create(GraphNodeKind.Type, key, new Dictionary<string, object?> { ["name"] = name });
 
-    private static AuthorityGraphRelationship Relationship(string source, string target, int occurrenceCount) =>
-        AuthorityGraphRelationship.Create(
+    private static ExtractedGraphRelationship Relationship(string source, string target, int occurrenceCount) =>
+        ExtractedGraphRelationship.Create(
             GraphRelationshipKind.Calls,
             source,
             target,

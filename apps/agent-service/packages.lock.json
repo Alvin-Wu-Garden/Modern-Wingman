@@ -2,6 +2,16 @@
   "version": 1,
   "dependencies": {
     "net10.0": {
+      "Azure.AI.OpenAI": {
+        "type": "Direct",
+        "requested": "[2.1.0, )",
+        "resolved": "2.1.0",
+        "contentHash": "doixr3tcsIcdzbzF9NxKt+6U0NKj6aPeOCPYONPsWjyf3gxVndVJAdjPcVdqeR/3vcRHXRgGnGlv+iXx5jMA4g==",
+        "dependencies": {
+          "Azure.Core": "1.44.1",
+          "OpenAI": "2.1.0"
+        }
+      },
       "Microsoft.Agents.AI": {
         "type": "Direct",
         "requested": "[1.13.0, )",
@@ -24,6 +34,22 @@
         "contentHash": "HS2Bf/Iwm7VHK1OmYRy9MYssty+Wm8csouSiPTZHfeUzYVpI4YEowXxld0ITZFKnnzaxFMWaslDiC8HXBsAiPw==",
         "dependencies": {
           "Microsoft.Extensions.AI.Abstractions": "10.6.0"
+        }
+      },
+      "Microsoft.Agents.AI.Anthropic": {
+        "type": "Direct",
+        "requested": "[1.13.0-preview.260703.1, )",
+        "resolved": "1.13.0-preview.260703.1",
+        "contentHash": "Cp5wGCoyBJvhGlSLKFS3Nny3Rd/r0Qq3RArX4WsooottfrxkzvKP5ZpCcbKrwXs6XW4yW7yCm3XI7CBE70Lzrw==",
+        "dependencies": {
+          "Anthropic": "12.20.0",
+          "Microsoft.Agents.AI": "1.13.0",
+          "Microsoft.Extensions.AI": "10.6.0",
+          "Microsoft.Extensions.AI.Abstractions": "10.6.0",
+          "Microsoft.Extensions.AI.Evaluation": "10.6.0",
+          "Microsoft.Extensions.Compliance.Abstractions": "10.5.0",
+          "Microsoft.Extensions.VectorData.Abstractions": "9.7.0",
+          "Microsoft.ML.Tokenizers": "2.0.0"
         }
       },
       "Microsoft.Agents.AI.GitHub.Copilot": {
@@ -178,14 +204,22 @@
         "resolved": "18.1.0",
         "contentHash": "5K+9KFg2TdTl7VXv88Qzi/0lqK6JFoNP3lRuImPYGRV7K/QYklDyTrj4+A+KAki1JsQi6qKY+hDyY7d6WRqjrw=="
       },
+      "Anthropic": {
+        "type": "Transitive",
+        "resolved": "12.20.0",
+        "contentHash": "+lXJaJfMoDVTS/mWbuNE1NuR1T+led5bNl2HLLR4f9vpn4/eg2ewBceJtZjVb1FNs9oak65gstnBPIkrZpy9Gw==",
+        "dependencies": {
+          "Microsoft.Extensions.AI.Abstractions": "10.5.1"
+        }
+      },
       "Azure.Core": {
         "type": "Transitive",
-        "resolved": "1.38.0",
-        "contentHash": "IuEgCoVA0ef7E4pQtpC3+TkPbzaoQfa77HlfJDmfuaJUCVJmn7fT0izamZiryW5sYUFKizsftIxMkXKbgIcPMQ==",
+        "resolved": "1.44.1",
+        "contentHash": "YyznXLQZCregzHvioip07/BkzjuWNXogJEVz9T5W6TwjNr17ax41YGzYMptlo2G10oLCuVPoyva62y0SIRDixg==",
         "dependencies": {
-          "Microsoft.Bcl.AsyncInterfaces": "1.1.1",
-          "System.ClientModel": "1.0.0",
-          "System.Memory.Data": "1.0.2"
+          "Microsoft.Bcl.AsyncInterfaces": "6.0.0",
+          "System.ClientModel": "1.1.0",
+          "System.Memory.Data": "6.0.0"
         }
       },
       "Azure.Identity": {
@@ -224,8 +258,8 @@
       },
       "Microsoft.Bcl.AsyncInterfaces": {
         "type": "Transitive",
-        "resolved": "1.1.1",
-        "contentHash": "yuvf07qFWFqtK3P/MRkEKLhn5r2UbSpVueRziSqj0yJQIKFwG1pq9mOayK3zE5qZCTs0CbrwL9M6R8VwqyGy2w=="
+        "resolved": "6.0.0",
+        "contentHash": "UcSjPsst+DfAdJGVDsu346FX0ci0ah+lw3WRtn18NUwEqRt70HaOQ7lI72vy3+1LxtqI3T5GWwV39rQSrCzAeg=="
       },
       "Microsoft.Build.Framework": {
         "type": "Transitive",

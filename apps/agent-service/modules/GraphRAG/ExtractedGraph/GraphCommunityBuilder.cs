@@ -3,13 +3,13 @@ using System.Security.Cryptography;
 using System.Text;
 using AgentService.Modules.GraphRAG;
 
-namespace AgentService.Modules.GraphRAG.FblAuthority;
+namespace AgentService.Modules.GraphRAG.ExtractedGraph;
 
 /// <summary>
 /// 對 ParallelExtractor 原始圖執行確定性的單層加權 Leiden 分群。
 /// 所有有邊節點與所有原始關係都參與；關係方向不影響社群，occurrenceCount 是邊權重。
 /// </summary>
-public static class FblAuthorityCommunityBuilder
+public static class GraphCommunityBuilder
 {
     private const double Epsilon = 1e-12;
     private const int MaxLocalMovePasses = 100;

@@ -1,9 +1,10 @@
 using System.Collections;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text.Json;
 using AgentService.Application.Contracts;
 using AgentService.Modules.GraphRAG;
-using AgentService.Modules.GraphRAG.FblAuthority;
+using AgentService.Modules.GraphRAG.ExtractedGraph;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -93,6 +94,216 @@ public sealed class ProjectAnalysisToolsRegressionTests
     }
 
     [Fact]
+    public async Task SearchTextAsync_不監看檔案且只在明確失效後重建索引()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            var sourcePath = Path.Combine(root, "Source.cs");
+            await File.WriteAllTextAsync(
+                sourcePath,
+                "public const string Marker = \"OriginalSearchMarker\";\n");
+            var tools = CreateTools(root);
+
+            var original = await tools.SearchTextAsync(
+                "OriginalSearchMarker", ".cs", 10);
+            Assert.Single(original.Matches);
+
+            // 相同索引的實際命中仍回讀本機檔案，因此既有候選的預覽會反映實體內容；
+            // 但新增詞不會由背景 watcher 偷偷加入 postings，必須由索引流程明確失效。
+            await File.WriteAllTextAsync(
+                sourcePath,
+                "public const string Marker = \"OriginalSearchMarker qzxv987654Unique\";\n");
+            var refreshedPreview = await tools.SearchTextAsync(
+                "OriginalSearchMarker", ".cs", 10);
+            Assert.Contains("qzxv987654Unique", refreshedPreview.Matches.Single().Preview);
+
+            var beforeInvalidation = await tools.SearchTextAsync(
+                "qzxv987654Unique", ".cs", 10);
+            Assert.Empty(beforeInvalidation.Matches);
+
+            ProjectSourceIndex.Forget(root);
+            var afterInvalidation = await tools.SearchTextAsync(
+                "qzxv987654Unique", ".cs", 10);
+            Assert.Single(afterInvalidation.Matches);
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public async Task SearchTextAsync_平行建立索引後仍依路徑與行號穩定排序()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "Zeta.cs"),
+                "// DeterministicParallelMarker\n");
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "Alpha.cs"),
+                "// DeterministicParallelMarker\n");
+
+            var result = await CreateTools(root).SearchTextAsync(
+                "DeterministicParallelMarker", ".cs", 10);
+
+            Assert.Equal(
+                ["Alpha.cs", "Zeta.cs"],
+                result.Matches.Select(match => match.FilePath).ToArray());
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public async Task SearchTextAsync_索引建立取消後下次呼叫可以重新建立()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "Retry.cs"),
+                "// RetryAfterCanceledIndex\n");
+            var tools = CreateTools(root);
+            using var canceled = new CancellationTokenSource();
+            canceled.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                tools.SearchTextAsync(
+                    "RetryAfterCanceledIndex",
+                    ".cs",
+                    10,
+                    canceled.Token));
+
+            var retry = await tools.SearchTextAsync(
+                "RetryAfterCanceledIndex", ".cs", 10);
+            Assert.Single(retry.Matches);
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public async Task ProjectSourceIndex_單一等待者取消時_不得取消其他共用等待者()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            for (var index = 0; index < 80; index++)
+            {
+                await File.WriteAllTextAsync(
+                    Path.Combine(root, $"Source{index:D3}.cs"),
+                    $"public sealed class SharedIndex{index:D3} {{ }}\n");
+            }
+            using var canceled = new CancellationTokenSource();
+            canceled.Cancel();
+
+            var canceledWaiter = ProjectSourceIndex.GetOrCreateAsync(
+                root,
+                cancellationToken: canceled.Token);
+            var activeWaiter = ProjectSourceIndex.GetOrCreateAsync(root);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => canceledWaiter);
+            var indexResult = await activeWaiter;
+            var search = await indexResult.SearchTextAsync(
+                "SharedIndex079",
+                ".cs",
+                10,
+                CancellationToken.None);
+            Assert.Single(search.Matches);
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public async Task ProjectSourceIndex_固定快照檔案變更後_文字與Symbol搜尋都應拒絕混用版本()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            var path = Path.Combine(root, "SnapshotType.cs");
+            await File.WriteAllTextAsync(path, "public sealed class SnapshotType { }\n");
+            var hash = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(path)));
+            var index = await ProjectSourceIndex.GetOrCreateAsync(
+                root,
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["SnapshotType.cs"] = hash,
+                });
+            await File.WriteAllTextAsync(path, "public sealed class ChangedSnapshotType { }\n");
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => index.SearchTextAsync(
+                "SnapshotType", ".cs", 10, CancellationToken.None));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => index.SearchSymbolsAsync(
+                "SnapshotType", true, 10, CancellationToken.None));
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
+    public async Task ProjectSourceIndex_固定快照檔案已刪除時_建立索引應失敗()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            var path = Path.Combine(root, "DeletedAfterIndex.cs");
+            await File.WriteAllTextAsync(path, "public sealed class DeletedAfterIndex { }\n");
+            var hash = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(path)));
+            File.Delete(path);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                ProjectSourceIndex.GetOrCreateAsync(
+                    root,
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["DeletedAfterIndex.cs"] = hash,
+                    }));
+        }
+        finally
+        {
+            ProjectSourceIndex.Forget(root);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchTextAsync_剛好等於上限時_不應誤報截斷()
+    {
+        var root = CreateTestRoot();
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "ExactLimit.cs"),
+                "// ExactLimitMarker\n// ExactLimitMarker\n");
+            var tools = CreateTools(root);
+
+            var exact = await tools.SearchTextAsync("ExactLimitMarker", ".cs", 2);
+            var truncated = await tools.SearchTextAsync("ExactLimitMarker", ".cs", 1);
+
+            Assert.Equal(2, exact.Matches.Count);
+            Assert.False(exact.WasTruncated);
+            Assert.Single(truncated.Matches);
+            Assert.True(truncated.WasTruncated);
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    [Fact]
     public async Task ReadFileRangeAsync_高行號超過安全上限時_應拒絕昂貴掃描()
     {
         var root = CreateTestRoot();
@@ -156,7 +367,7 @@ public sealed class ProjectAnalysisToolsRegressionTests
                 .CreateTools(includeGraphTools: false)
                 .Single(item => item.Name == "read_project_file_range");
 
-            for (var index = 1; index <= 8; index++)
+            for (var index = 1; index <= 4; index++)
             {
                 await tool.InvokeAsync(new AIFunctionArguments
                 {
@@ -169,7 +380,7 @@ public sealed class ProjectAnalysisToolsRegressionTests
             var result = await tool.InvokeAsync(new AIFunctionArguments
             {
                 ["filePath"] = "budget.txt",
-                ["startLine"] = 9,
+                ["startLine"] = 5,
                 ["lineCount"] = 1,
             });
             var json = result is JsonElement element
@@ -181,7 +392,7 @@ public sealed class ProjectAnalysisToolsRegressionTests
                 "budget_exhausted",
                 GetPropertyIgnoreCase(budget, "status").GetString());
             Assert.True(GetPropertyIgnoreCase(budget, "exhausted").GetBoolean());
-            Assert.Equal(8, GetPropertyIgnoreCase(budget, "totalUsed").GetInt32());
+            Assert.Equal(4, GetPropertyIgnoreCase(budget, "totalUsed").GetInt32());
             Assert.Contains(
                 "直接回答使用者",
                 GetPropertyIgnoreCase(budget, "nextAction").GetString());
@@ -414,6 +625,34 @@ public sealed class ProjectAnalysisToolsRegressionTests
     }
 
     [Fact]
+    public async Task BuildAnswerPromptAsync_已指定GraphVersion時_不得再次讀取Active版本()
+    {
+        var node = GraphNode.Create(
+            GraphNodeKind.DatabaseObject,
+            "db:ReconciliationLedger",
+            new Dictionary<string, object?> { ["name"] = "ReconciliationLedger" });
+        var store = DispatchProxy.Create<IGraphStore, RewriteGraphStoreProxy>();
+        var proxy = (RewriteGraphStoreProxy)(object)store;
+        proxy.RewriteHit = new GraphSearchHit(node, 5);
+        var service = new GraphRetrievalService(
+            store,
+            Options.Create(new GraphRetrievalOptions()),
+            NullLogger<GraphRetrievalService>.Instance);
+
+        var prompt = await service.BuildAnswerPromptAsync(
+            "test-project",
+            "D:\\test-project",
+            "Reconcile",
+            allowLlmQueryRewrite: false,
+            graphVersion: "graph-fixed");
+
+        Assert.Equal(0, proxy.ActiveManifestCallCount);
+        Assert.NotEmpty(proxy.GraphVersions);
+        Assert.All(proxy.GraphVersions, version => Assert.Equal("graph-fixed", version));
+        Assert.Contains("graph-fixed", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task BuildAnswerPromptAsync_使用者取消Rewrite時_不應吞掉取消訊號()
     {
         var store = DispatchProxy.Create<IGraphStore, RewriteGraphStoreProxy>();
@@ -501,6 +740,7 @@ public sealed class ProjectAnalysisToolsRegressionTests
         if (!fullRoot.StartsWith(expectedTemp, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("拒絕清理工作區 temp 以外的測試目錄。");
 
+        ProjectSourceIndex.Forget(fullRoot);
         if (Directory.Exists(fullRoot))
             Directory.Delete(fullRoot, recursive: true);
     }
@@ -537,17 +777,21 @@ public sealed class ProjectAnalysisToolsRegressionTests
     {
         public GraphSearchHit? RewriteHit { get; set; }
         public List<string> Queries { get; } = [];
+        public List<string?> GraphVersions { get; } = [];
+        public int ActiveManifestCallCount { get; private set; }
 
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
             switch (targetMethod?.Name)
             {
                 case nameof(IGraphStore.GetActiveManifestAsync):
+                    ActiveManifestCallCount++;
                     return Task.FromResult<string?>("graph-v1");
                 case nameof(IGraphStore.SearchAsync):
                 {
                     var query = (string)args![1]!;
                     Queries.Add(query);
+                    GraphVersions.Add(args.Length >= 4 ? args[3] as string : null);
                     IReadOnlyList<GraphSearchHit> hits =
                         query.Contains("Reconcile", StringComparison.OrdinalIgnoreCase) &&
                         RewriteHit is not null
@@ -558,6 +802,7 @@ public sealed class ProjectAnalysisToolsRegressionTests
                 case nameof(IGraphStore.GetNeighborsBatchAsync):
                 {
                     var nodeIds = (IReadOnlyList<string>)args![1]!;
+                    GraphVersions.Add(args!.Length >= 4 ? args[3] as string : null);
                     IReadOnlyDictionary<string, IReadOnlyList<GraphNeighbor>> result =
                         nodeIds.ToDictionary(
                             nodeId => nodeId,

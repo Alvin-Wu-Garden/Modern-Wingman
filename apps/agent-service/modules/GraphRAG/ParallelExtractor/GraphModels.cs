@@ -4,7 +4,6 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.CodeAnalysis;
 
-/// <summary>定義「CodeGraphData」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class CodeGraphData
 {
     private readonly Dictionary<string, GraphNode> _nodes = new(StringComparer.Ordinal);
@@ -36,7 +35,47 @@ sealed class CodeGraphData
         return node;
     }
 
-    /// <summary>加入「AddRelationship」所代表的圖譜抽取或匯入工作。</summary>
+    /// <summary>
+    /// 合併不同平行專案 fragment 的節點，同時消除原版 writer 的最後寫入競爭。
+    /// Method 的語法宣告含 <c>fileId</c>，Type 的語法宣告含 <c>startLine</c>；
+    /// 其他專案建立的語意 stub 不得覆寫這兩類正式宣告的 <c>kind</c>。
+    /// fragment 內部仍使用 <see cref="AddNode"/>，保留原始抽取規則。
+    /// </summary>
+    public GraphNode ApplyParallelFragmentNode(GraphNode incoming)
+    {
+        var key = $"{incoming.Label}|{incoming.Id}";
+        if (!_nodes.TryGetValue(key, out var node))
+        {
+            node = new GraphNode(incoming.Label, incoming.Id);
+            _nodes.Add(key, node);
+        }
+
+        var incomingIsDeclaration = IsSourceDeclaration(incoming.Label, incoming.Properties);
+        var existingIsDeclaration = IsSourceDeclaration(node.Label, node.Properties);
+        foreach (var property in incoming.Properties)
+        {
+            if (property.Value is null)
+                continue;
+            if (property.Key.Equals("kind", StringComparison.Ordinal) &&
+                existingIsDeclaration &&
+                !incomingIsDeclaration)
+                continue;
+            node.Properties[property.Key] = property.Value;
+        }
+
+        return node;
+    }
+
+    private static bool IsSourceDeclaration(
+        string label,
+        IReadOnlyDictionary<string, object?> properties) =>
+        label switch
+        {
+            "Method" => properties.ContainsKey("fileId"),
+            "Type" => properties.ContainsKey("startLine"),
+            _ => false,
+        };
+
     public GraphRelationship AddRelationship(
         string relationshipType,
         string startId,
@@ -143,10 +182,8 @@ sealed class CodeGraphData
     }
 }
 
-/// <summary>定義「GraphNode」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class GraphNode
 {
-    /// <summary>執行「GraphNode」所代表的圖譜抽取或匯入工作。</summary>
     public GraphNode(string label, string id)
     {
         Label = label;
@@ -158,10 +195,8 @@ sealed class GraphNode
     public Dictionary<string, object?> Properties { get; } = new(StringComparer.Ordinal);
 }
 
-/// <summary>定義「GraphRelationship」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class GraphRelationship
 {
-    /// <summary>執行「GraphRelationship」所代表的圖譜抽取或匯入工作。</summary>
     public GraphRelationship(string type, string startId, string endId)
     {
         Type = type;
@@ -179,7 +214,6 @@ sealed class GraphRelationship
     public List<string> Locations { get; } = new();
 }
 
-/// <summary>定義「GraphExtractionResult」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed record GraphExtractionResult(
     CodeGraphData Graph,
     int ProjectCount,
@@ -196,59 +230,45 @@ sealed record GraphExtractionResult(
     double LoadMilliseconds,
     double ExtractionMilliseconds);
 
-/// <summary>定義「GraphIds」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 static class GraphIds
 {
-    /// <summary>正規化「NormalizePath」所代表的圖譜抽取或匯入工作。</summary>
     public static string Solution(string solutionPath) => Create("solution", NormalizePath(solutionPath));
 
-    /// <summary>執行「Project」所代表的圖譜抽取或匯入工作。</summary>
     public static string Project(Project project)
     {
         var path = project.FilePath is null ? string.Empty : NormalizePath(project.FilePath);
         return Create("project", path, project.Name, project.AssemblyName ?? project.Name);
     }
 
-    /// <summary>正規化「NormalizePath」所代表的圖譜抽取或匯入工作。</summary>
     public static string File(string filePath) => Create("file", NormalizePath(filePath));
 
-    /// <summary>執行「Create」所代表的圖譜抽取或匯入工作。</summary>
     public static string Namespace(string namespaceName) => Create("namespace", namespaceName);
 
-    /// <summary>執行「Create」所代表的圖譜抽取或匯入工作。</summary>
     public static string Type(string projectId, string fullName) => Create("type", projectId, fullName);
 
-    /// <summary>執行「Method」所代表的圖譜抽取或匯入工作。</summary>
     public static string Method(string projectId, string containingTypeName, string signature)
         => Create("method", projectId, containingTypeName, signature);
 
-    /// <summary>執行「FallbackMethod」所代表的圖譜抽取或匯入工作。</summary>
     public static string FallbackMethod(string projectId, string fileId, int spanStart, string name)
         => Create("method-fallback", projectId, fileId, spanStart.ToString(), name);
 
-    /// <summary>執行「Chunk」所代表的圖譜抽取或匯入工作。</summary>
     public static string Chunk(string ownerId, string fileId, int spanStart)
         => Create("chunk", ownerId, fileId, spanStart.ToString());
 
-    /// <summary>執行「External」所代表的圖譜抽取或匯入工作。</summary>
     public static string External(string symbolKind, string assemblyName, string displayName)
         => Create("external", symbolKind, assemblyName, displayName);
 
-    /// <summary>正規化「NormalizePath」所代表的圖譜抽取或匯入工作。</summary>
     public static string NormalizePath(string path)
         => Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToUpperInvariant();
 
-    /// <summary>執行「StripGlobalPrefix」所代表的圖譜抽取或匯入工作。</summary>
     public static string StripGlobalPrefix(string displayName)
         => displayName.StartsWith("global::", StringComparison.Ordinal)
             ? displayName[8..]
             : displayName;
 
-    /// <summary>執行「HashText」所代表的圖譜抽取或匯入工作。</summary>
     public static string HashText(string text)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 
-    /// <summary>執行「Create」所代表的圖譜抽取或匯入工作。</summary>
     private static string Create(string prefix, params string[] values)
     {
         var canonical = string.Join("\u001f", values);
@@ -257,25 +277,19 @@ static class GraphIds
     }
 }
 
-/// <summary>定義「GraphSymbolFormatting」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 static class GraphSymbolFormatting
 {
-    /// <summary>執行「TypeName」所代表的圖譜抽取或匯入工作。</summary>
     public static string TypeName(INamedTypeSymbol symbol)
         => GraphIds.StripGlobalPrefix(symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
 
-    /// <summary>執行「MethodSignature」所代表的圖譜抽取或匯入工作。</summary>
     public static string MethodSignature(IMethodSymbol symbol)
         => symbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
 
-    /// <summary>執行「NamespaceName」所代表的圖譜抽取或匯入工作。</summary>
     public static string NamespaceName(INamespaceSymbol symbol)
         => symbol.IsGlobalNamespace ? string.Empty : symbol.ToDisplayString();
 
-    /// <summary>執行「ToString」所代表的圖譜抽取或匯入工作。</summary>
     public static string Accessibility(ISymbol symbol) => symbol.DeclaredAccessibility.ToString();
 
-    /// <summary>執行「Modifiers」所代表的圖譜抽取或匯入工作。</summary>
     public static string Modifiers(IMethodSymbol symbol)
     {
         var modifiers = new List<string>();

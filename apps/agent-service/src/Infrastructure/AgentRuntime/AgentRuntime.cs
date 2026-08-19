@@ -47,8 +47,9 @@ public sealed class AgentRuntime(
         if (factory is null)
         {
             logger.LogError("找不到支援 ProviderKind={Kind} 的 AgentFactory", request.Profile.Kind);
-            yield return $"[錯誤：不支援的模型供應商類型 {request.Profile.Kind}。]";
-            yield break;
+            throw new AgentRuntimeException(
+                "provider_unsupported",
+                $"目前不支援模型供應商類型「{request.Profile.Kind}」。");
         }
 
         // 在建立 provider agent 前包裝工具，讓「本輪工具上限」成為 Runtime 的
@@ -71,8 +72,10 @@ public sealed class AgentRuntime(
         var agent = factory.CreateAgent(context);
         if (agent is null)
         {
-            yield return "[錯誤：請至設定頁輸入 API Key。]";
-            yield break;
+            throw new AgentRuntimeException(
+                "provider_credential_missing",
+                "尚未設定此模型供應商的 API Key，請至設定頁完成設定。",
+                retryable: false);
         }
 
         logger.LogInformation(

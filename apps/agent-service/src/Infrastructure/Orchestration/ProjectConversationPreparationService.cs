@@ -44,7 +44,7 @@ public sealed class ProjectConversationPreparationService(
         | 網頁入口 | 找到功能 Menu、前端畫面與實際 URL／Action |
         | 交易功能 | 分析載入、上傳／暫存、格式檢核、保存、覆核與歷程的實際分支 |
         | 投資決策／成交回報 | 區分投決候選、成交回報寫入與歷史查詢，不預設相同狀態機 |
-        | 一般主檔／權限 | 依 CRUD、確認、角色／使用者／Menu／Action 的實際呼叫分析；權限入口可對照 `AuthManagement_FBLController`，仍需以前端呼叫確認 |
+        | 一般主檔／權限 | 依 CRUD、確認、角色／使用者／Menu／Action 的實際呼叫分析；權限入口必須由目前專案的 Controller、Service 與前端呼叫共同確認 |
         | 服務監控 | 服務健康／排程監控分開查找，優先檢查 `ServiceHealthMonitorController` 與 `ScheduleMonitorController` |
         | 自訂報表 | 追蹤 Menu、Template、XML 與 DataSource 關聯，逐項確認 SQL 語意與掛載狀態 |
 
@@ -88,7 +88,7 @@ public sealed class ProjectConversationPreparationService(
         ### 8.4 一般功能邊界
 
         - `200304`「貨幣市場基本資料維護（主檔）」屬一般主檔 CRUD／確認功能，依 `MoneyMarketDataMaintainController` 的 List／Save／Check／Upload 實際流程分析，不套用交易保存流程。
-        - 權限功能需區分角色、使用者、Menu、Action 與權限資料的實際責任；`AuthManagement_FBLController` 只作已定位的參照線索。
+        - 權限功能需區分角色、使用者、Menu、Action 與權限資料的實際責任，不得預設特定專案的 Controller 名稱。
         - 服務健康／排程監控是獨立功能邊界，優先查找 `ServiceHealthMonitorController` 與 `ScheduleMonitorController`。
 
         ### 8.5 商品與格式查找
@@ -172,10 +172,10 @@ public sealed class ProjectConversationPreparationService(
 
         ## 19. 唯讀專案工具呼叫規則
 
-        本輪對話最多可呼叫以下 10 個唯讀工具，依用途選用最省呼叫次數又足夠精確的工具，不得跳過必要步驟或亂猜參數：
+        系統已在呼叫模型前完成一次 GraphRAG 預檢索，最後一則 User 訊息中的 Context Pack 是本輪主要證據。以下 10 個唯讀工具全部可用，但每輪最多實際呼叫 4 次；只有 Context Pack 缺少回答所需的程式碼行、資料庫結構或特定鏈路時才補查，不得以相同關鍵字重做預檢索。
 
         1. `search_project_graph`：不確定節點名稱、想找候選 nodeId 時的第一步；輸入自然語言、業務名稱、程式符號或資料表名稱。
-        2. `list_project_graph_nodes`：已知節點種類（kind，例如 DatabaseObject、Menu、CodeClass），想列出該種類全部或用名稱篩選後的成員時使用（例如「有哪些資料表」「有哪些選單」）；比對同一分類重複呼叫 search_project_graph 換關鍵字更精準省次數。
+        2. `list_project_graph_nodes`：已知節點種類（kind，例如 DatabaseObject、MenuItem、Type），想列出該種類全部或用名稱篩選後的成員時使用（例如「有哪些資料表」「有哪些選單」）；比對同一分類重複呼叫 search_project_graph 換關鍵字更精準省次數。
         3. `trace_project_graph_paths`：已取得明確 nodeId，要追蹤上下游關係或完整資料流程時使用；一般深度 1-4，只要主幹（Menu→Endpoint→Controller→Service→DAL→資料庫）流程可用 backboneOnly=true 把深度提高到 8，一次取代逐層多次呼叫。
         4. `search_project_text`：Graph 沒有命中，或要找錯誤訊息、URL、動態字串等原始碼字面內容時使用；查詢盡量用完整識別字或詞組，避免用 GUID 或整段長字串當關鍵字（全文比對命中率低又慢）。
         5. `find_csharp_symbol`：已知 C# 符號名稱（class/method/property），要找定義或所有引用位置、且不確定在哪個檔案時使用。
@@ -217,7 +217,8 @@ public sealed class ProjectConversationPreparationService(
                     ct,
                     profile.Id,
                     modelId,
-                    activity: activity);
+                    activity: activity,
+                    graphVersion: graphContext.Version);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -244,9 +245,9 @@ public sealed class ProjectConversationPreparationService(
             graphStore,
             activity,
             toolsLogger,
-            await ResolveDatabaseSourceAsync(project, ct),
-            graphContext.Version,
-            manifestStore);
+            graphVersion: graphContext.Version,
+            manifests: manifestStore,
+            databases: await ResolveDatabaseSourcesAsync(project, ct));
         var graphToolsAvailable = graphStatus is "ready" or "stale";
         var tools = analysisTools.CreateTools(graphToolsAvailable);
 
@@ -258,7 +259,7 @@ public sealed class ProjectConversationPreparationService(
             graphStatus,
             graphWarning,
             GraphVersion: graphContext.Version,
-            MaxToolCalls: 8,
+            MaxToolCalls: 4,
             GetToolCallUsage: () => new ToolCallUsageSummary(
                 analysisTools.TotalToolCallCount,
                 analysisTools.ToolCallCountsByCategory.ToDictionary(
@@ -270,13 +271,13 @@ public sealed class ProjectConversationPreparationService(
     /// 解析專案設定的唯讀資料庫來源，供資料庫結構/定義工具使用。
     /// 尚未設定或設定不完整都只回傳 null，不能因為資料庫工具用不了就擋住整輪問答準備。
     /// </summary>
-    private async Task<GraphDatabaseSource?> ResolveDatabaseSourceAsync(
+    private async Task<IReadOnlyList<GraphDatabaseSource>> ResolveDatabaseSourcesAsync(
         ProjectEntity project,
         CancellationToken cancellationToken)
     {
         try
         {
-            return await databaseSourceProvider.GetAsync(project, cancellationToken);
+            return await databaseSourceProvider.GetAllAsync(project, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -284,7 +285,7 @@ public sealed class ProjectConversationPreparationService(
                 exception,
                 "解析專案資料庫連線失敗，本輪資料庫工具將回報尚未設定。ProjectId={ProjectId}",
                 project.Id);
-            return null;
+            return [];
         }
     }
 
@@ -353,7 +354,7 @@ public sealed class ProjectConversationPreparationService(
         string rootPath,
         string warning) =>
         $"""
-        你正在分析 FBL 投資系統專案，專案根目錄為：{rootPath}
+        你正在分析 Modern Wingman 中目前選取的專案，專案根目錄為：{rootPath}
 
         本輪知識圖譜狀態：{warning}
         請不要假設不存在的 Graph 節點或鏈路。請優先使用本輪提供的唯讀工具：

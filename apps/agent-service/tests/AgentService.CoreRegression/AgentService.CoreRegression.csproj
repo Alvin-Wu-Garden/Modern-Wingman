@@ -9,6 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- 直接鎖定主服務使用的 Azure 相依版本，避免測試專案因 Roslyn 舊版
+         間接相依而產生可預防的版本衝突警告。 -->
+    <PackageReference Include="Azure.Core" Version="1.44.1" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="6.0.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.6.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
@@ -17,5 +21,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\AgentService.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- UnitTests 目錄沒有獨立專案；明確納入既有測試，避免測試檔存在卻從未執行。 -->
+    <Compile Include="..\UnitTests\**\*.cs" Link="UnitTests\%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

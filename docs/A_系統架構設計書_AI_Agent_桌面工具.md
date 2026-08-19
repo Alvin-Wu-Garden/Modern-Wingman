@@ -67,7 +67,7 @@
    UI、桌面橋接、Agent Runtime、Tool Runtime、Policy Engine、Persistence 各自分層。
 
 3. **Provider Agnostic（模型供應商中立）**  
-   不將系統設計綁死在單一模型供應商，保留 OpenAI / Anthropic / Azure OpenAI / Foundry 等擴充能力。
+   不將系統設計綁死在單一模型供應商，保留 OpenAI / Anthropic / Azure OpenAI 等擴充能力。
 
 4. **Auditability（可審計）**  
    所有高風險操作必須可追溯，至少留下 request、decision、executor、result。

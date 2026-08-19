@@ -5,7 +5,7 @@ using AgentService.Modules.GraphRAG;
 namespace AgentService.Host.RestEndpoints;
 
 /// <summary>
-/// 提供 FBL Graph 索引與檢索的唯讀診斷端點。
+/// 提供專案 Graph 索引與檢索的唯讀診斷端點。
 /// 回應只包含版本、數量、節點 key/type 與分數，不回傳原始碼、連線字串或 Evidence 內容。
 /// </summary>
 public static class ProjectIndexDiagnosticsEndpoints
@@ -24,7 +24,7 @@ public static class ProjectIndexDiagnosticsEndpoints
         string Role,
         double Score);
 
-    /// <summary>註冊本機驗收所需的 FBL 診斷 API。</summary>
+    /// <summary>註冊本機驗收所需的專案圖譜診斷 API。</summary>
     public static IEndpointRouteBuilder MapProjectIndexDiagnosticsEndpoints(
         this IEndpointRouteBuilder app)
     {
@@ -69,7 +69,7 @@ public static class ProjectIndexDiagnosticsEndpoints
             : Results.NotFound();
     }
 
-    /// <summary>量測建立 FBL Context Pack 的時間與大小，不呼叫 LLM。</summary>
+    /// <summary>量測建立專案 Context Pack 的時間與大小，不呼叫 LLM。</summary>
     private static async Task<IResult> MeasureRetrieval(
         string id,
         RetrievalDiagnosticsRequest request,
@@ -101,7 +101,7 @@ public static class ProjectIndexDiagnosticsEndpoints
         });
     }
 
-    /// <summary>量測 active FBL Graph 的確定性多路 BM25 seed；不呼叫 LLM。</summary>
+    /// <summary>量測 active Graph 的確定性多路 BM25 seed；不呼叫 LLM。</summary>
     private static async Task<IResult> MeasureSeeds(
         string id,
         SeedDiagnosticsRequest request,
@@ -123,7 +123,7 @@ public static class ProjectIndexDiagnosticsEndpoints
         if (string.IsNullOrWhiteSpace(version) || project.IndexManifestVersion != version)
         {
             return Results.Json(
-                new { error = "目前沒有與專案 manifest 一致的 active FBL Graph。" },
+                new { error = "目前沒有與專案 manifest 一致的 active Graph。" },
                 statusCode: StatusCodes.Status409Conflict);
         }
         var limit = Math.Clamp(request.Limit ?? 10, 1, 20);
@@ -197,7 +197,7 @@ public static class ProjectIndexDiagnosticsEndpoints
         });
     }
 
-    /// <summary>安全讀取 authority properties 的顯示字串。</summary>
+    /// <summary>安全讀取抽取屬性的顯示字串。</summary>
     private static string StringProperty(
         IReadOnlyDictionary<string, object?> properties,
         string key) =>

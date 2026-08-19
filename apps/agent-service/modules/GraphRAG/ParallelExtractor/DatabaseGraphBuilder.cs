@@ -75,7 +75,6 @@ sealed class DatabaseGraphBuilder
         return _graph;
     }
 
-    /// <summary>建立「BuildDatabaseObjects」所代表的圖譜抽取或匯入工作。</summary>
     private void BuildDatabaseObjects()
     {
         var databaseId = StableId.For("database", _database.DatabaseName);
@@ -207,7 +206,6 @@ sealed class DatabaseGraphBuilder
         return id;
     }
 
-    /// <summary>確保「EnsureStoredProcedure」所代表的圖譜抽取或匯入工作。</summary>
     private string EnsureStoredProcedure(string rawName)
     {
         var clean = rawName.Trim().Trim(';').Replace("[", string.Empty, StringComparison.Ordinal).Replace("]", string.Empty, StringComparison.Ordinal);
@@ -246,7 +244,6 @@ sealed class DatabaseGraphBuilder
         return id;
     }
 
-    /// <summary>取得「GetDatabaseObjectId」所代表的圖譜抽取或匯入工作。</summary>
     private string? GetDatabaseObjectId(string schemaName, string objectName, string? objectType)
     {
         var item = _database.Resolve(schemaName, objectName, objectType);
@@ -264,7 +261,6 @@ sealed class DatabaseGraphBuilder
         return AddDatabaseObject(item);
     }
 
-    /// <summary>建立「BuildDatabaseDependencies」所代表的圖譜抽取或匯入工作。</summary>
     private void BuildDatabaseDependencies()
     {
         foreach (var item in _database.Objects.Where(item => !string.IsNullOrWhiteSpace(item.Definition)))
@@ -307,7 +303,6 @@ sealed class DatabaseGraphBuilder
         }
     }
 
-    /// <summary>建立「BuildConnections」所代表的圖譜抽取或匯入工作。</summary>
     private void BuildConnections()
     {
         foreach (var file in EnumerateFiles(_sourceRoot, "*.config"))
@@ -327,8 +322,7 @@ sealed class DatabaseGraphBuilder
                 var attributes = AttributeRegex.Matches(match.Value)
                     .ToDictionary(item => item.Groups["name"].Value, item => WebUtility.HtmlDecode(item.Groups["value"].Value), StringComparer.OrdinalIgnoreCase);
                 if (!attributes.TryGetValue("connectionString", out var connectionString) ||
-                    (!connectionString.Contains("FBL_SPV_SIT", StringComparison.OrdinalIgnoreCase) &&
-                     !connectionString.Contains("127.0.0.1,3301", StringComparison.OrdinalIgnoreCase)))
+                    !TargetsConfiguredDatabase(connectionString))
                 {
                     continue;
                 }
@@ -363,7 +357,21 @@ sealed class DatabaseGraphBuilder
         }
     }
 
-    /// <summary>建立「BuildSchedules」所代表的圖譜抽取或匯入工作。</summary>
+    /// <summary>
+    /// 只建立指向使用者目前設定資料庫的 ConnectionProfile；判斷依據來自連線設定，
+    /// 不綁定特定客戶的 server 或 database 名稱。
+    /// </summary>
+    private bool TargetsConfiguredDatabase(string connectionString)
+    {
+        var dataSource = ExtractConnectionPart(connectionString, "Data Source");
+        var initialCatalog = ExtractConnectionPart(connectionString, "Initial catalog")
+            ?? ExtractConnectionPart(connectionString, "Initial Catalog");
+        return string.Equals(dataSource, _server, StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(initialCatalog, _source, StringComparison.OrdinalIgnoreCase) ||
+               connectionString.Contains(_server, StringComparison.OrdinalIgnoreCase) ||
+               connectionString.Contains(_source, StringComparison.OrdinalIgnoreCase);
+    }
+
     private void BuildSchedules()
     {
         var definitions = new Dictionary<string, ScheduleDefinition>(StringComparer.OrdinalIgnoreCase);
@@ -590,8 +598,8 @@ sealed class DatabaseGraphBuilder
             BuildXmlDataSourceDetails(dataSourceId, xml, sqlText);
         }
 
-        // ReportDocument nodes are created before the data-source catalog is loaded.
-        // Resolve the exact SerialID links after all ReportDataSource nodes exist.
+        // ReportDocument 節點會早於 DataSource Catalog 建立；必須等所有
+        // ReportDataSource 節點完成後，再解析精確的 SerialID 關聯。
         foreach (var template in _database.ReportTemplates.Where(item => item.Xml is not null))
         {
             var templateId = _templateIds[template.TemplateId];
@@ -1066,7 +1074,6 @@ sealed class DatabaseGraphBuilder
         return id;
     }
 
-    /// <summary>掃描「ScanSourceCode」所代表的圖譜抽取或匯入工作。</summary>
     private void ScanSourceCode()
     {
         foreach (var file in EnumerateFiles(_sourceRoot, "*.cs"))
@@ -1109,9 +1116,9 @@ sealed class DatabaseGraphBuilder
                             continue;
                         }
 
-                        // Unqualified EXEC names are retained for historical/missing
-                        // objects only when they look like a stored procedure name.
-                        // This prevents ordinary words in SQL/log messages from becoming calls.
+                        // 未限定 Schema 的 EXEC 名稱只有在外觀符合 Stored Procedure
+                        // 命名時才保留，供歷史或缺失物件使用；避免 SQL／Log 中的一般文字
+                        // 被誤判為呼叫關係。
                         var knownProcedure = _database.Resolve(schema, name, "StoredProcedure");
                         if (knownProcedure is null && !LooksLikeStoredProcedure(name))
                         {
@@ -1178,7 +1185,6 @@ sealed class DatabaseGraphBuilder
         }
     }
 
-    /// <summary>加入「AddParameterBindings」所代表的圖譜抽取或匯入工作。</summary>
     private void AddParameterBindings(string methodId, string procedureId, string[] parameterNames, string sourceFile, int sourceLine)
     {
         var procedureName = _graph.Nodes.FirstOrDefault(node => node.Id == procedureId)?.Properties.TryGetValue("name", out var name) == true ? name?.ToString() : null;
@@ -1203,7 +1209,6 @@ sealed class DatabaseGraphBuilder
         }
     }
 
-    /// <summary>加入「AddDynamicCall」所代表的圖譜抽取或匯入工作。</summary>
     private void AddDynamicCall(string file, SyntaxNode methodNode)
     {
         var filePath = StableId.NormalizePath(file);
@@ -1232,7 +1237,6 @@ sealed class DatabaseGraphBuilder
         });
     }
 
-    /// <summary>加入「AddViewRelations」所代表的圖譜抽取或匯入工作。</summary>
     private void AddViewRelations(SyntaxNode methodNode, string methodId, string sourceFile)
     {
         var className = methodNode.Ancestors().OfType<ClassDeclarationSyntax>().FirstOrDefault()?.Identifier.ValueText;
@@ -1284,7 +1288,6 @@ sealed class DatabaseGraphBuilder
         }
     }
 
-    /// <summary>加入「AddSqlReferences」所代表的圖譜抽取或匯入工作。</summary>
     private void AddSqlReferences(string sourceId, string sqlText, string evidence)
     {
         foreach (var reference in SqlReferenceExtractor.Extract(sqlText, _database))
@@ -1310,7 +1313,6 @@ sealed class DatabaseGraphBuilder
         }
     }
 
-    /// <summary>取得「LoadCategoryConstants」所代表的圖譜抽取或匯入工作。</summary>
     private Dictionary<string, string> LoadCategoryConstants()
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1328,7 +1330,6 @@ sealed class DatabaseGraphBuilder
         return result;
     }
 
-    /// <summary>取得「FindTypeInProject」所代表的圖譜抽取或匯入工作。</summary>
     private TypeIndexEntry? FindTypeInProject(string name, string? projectId)
     {
         if (!_codeIndex.TypesByName.TryGetValue(name, out var candidates))
@@ -1339,7 +1340,6 @@ sealed class DatabaseGraphBuilder
         return candidates.FirstOrDefault(candidate => projectId is null || candidate.ProjectId == projectId);
     }
 
-    /// <summary>正規化「NormalizeLink」所代表的圖譜抽取或匯入工作。</summary>
     private static string NormalizeLink(string value)
     {
         var normalized = value.Trim().Replace('\\', '/');
@@ -1350,7 +1350,6 @@ sealed class DatabaseGraphBuilder
             : "/" + normalized;
     }
 
-    /// <summary>執行「ClassifyLink」所代表的圖譜抽取或匯入工作。</summary>
     private static string ClassifyLink(string link)
     {
         if (link.StartsWith("->", StringComparison.Ordinal)) return "Redirect";
@@ -1361,14 +1360,12 @@ sealed class DatabaseGraphBuilder
         return "MVC";
     }
 
-    /// <summary>抽取「ExtractConnectionPart」所代表的圖譜抽取或匯入工作。</summary>
     private static string? ExtractConnectionPart(string connectionString, string key)
     {
         var match = Regex.Match(connectionString, $"(?i)(?:^|;)\\s*{Regex.Escape(key)}\\s*=\\s*([^;]*)");
         return match.Success ? match.Groups[1].Value.Trim() : null;
     }
 
-    /// <summary>解析「ParseXml」所代表的圖譜抽取或匯入工作。</summary>
     private static XDocument? ParseXml(string? xml)
     {
         if (string.IsNullOrWhiteSpace(xml)) return null;
@@ -1376,33 +1373,27 @@ sealed class DatabaseGraphBuilder
         catch { return null; }
     }
 
-    /// <summary>抽取「ExtractSqlScript」所代表的圖譜抽取或匯入工作。</summary>
     private static string? ExtractSqlScript(XDocument? document)
         => document?.Descendants().Where(element => element.Name.LocalName.Equals("SQLScript", StringComparison.OrdinalIgnoreCase)).Select(element => element.Value).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
 
-    /// <summary>執行「AttributeValue」所代表的圖譜抽取或匯入工作。</summary>
     private static string? AttributeValue(XElement element, string name)
         => element.Attributes().FirstOrDefault(attribute => attribute.Name.LocalName.Equals(name, StringComparison.OrdinalIgnoreCase))?.Value;
 
-    /// <summary>取得「GetSchema」所代表的圖譜抽取或匯入工作。</summary>
     private static string? GetSchema(string name)
     {
         var parts = name.Replace("[", string.Empty, StringComparison.Ordinal).Replace("]", string.Empty, StringComparison.Ordinal).Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         return parts.Length > 1 ? parts[^2] : "dbo";
     }
 
-    /// <summary>取得「GetObjectName」所代表的圖譜抽取或匯入工作。</summary>
     private static string GetObjectName(string name)
         => name.Replace("[", string.Empty, StringComparison.Ordinal).Replace("]", string.Empty, StringComparison.Ordinal).Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)[^1];
 
-    /// <summary>執行「LastTypeNamePart」所代表的圖譜抽取或匯入工作。</summary>
     private static string LastTypeNamePart(string value)
     {
         var clean = value.Replace("IsTypeOf(", string.Empty, StringComparison.Ordinal).Trim(')', ' ');
         return clean.Split('.').LastOrDefault() ?? clean;
     }
 
-    /// <summary>抽取「ExtractStringLiterals」所代表的圖譜抽取或匯入工作。</summary>
     private static IEnumerable<string> ExtractStringLiterals(SyntaxNode node)
     {
         foreach (var literal in node.DescendantNodes().OfType<LiteralExpressionSyntax>()
@@ -1417,13 +1408,11 @@ sealed class DatabaseGraphBuilder
         }
     }
 
-    /// <summary>執行「LooksLikeStoredProcedure」所代表的圖譜抽取或匯入工作。</summary>
     private static bool LooksLikeStoredProcedure(string name)
         => name.StartsWith("apex_sp_", StringComparison.OrdinalIgnoreCase) ||
            name.StartsWith("fbl_sp_", StringComparison.OrdinalIgnoreCase) ||
            name.StartsWith("get", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>加入「AddCall」所代表的圖譜抽取或匯入工作。</summary>
     private static void AddCall(Dictionary<string, HashSet<string>> calls, string name)
     {
         var parts = name.Replace("[", string.Empty, StringComparison.Ordinal).Replace("]", string.Empty, StringComparison.Ordinal).Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -1431,7 +1420,6 @@ sealed class DatabaseGraphBuilder
         calls.TryAdd(normalized, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
     }
 
-    /// <summary>執行「EnumerateFiles」所代表的圖譜抽取或匯入工作。</summary>
     private static IEnumerable<string> EnumerateFiles(string root, string pattern)
     {
         if (!Directory.Exists(root)) yield break;
@@ -1452,20 +1440,16 @@ sealed class DatabaseGraphBuilder
         }
     }
 
-    /// <summary>定義「ScheduleDefinition」資料結構或服務職責，供圖譜抽取流程使用。</summary>
     private sealed record ScheduleDefinition(string Name, string FilePath, string TaskId);
 }
 
-/// <summary>定義「SqlReference」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed record SqlReference(DbObjectInfo Target, string Access, string Confidence);
 
-/// <summary>定義「SqlReferenceExtractor」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 static class SqlReferenceExtractor
 {
     private static readonly Regex QualifiedToken = new(@"(?<schema>\[?[A-Za-z_]\w*\]?)\s*\.\s*(?<name>\[?[A-Za-z_]\w*\]?)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex Identifier = new(@"\[?[A-Za-z_]\w*\]?", RegexOptions.Compiled);
 
-    /// <summary>抽取「Extract」所代表的圖譜抽取或匯入工作。</summary>
     public static IEnumerable<SqlReference> Extract(string sql, DatabaseMetadata database)
     {
         var clean = Regex.Replace(sql, @"/\*[\s\S]*?\*/|--[^\r\n]*", " ");
@@ -1490,7 +1474,6 @@ static class SqlReferenceExtractor
         }
     }
 
-    /// <summary>執行「AccessAround」所代表的圖譜抽取或匯入工作。</summary>
     private static string AccessAround(string sql, int index, DbObjectInfo target)
     {
         var prefix = sql[Math.Max(0, index - 180)..index];

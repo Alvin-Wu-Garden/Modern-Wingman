@@ -1,8 +1,6 @@
 using System.ComponentModel;
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using AgentService.Application.Contracts;
 using Microsoft.CodeAnalysis;
@@ -23,8 +21,6 @@ namespace AgentService.Modules.GraphRAG;
 public sealed class ProjectAnalysisTools
 {
     private const int MaximumTextSearchResults = 100;
-    // 有界並行度：太高會在旋轉硬碟或網路磁碟機上造成 I/O 爭搶而反而更慢，8 是本機 SSD 與網路磁碟機都安全的折衷值。
-    private const int TextSearchConcurrency = 8;
     private const int MaximumGraphSearchResults = 20;
     private const int MaximumGraphPaths = 80;
     private const int MaximumGraphPathDepth = 4;
@@ -34,16 +30,15 @@ public sealed class ProjectAnalysisTools
     private const int MaximumReadLines = 2_000;
     private const int MaximumReadStartLine = 100_000;
     private const long MaximumReadFileBytes = 16 * 1024 * 1024;
-    private const long MaximumSearchFileBytes = 4 * 1024 * 1024;
     private const int MaximumGraphNodeListResults = 100;
     private const int MaximumOutlineMembers = 300;
     private const int MaximumDatabaseObjectResults = 200;
     // 預存程序/函式定義可能長達數千行；截斷長度跟其他工具的預覽上限同一等級，避免單一工具洗版整個 Context。
     private const int MaximumDatabaseDefinitionCharacters = 8_000;
     private const int DatabaseCommandTimeoutSeconds = 15;
-    // Runtime 與工具本身都採同一個八次硬上限，避免不同 Provider 的工具迴圈
-    // 繞過 Prompt 指示而持續消耗 Token；相同參數快取命中不重複計次。
-    private const int MaximumToolCalls = 8;
+    // Runtime 與工具本身都採同一個四次硬上限，避免不同 Provider 的工具迴圈
+    // 繞過 Prompt 指示而持續消耗 Token；快取只節省 I/O，不繞過模型呼叫次數。
+    private const int MaximumToolCalls = 4;
     private const int MaximumGraphSearchCalls = 4;
     private const int MaximumGraphPathCalls = 6;
     private const int MaximumTextSearchCalls = 8;
@@ -52,15 +47,10 @@ public sealed class ProjectAnalysisTools
     private const int MaximumGraphNodeListCalls = 4;
     private const int MaximumOutlineCalls = 6;
     private const int MaximumDatabaseSchemaCalls = 6;
-    private const int MaximumCachedSourceBytes = 64 * 1024 * 1024;
     // 直接取 ParallelExtractor 的原始節點標籤列舉，避免工具清單殘留已移除的
     // Wingman 相容名稱（例如 CodeClass、Endpoint、Menu）。
     private static readonly string[] SupportedGraphNodeKinds =
-        Enum.GetNames<FblAuthority.GraphNodeKind>();
-    // 目錄 watcher 現在會依事件種類主動失效（結構性異動才清整個清單），
-    // 這裡的存活期只是 watcher 不可用時的安全網，因此可以拉長，避免長對話中途
-    // 因為單純內容編輯就觸發整個專案的目錄重新掃描。
-    private static readonly TimeSpan FileCatalogLifetime = TimeSpan.FromMinutes(10);
+        Enum.GetNames<ExtractedGraph.GraphNodeKind>();
     private static readonly HashSet<string> SearchableExtensions = new(
         [
             ".cs", ".csproj", ".sln",
@@ -70,12 +60,6 @@ public sealed class ProjectAnalysisTools
             ".md", ".txt", ".yaml", ".yml",
         ],
         StringComparer.OrdinalIgnoreCase);
-    private static readonly HashSet<string> ExcludedDirectories = new(
-        [
-            ".git", ".svn", ".vs", "bin", "obj", "node_modules",
-            "packages", "dist", "build", "out", "target", "vendor",
-        ],
-        StringComparer.OrdinalIgnoreCase);
 
     private readonly string _projectId;
     private readonly string _rootPath;
@@ -83,7 +67,7 @@ public sealed class ProjectAnalysisTools
     private readonly IGraphStore _graphStore;
     private readonly IProjectIndexManifestStore? _manifests;
     private readonly string? _graphVersion;
-    private readonly GraphDatabaseSource? _database;
+    private readonly IReadOnlyList<GraphDatabaseSource> _databases;
     private readonly AgentActivityReporter? _activity;
     private readonly ILogger<ProjectAnalysisTools>? _logger;
     private readonly object _toolCacheGate = new();
@@ -98,15 +82,6 @@ public sealed class ProjectAnalysisTools
     /// <summary>本輪各類別工具的呼叫次數快照；用於串流結束後記錄診斷摘要 log。</summary>
     public IReadOnlyDictionary<ToolCategory, int> ToolCallCountsByCategory => _toolCounts;
 
-    // 目錄清單與小型原始碼快取跨越單次對話工具實例共用；檔案 watcher 會依結構性／
-    // 內容異動主動失效，10 分鐘生命週期則是 watcher 不可用時的安全上限，不會把舊內容永久留在記憶體。
-    private static readonly ConcurrentDictionary<string, Lazy<FileCatalogSnapshot>> FileCatalogs = new(
-        StringComparer.OrdinalIgnoreCase);
-    private static readonly object SourceCacheGate = new();
-    private static readonly Dictionary<string, CachedSource> SourceCache = new(
-        StringComparer.OrdinalIgnoreCase);
-    private static long _cachedSourceBytes;
-
     /// <summary>
     /// 建立綁定單一專案的唯讀工具集合。
     /// </summary>
@@ -115,7 +90,12 @@ public sealed class ProjectAnalysisTools
     /// <param name="graphStore">目前專案 Graph 的唯讀查詢來源。</param>
     /// <param name="activity">目前問答要求的進度事件回報器；可為 null。</param>
     /// <param name="logger">工具內部失敗時的診斷紀錄器；可為 null。</param>
-    /// <param name="database">專案設定的唯讀資料庫連線來源；尚未設定資料庫時為 null。</param>
+    /// <param name="database">單一資料庫的舊呼叫入口；新程式碼應使用 <paramref name="databases"/>。</param>
+    /// <param name="graphVersion">本輪問答固定使用的 immutable Graph 版本。</param>
+    /// <param name="manifests">用來取得固定版本檔案雜湊的 manifest store。</param>
+    /// <param name="databases">專案已設定的 SQL Server 與 SQLite 唯讀連線來源。</param>
+    /// <exception cref="ArgumentException"><paramref name="projectId"/> 或 <paramref name="rootPath"/> 為空白。</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="graphStore"/> 為 null。</exception>
     public ProjectAnalysisTools(
         string projectId,
         string rootPath,
@@ -124,7 +104,8 @@ public sealed class ProjectAnalysisTools
         ILogger<ProjectAnalysisTools>? logger = null,
         GraphDatabaseSource? database = null,
         string? graphVersion = null,
-        IProjectIndexManifestStore? manifests = null)
+        IProjectIndexManifestStore? manifests = null,
+        IReadOnlyList<GraphDatabaseSource>? databases = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
@@ -137,45 +118,19 @@ public sealed class ProjectAnalysisTools
         _graphStore = graphStore;
         _graphVersion = string.IsNullOrWhiteSpace(graphVersion) ? null : graphVersion;
         _manifests = manifests;
-        _database = database;
+        _databases = databases ?? (database is null ? [] : [database]);
         _activity = activity;
         _logger = logger;
     }
 
-    /// <summary>
-    /// 由檔案 watcher 通知工具快取某一個檔案已失效。
-    /// 只有新增、刪除或重新命名（<paramref name="structuralChange"/> 為 true）才會讓目前
-    /// 專案的目錄清單失效並在下一次查詢重新掃描整個目錄樹；純內容修改只會移除該檔案自己的
-    /// 原始碼快取，不會讓已經建好的目錄清單失效。這避免一般存檔動作在進行中對話期間反覆
-    /// 觸發全專案目錄掃描，只有真正新增或刪除檔案時才需要重建清單。
-    /// </summary>
-    public static void InvalidateFileCatalog(string changedPath, bool structuralChange = true)
-    {
-        if (string.IsNullOrWhiteSpace(changedPath))
-            return;
-
-        var fullPath = Path.GetFullPath(changedPath);
-        if (structuralChange)
-        {
-            foreach (var pair in FileCatalogs)
-            {
-                if (IsInsideRoot(pair.Key, fullPath))
-                    FileCatalogs.TryRemove(pair.Key, out _);
-            }
-        }
-
-        lock (SourceCacheGate)
-        {
-            if (SourceCache.Remove(fullPath, out var cached))
-                _cachedSourceBytes -= cached.ByteLength;
-        }
-    }
+    #region Agent 工具註冊與執行控制
 
     /// <summary>
     /// 建立本輪 Agent 可呼叫的唯讀 Function Tools。
     /// 每一輪都使用綁定當前 projectId 與 rootPath 的實例，模型無法自行切換到其他專案。
     /// 工具包裝器只回報開始、完成與失敗狀態，不會把完整工具輸出直接送到前端。
     /// </summary>
+    /// <param name="includeGraphTools">是否加入需要 Neo4j snapshot 的三個 Graph 工具。</param>
     /// <returns>只包含查詢能力的 MAF 工具集合。</returns>
     public IReadOnlyList<AIFunction> CreateTools(bool includeGraphTools = true)
     {
@@ -222,17 +177,17 @@ public sealed class ProjectAnalysisTools
             "讀取單一 .cs 檔案的結構大綱（namespace/class/method/property/field 定義與行號範圍），不包含完整程式碼內容。" +
             "適合大型檔案在呼叫 read_project_file_range 前先確認要讀哪個行號區間，比盲目分段讀取更精確。filePath 規則與 read_project_file_range 相同。"));
         tools.Add(AIFunctionFactory.Create(
-            (Func<string?, string?, int, CancellationToken, Task<DatabaseObjectListToolResult>>)ListDatabaseObjectsWithActivityAsync,
+            (Func<string?, string?, int, string?, CancellationToken, Task<DatabaseObjectListToolResult>>)ListDatabaseObjectsWithActivityAsync,
             "list_database_objects",
             "列出目前專案設定資料庫中實際存在的資料表、檢視表、預存程序或函式，可用名稱與種類篩選。" +
-            "資料庫是這些物件的權威來源，比對簽入版控的 .sql 檔案做全文搜尋更準確也更快；專案尚未設定資料庫連線時會回傳提示。"));
+            "同時設定 SQL Server 與 SQLite 時可用 provider 指定來源；資料庫是這些物件的權威來源。"));
         tools.Add(AIFunctionFactory.Create(
-            (Func<string, CancellationToken, Task<DatabaseTableDescriptionToolResult>>)DescribeDatabaseTableWithActivityAsync,
+            (Func<string, string?, CancellationToken, Task<DatabaseTableDescriptionToolResult>>)DescribeDatabaseTableWithActivityAsync,
             "describe_database_table",
             "查詢目前專案設定資料庫中指定資料表或檢視表實際部署的欄位結構（型別、可否為 Null、主鍵）與外鍵關聯。" +
             "先用 list_database_objects 確認正確名稱；查到的結構反映目前實際部署狀態，可能與簽入版控的 Schema 檔案不同步。"));
         tools.Add(AIFunctionFactory.Create(
-            (Func<string, CancellationToken, Task<DatabaseObjectDefinitionToolResult>>)GetDatabaseObjectDefinitionWithActivityAsync,
+            (Func<string, string?, CancellationToken, Task<DatabaseObjectDefinitionToolResult>>)GetDatabaseObjectDefinitionWithActivityAsync,
             "get_database_object_definition",
             "讀取目前專案設定資料庫中檢視表、預存程序或函式實際部署的 SQL 定義文字。" +
             "正式環境可能已直接修改過而未同步簽入版控，這個工具取得的才是目前真正在執行的邏輯；純資料表沒有可讀取的定義。"));
@@ -415,11 +370,12 @@ public sealed class ProjectAnalysisTools
         string? nameFilter,
         string? kind,
         int maxResults,
-        CancellationToken cancellationToken)
+        string? provider = null,
+        CancellationToken cancellationToken = default)
     {
         var safeNameFilter = string.IsNullOrWhiteSpace(nameFilter) ? null : nameFilter.Trim();
         var safeKind = string.IsNullOrWhiteSpace(kind) ? null : kind.Trim();
-        if (_database is null)
+        if (_databases.Count == 0)
         {
             return Task.FromResult(new DatabaseObjectListToolResult(
                 safeNameFilter, safeKind, [], false, NoDatabaseConfiguredNotice));
@@ -430,8 +386,8 @@ public sealed class ProjectAnalysisTools
             "查詢資料庫物件清單",
             cancellationToken,
             ToolCategory.DatabaseSchema,
-            $"{safeNameFilter}|{safeKind}|{Math.Clamp(maxResults, 1, MaximumDatabaseObjectResults)}",
-            () => ListDatabaseObjectsAsync(nameFilter, kind, maxResults, cancellationToken),
+            $"{safeNameFilter}|{safeKind}|{provider}|{Math.Clamp(maxResults, 1, MaximumDatabaseObjectResults)}",
+            () => ListDatabaseObjectsAsync(nameFilter, kind, provider, maxResults, cancellationToken),
             result => result.WasTruncated
                 ? $"找到 {result.Objects.Count} 個物件（已達上限，還有更多未列出）"
                 : $"找到 {result.Objects.Count} 個物件",
@@ -441,10 +397,11 @@ public sealed class ProjectAnalysisTools
 
     private Task<DatabaseTableDescriptionToolResult> DescribeDatabaseTableWithActivityAsync(
         string tableName,
-        CancellationToken cancellationToken)
+        string? provider = null,
+        CancellationToken cancellationToken = default)
     {
         var safeTableName = (tableName ?? string.Empty).Trim();
-        if (_database is null)
+        if (_databases.Count == 0)
         {
             return Task.FromResult(new DatabaseTableDescriptionToolResult(
                 safeTableName, [], [], NoDatabaseConfiguredNotice));
@@ -460,8 +417,8 @@ public sealed class ProjectAnalysisTools
             "查詢資料表結構",
             cancellationToken,
             ToolCategory.DatabaseSchema,
-            safeTableName,
-            () => DescribeDatabaseTableAsync(safeTableName, cancellationToken),
+            $"{safeTableName}|{provider}",
+            () => DescribeDatabaseTableAsync(safeTableName, provider, cancellationToken),
             result => result.Columns.Count == 0
                 ? (result.Notice ?? "找不到欄位")
                 : $"找到 {result.Columns.Count} 個欄位",
@@ -471,10 +428,11 @@ public sealed class ProjectAnalysisTools
 
     private Task<DatabaseObjectDefinitionToolResult> GetDatabaseObjectDefinitionWithActivityAsync(
         string objectName,
-        CancellationToken cancellationToken)
+        string? provider = null,
+        CancellationToken cancellationToken = default)
     {
         var safeObjectName = (objectName ?? string.Empty).Trim();
-        if (_database is null)
+        if (_databases.Count == 0)
         {
             return Task.FromResult(new DatabaseObjectDefinitionToolResult(
                 safeObjectName, null, NoDatabaseConfiguredNotice));
@@ -490,8 +448,8 @@ public sealed class ProjectAnalysisTools
             "查詢資料庫物件定義",
             cancellationToken,
             ToolCategory.DatabaseSchema,
-            safeObjectName,
-            () => GetDatabaseObjectDefinitionAsync(safeObjectName, cancellationToken),
+            $"{safeObjectName}|{provider}",
+            () => GetDatabaseObjectDefinitionAsync(safeObjectName, provider, cancellationToken),
             result => result.Definition is null
                 ? (result.Notice ?? "找不到定義")
                 : $"取得定義，共 {result.Definition.Length} 字元",
@@ -525,52 +483,54 @@ public sealed class ProjectAnalysisTools
         ToolBudgetStatus? exhaustedBudget = null;
         lock (_toolCacheGate)
         {
-            if (_toolCache.TryGetValue(cacheKey, out var cached))
+            var categoryLimit = category switch
             {
-                _logger?.LogInformation("{Tool} 呼叫命中快取，cacheKey={CacheKey}", tool, cacheKey);
-                return (T)cached;
-            }
-            if (_toolInFlight.TryGetValue(cacheKey, out sharedTask))
+                ToolCategory.GraphSearch => MaximumGraphSearchCalls,
+                ToolCategory.GraphPath => MaximumGraphPathCalls,
+                ToolCategory.TextSearch => MaximumTextSearchCalls,
+                ToolCategory.SymbolSearch => MaximumSymbolSearchCalls,
+                ToolCategory.FileRead => MaximumFileReadCalls,
+                ToolCategory.GraphNodeList => MaximumGraphNodeListCalls,
+                ToolCategory.Outline => MaximumOutlineCalls,
+                ToolCategory.DatabaseSchema => MaximumDatabaseSchemaCalls,
+                _ => MaximumToolCalls,
+            };
+            if (_totalToolCalls >= MaximumToolCalls ||
+                _toolCounts.GetValueOrDefault(category) >= categoryLimit)
             {
-                // 完全相同參數正在執行時，共用同一個工作，避免 Agent 重複觸發磁碟或 Neo4j I/O。
-                _logger?.LogInformation("{Tool} 共用進行中的相同呼叫，cacheKey={CacheKey}", tool, cacheKey);
+                var categoryUsed = _toolCounts.GetValueOrDefault(category);
+                var scope = _totalToolCalls >= MaximumToolCalls
+                    ? "total"
+                    : "category";
+                exhaustedBudget = new ToolBudgetStatus(
+                    "budget_exhausted",
+                    true,
+                    scope,
+                    _totalToolCalls,
+                    MaximumToolCalls,
+                    categoryUsed,
+                    categoryLimit,
+                    $"本輪已達 {tool} 唯讀工具上限。",
+                    "不要再呼叫工具；請整理目前證據、標示合理推論與尚未確認的資訊缺口，然後直接回答使用者。");
             }
             else
             {
-                var categoryLimit = category switch
+                // Runtime 會計算每一次模型工具請求，因此快取與進行中工作也必須計次，
+                // 才不會在診斷 Log 顯示比實際 Provider 工具迴圈更少的數字。
+                _totalToolCalls++;
+                _toolCounts[category] = _toolCounts.GetValueOrDefault(category) + 1;
+                if (_toolCache.TryGetValue(cacheKey, out var cached))
                 {
-                    ToolCategory.GraphSearch => MaximumGraphSearchCalls,
-                    ToolCategory.GraphPath => MaximumGraphPathCalls,
-                    ToolCategory.TextSearch => MaximumTextSearchCalls,
-                    ToolCategory.SymbolSearch => MaximumSymbolSearchCalls,
-                    ToolCategory.FileRead => MaximumFileReadCalls,
-                    ToolCategory.GraphNodeList => MaximumGraphNodeListCalls,
-                    ToolCategory.Outline => MaximumOutlineCalls,
-                    ToolCategory.DatabaseSchema => MaximumDatabaseSchemaCalls,
-                    _ => MaximumToolCalls,
-                };
-                if (_totalToolCalls >= MaximumToolCalls ||
-                    _toolCounts.GetValueOrDefault(category) >= categoryLimit)
+                    _logger?.LogInformation("{Tool} 呼叫命中快取，cacheKey={CacheKey}", tool, cacheKey);
+                    return (T)cached;
+                }
+                if (_toolInFlight.TryGetValue(cacheKey, out sharedTask))
                 {
-                    var categoryUsed = _toolCounts.GetValueOrDefault(category);
-                    var scope = _totalToolCalls >= MaximumToolCalls
-                        ? "total"
-                        : "category";
-                    exhaustedBudget = new ToolBudgetStatus(
-                        "budget_exhausted",
-                        true,
-                        scope,
-                        _totalToolCalls,
-                        MaximumToolCalls,
-                        categoryUsed,
-                        categoryLimit,
-                        $"本輪已達 {tool} 唯讀工具上限。",
-                        "不要再呼叫工具；請整理目前證據、標示合理推論與尚未確認的資訊缺口，然後直接回答使用者。");
+                    // 完全相同參數正在執行時，共用同一個工作，避免 Agent 重複觸發磁碟或 Neo4j I/O。
+                    _logger?.LogInformation("{Tool} 共用進行中的相同呼叫，cacheKey={CacheKey}", tool, cacheKey);
                 }
                 else
                 {
-                    _totalToolCalls++;
-                    _toolCounts[category] = _toolCounts.GetValueOrDefault(category) + 1;
                     ownerCompletion = new TaskCompletionSource<object>(
                         TaskCreationOptions.RunContinuationsAsynchronously);
                     sharedTask = ownerCompletion.Task;
@@ -667,6 +627,10 @@ public sealed class ProjectAnalysisTools
             throw sanitized;
         }
     }
+
+    #endregion
+
+    #region Graph 查詢工具
 
     /// <summary>
     /// 搜尋目前 active Graph 的節點，供模型從業務語言解析成實際 nodeId。
@@ -928,6 +892,10 @@ public sealed class ProjectAnalysisTools
         );
     }
 
+    #endregion
+
+    #region 原始碼查詢工具
+
     /// <summary>
     /// 在目前專案執行純文字搜尋；不接受正規表示式，避免昂貴或惡意 pattern 影響服務。
     /// </summary>
@@ -951,7 +919,11 @@ public sealed class ProjectAnalysisTools
                 expectedFiles,
                 cancellationToken)
             .ConfigureAwait(false);
-        var search = index.SearchText(query, normalizedExtension, maxResults, cancellationToken);
+        var search = await index.SearchTextAsync(
+            query,
+            normalizedExtension,
+            maxResults,
+            cancellationToken).ConfigureAwait(false);
         var matches = search.Matches
             .Select(match => new TextSearchToolItem(
                 ToRelativePath(match.FilePath),
@@ -996,22 +968,8 @@ public sealed class ProjectAnalysisTools
             throw new InvalidDataException(
                 $"檔案大小超過 {MaximumReadFileBytes / (1024 * 1024)} MB 的讀取上限。");
 
-        // 只有本輪先前已建立索引時才重用；直接讀單檔不強迫掃描整個專案。
-        var index = await ProjectSourceIndex
-            .GetExistingAsync(_rootPath, cancellationToken)
-            .ConfigureAwait(false);
-        var indexedRange = index?.ReadFileRange(fullPath, startLine, lineCount);
-        if (indexedRange is not null)
-        {
-            return new FileRangeToolResult(
-                ToRelativePath(fullPath),
-                startLine,
-                indexedRange.Lines
-                    .Select(line => new FileLineToolItem(line.Line, line.Text))
-                    .ToList(),
-                indexedRange.HasMore);
-        }
-
+        // 檔案區段只讀取使用者指定的實體檔案，不保留另一份內容快取；來源碼搜尋
+        // 索引只負責候選產生，避免兩套快取對同一檔案回傳不同版本。
         var lines = new List<FileLineToolItem>(lineCount);
         using var stream = new FileStream(
             fullPath,
@@ -1108,14 +1066,16 @@ public sealed class ProjectAnalysisTools
                 ToRelativePath(fullPath), [],
                 "outline_csharp_file 只支援 .cs 檔案；其他格式請改用 read_project_file_range 直接讀取。");
 
-        var source = await ReadCachedSourceAsync(fullPath, cancellationToken);
-        if (source is null)
+        if (!File.Exists(fullPath))
             return new CSharpFileOutlineToolResult(
                 ToRelativePath(fullPath), [],
                 $"找不到指定的專案檔案：{ToRelativePath(fullPath)}；請改用 search_project_text 或 search_project_graph 確認正確路徑。");
 
-        var tree = source.SyntaxTree ??= CSharpSyntaxTree.ParseText(
-            source.Content,
+        // 不維護檔案 watcher 或修改時間快取；每次大綱查詢只讀取指定實體檔案，
+        // 避免另一套來源快取與 projectId + graphVersion 搜尋索引產生版本分歧。
+        var content = await File.ReadAllTextAsync(fullPath, cancellationToken);
+        var tree = CSharpSyntaxTree.ParseText(
+            content,
             cancellationToken: cancellationToken);
         var root = await tree.GetRootAsync(cancellationToken);
         var members = new List<CSharpFileOutlineItem>();
@@ -1187,34 +1147,84 @@ public sealed class ProjectAnalysisTools
         return text[..cut].ReplaceLineEndings(" ").Trim();
     }
 
+    #endregion
+
+    #region 專案資料庫唯讀查詢工具
+
     private static readonly string[] DatabaseObjectKindFilters = ["Table", "View", "Procedure", "Function"];
 
     /// <summary>
     /// 列出目前專案設定資料庫中實際存在的資料表、檢視表、預存程序或函式。
     /// 資料庫本身才是這些物件是否存在的權威來源；比對簽入版控的 .sql 檔案全文搜尋更準確也更快。
     /// </summary>
+    /// <param name="nameFilter">不分大小寫的局部名稱篩選；為 null 時不篩選名稱。</param>
+    /// <param name="kind">物件種類：Table、View、Procedure 或 Function。</param>
+    /// <param name="provider">資料庫來源 SqlServer 或 Sqlite；未指定時合併所有已設定來源。</param>
+    /// <param name="maxResults">最多回傳筆數，實際數值會限制在 1 至 200。</param>
+    /// <param name="cancellationToken">取消資料庫查詢的 token。</param>
+    /// <returns>依 Provider、資料庫、schema 與物件名穩定排序的結構化結果。</returns>
     public async Task<DatabaseObjectListToolResult> ListDatabaseObjectsAsync(
         [Description("可選名稱篩選（不分大小寫、局部比對）；不填時列出全部。")]
         string? nameFilter = null,
         [Description("可選物件種類篩選：Table、View、Procedure、Function；不填或無法辨識時列出全部種類。")]
         string? kind = null,
+        [Description("可選資料庫來源：SqlServer 或 Sqlite；不填時合併所有已設定來源。")]
+        string? provider = null,
         [Description("最多回傳幾筆，範圍 1 到 200。")]
         int maxResults = 100,
         CancellationToken cancellationToken = default)
     {
-        if (_database is null)
+        if (_databases.Count == 0)
             return new DatabaseObjectListToolResult(nameFilter, kind, [], false, NoDatabaseConfiguredNotice);
 
         maxResults = Math.Clamp(maxResults, 1, MaximumDatabaseObjectResults);
         var normalizedKind = NormalizeDatabaseObjectKindFilter(kind);
         var trimmedNameFilter = string.IsNullOrWhiteSpace(nameFilter) ? null : nameFilter.Trim();
+        var selectedDatabases = SelectDatabases(provider, out var selectionNotice);
+        if (selectedDatabases.Count == 0)
+            return new DatabaseObjectListToolResult(nameFilter, kind, [], false, selectionNotice);
 
-        var objects = _database.Provider == ProjectDatabaseProvider.SqlServer
-            ? await ListSqlServerObjectsAsync(trimmedNameFilter, normalizedKind, maxResults, cancellationToken)
-            : await ListSqliteObjectsAsync(trimmedNameFilter, normalizedKind, maxResults, cancellationToken);
+        var objects = new List<DatabaseObjectSummary>();
+        foreach (var database in selectedDatabases)
+        {
+            var sourceObjects = database.Provider == ProjectDatabaseProvider.SqlServer
+                ? await ListSqlServerObjectsAsync(
+                    database, trimmedNameFilter, normalizedKind, maxResults + 1, cancellationToken)
+                : await ListSqliteObjectsAsync(
+                    database, trimmedNameFilter, normalizedKind, maxResults + 1, cancellationToken);
+            objects.AddRange(sourceObjects);
+        }
+        var ordered = objects
+            .OrderBy(item => item.Provider, StringComparer.Ordinal)
+            .ThenBy(item => item.DatabaseName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.SchemaName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.ObjectName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
         return new DatabaseObjectListToolResult(
-            nameFilter, kind, objects, objects.Count >= maxResults);
+            nameFilter,
+            kind,
+            ordered.Take(maxResults).ToArray(),
+            ordered.Length > maxResults);
+    }
+
+    /// <summary>依模型指定的 Provider 篩選本專案唯讀資料庫來源。</summary>
+    private IReadOnlyList<GraphDatabaseSource> SelectDatabases(
+        string? provider,
+        out string? notice)
+    {
+        notice = null;
+        if (string.IsNullOrWhiteSpace(provider))
+            return _databases;
+        if (!Enum.TryParse<ProjectDatabaseProvider>(provider.Trim(), true, out var parsed))
+        {
+            notice = $"不支援的資料庫 Provider：{provider}；只接受 SqlServer 或 Sqlite。";
+            return [];
+        }
+        var selected = _databases.Where(source => source.Provider == parsed).ToArray();
+        if (selected.Length == 0)
+            notice = $"此專案尚未設定 {parsed} 連線。";
+        return selected;
     }
 
     /// <summary>把模型可能猜錯或大小寫不符的種類名稱正規化；辨識不出來時視同不篩選，不當成錯誤輸入。</summary>
@@ -1232,7 +1242,11 @@ public sealed class ProjectAnalysisTools
     /// 不會把 nameFilter 這類外部輸入拼進 SQL 文字；nameFilter 一律以參數化 LIKE 傳遞。
     /// </summary>
     private async Task<IReadOnlyList<DatabaseObjectSummary>> ListSqlServerObjectsAsync(
-        string? nameFilter, string? kind, int maxResults, CancellationToken cancellationToken)
+        GraphDatabaseSource database,
+        string? nameFilter,
+        string? kind,
+        int maxResults,
+        CancellationToken cancellationToken)
     {
         var typeFilter = kind switch
         {
@@ -1242,7 +1256,7 @@ public sealed class ProjectAnalysisTools
             "Function" => "'FN','IF','TF'",
             _ => "'U','V','P','FN','IF','TF'",
         };
-        await using var connection = new SqlConnection(_database!.ConnectionString);
+        await using var connection = new SqlConnection(database.ConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
@@ -1261,7 +1275,11 @@ public sealed class ProjectAnalysisTools
         while (await reader.ReadAsync(cancellationToken))
         {
             results.Add(new DatabaseObjectSummary(
-                reader.GetString(0), reader.GetString(1), DescribeSqlServerObjectType(reader.GetString(2).Trim())));
+                reader.GetString(0),
+                reader.GetString(1),
+                DescribeSqlServerObjectType(reader.GetString(2).Trim()),
+                database.Provider.ToString(),
+                database.DatabaseName));
         }
         return results;
     }
@@ -1277,7 +1295,11 @@ public sealed class ProjectAnalysisTools
 
     /// <summary>查詢 SQLite schema catalog 取得物件清單；SQLite 沒有預存程序/函式物件。</summary>
     private async Task<IReadOnlyList<DatabaseObjectSummary>> ListSqliteObjectsAsync(
-        string? nameFilter, string? kind, int maxResults, CancellationToken cancellationToken)
+        GraphDatabaseSource database,
+        string? nameFilter,
+        string? kind,
+        int maxResults,
+        CancellationToken cancellationToken)
     {
         if (kind is "Procedure" or "Function")
             return [];
@@ -1288,7 +1310,7 @@ public sealed class ProjectAnalysisTools
             "View" => "'view'",
             _ => "'table','view'",
         };
-        await using var connection = new SqliteConnection(_database!.ConnectionString);
+        await using var connection = new SqliteConnection(database.ConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
@@ -1307,7 +1329,11 @@ public sealed class ProjectAnalysisTools
         while (await reader.ReadAsync(cancellationToken))
         {
             results.Add(new DatabaseObjectSummary(
-                "main", reader.GetString(1), reader.GetString(0) == "table" ? "Table" : "View"));
+                "main",
+                reader.GetString(1),
+                reader.GetString(0) == "table" ? "Table" : "View",
+                database.Provider.ToString(),
+                database.DatabaseName));
         }
         return results;
     }
@@ -1316,18 +1342,49 @@ public sealed class ProjectAnalysisTools
     /// 查詢目前專案設定資料庫中指定資料表或檢視表實際部署的欄位結構與外鍵；
     /// 反映的是目前真正的部署狀態，可能與簽入版控的 Schema 檔案不同步。
     /// </summary>
+    /// <param name="tableName">資料表或檢視表名稱，SQL Server 可包含 schema 前綴。</param>
+    /// <param name="provider">資料庫來源 SqlServer 或 Sqlite；同名物件跨來源時必須指定。</param>
+    /// <param name="cancellationToken">取消資料庫查詢的 token。</param>
+    /// <returns>欄位、主鍵、外鍵及資料庫來源資訊。</returns>
+    /// <exception cref="ArgumentException"><paramref name="tableName"/> 為空白。</exception>
     public async Task<DatabaseTableDescriptionToolResult> DescribeDatabaseTableAsync(
         [Description("資料表或檢視表名稱，可加 schema 前綴，例如 dbo.tblInvestmentCategory。")]
         string tableName,
+        [Description("可選資料庫來源：SqlServer 或 Sqlite；同時設定兩種來源且物件同名時必須指定。")]
+        string? provider = null,
         CancellationToken cancellationToken = default)
     {
-        if (_database is null)
+        if (_databases.Count == 0)
             return new DatabaseTableDescriptionToolResult(tableName, [], [], NoDatabaseConfiguredNotice);
         ArgumentException.ThrowIfNullOrWhiteSpace(tableName);
+        var selectedDatabases = SelectDatabases(provider, out var selectionNotice);
+        if (selectedDatabases.Count == 0)
+            return new DatabaseTableDescriptionToolResult(tableName, [], [], selectionNotice);
 
-        return _database.Provider == ProjectDatabaseProvider.SqlServer
-            ? await DescribeSqlServerTableAsync(tableName, cancellationToken)
-            : await DescribeSqliteTableAsync(tableName, cancellationToken);
+        var matches = new List<DatabaseTableDescriptionToolResult>();
+        foreach (var database in selectedDatabases)
+        {
+            var result = database.Provider == ProjectDatabaseProvider.SqlServer
+                ? await DescribeSqlServerTableAsync(database, tableName, cancellationToken)
+                : await DescribeSqliteTableAsync(database, tableName, cancellationToken);
+            if (result.Columns.Count > 0)
+                matches.Add(result);
+        }
+        if (matches.Count == 1)
+            return matches[0];
+        if (matches.Count > 1)
+        {
+            return new DatabaseTableDescriptionToolResult(
+                tableName,
+                [],
+                [],
+                "多個資料庫來源存在同名物件；請指定 provider 為 SqlServer 或 Sqlite 後重試。");
+        }
+        return new DatabaseTableDescriptionToolResult(
+            tableName,
+            [],
+            [],
+            $"找不到資料表或檢視表：{tableName}；請先用 list_database_objects 確認正確名稱與來源。");
     }
 
     /// <summary>把可能包含 schema 前綴（例如 dbo.Table 或 [dbo].[Table]）的名稱拆開，供參數化查詢使用。</summary>
@@ -1341,10 +1398,12 @@ public sealed class ProjectAnalysisTools
     }
 
     private async Task<DatabaseTableDescriptionToolResult> DescribeSqlServerTableAsync(
-        string tableName, CancellationToken cancellationToken)
+        GraphDatabaseSource database,
+        string tableName,
+        CancellationToken cancellationToken)
     {
         var (schema, name) = SplitSchemaQualifiedName(tableName);
-        await using var connection = new SqlConnection(_database!.ConnectionString);
+        await using var connection = new SqlConnection(database.ConnectionString);
         await connection.OpenAsync(cancellationToken);
 
         var columns = new List<DatabaseColumnSummary>();
@@ -1404,13 +1463,20 @@ public sealed class ProjectAnalysisTools
             }
         }
 
-        return new DatabaseTableDescriptionToolResult(tableName, columns, foreignKeys);
+        return new DatabaseTableDescriptionToolResult(
+            tableName,
+            columns,
+            foreignKeys,
+            Provider: database.Provider.ToString(),
+            DatabaseName: database.DatabaseName);
     }
 
     private async Task<DatabaseTableDescriptionToolResult> DescribeSqliteTableAsync(
-        string tableName, CancellationToken cancellationToken)
+        GraphDatabaseSource database,
+        string tableName,
+        CancellationToken cancellationToken)
     {
-        await using var connection = new SqliteConnection(_database!.ConnectionString);
+        await using var connection = new SqliteConnection(database.ConnectionString);
         await connection.OpenAsync(cancellationToken);
 
         // PRAGMA 語法不支援參數化表名；先用參數化查詢在 schema catalog 核對確實存在的名稱，
@@ -1458,7 +1524,12 @@ public sealed class ProjectAnalysisTools
             }
         }
 
-        return new DatabaseTableDescriptionToolResult(canonicalName, columns, foreignKeys);
+        return new DatabaseTableDescriptionToolResult(
+            canonicalName,
+            columns,
+            foreignKeys,
+            Provider: database.Provider.ToString(),
+            DatabaseName: database.DatabaseName);
     }
 
     private static string QuoteSqliteIdentifier(string identifier) =>
@@ -1468,33 +1539,74 @@ public sealed class ProjectAnalysisTools
     /// 讀取目前專案設定資料庫中檢視表、預存程序或函式實際部署的 SQL 定義文字。
     /// 正式環境可能已被直接修改過而未同步簽入版控，這裡取得的才是目前真正在執行的邏輯。
     /// </summary>
+    /// <param name="objectName">物件名稱，SQL Server 可包含 schema 前綴。</param>
+    /// <param name="provider">資料庫來源 SqlServer 或 Sqlite；同名物件跨來源時必須指定。</param>
+    /// <param name="cancellationToken">取消資料庫查詢的 token。</param>
+    /// <returns>限制在安全長度內的 SQL 定義與資料庫來源資訊。</returns>
+    /// <exception cref="ArgumentException"><paramref name="objectName"/> 為空白。</exception>
     public async Task<DatabaseObjectDefinitionToolResult> GetDatabaseObjectDefinitionAsync(
         [Description("物件名稱，可加 schema 前綴，例如 dbo.Apex_UDF_Stage3TransactionReport。")]
         string objectName,
+        [Description("可選資料庫來源：SqlServer 或 Sqlite；同時設定兩種來源且物件同名時必須指定。")]
+        string? provider = null,
         CancellationToken cancellationToken = default)
     {
-        if (_database is null)
+        if (_databases.Count == 0)
             return new DatabaseObjectDefinitionToolResult(objectName, null, NoDatabaseConfiguredNotice);
         ArgumentException.ThrowIfNullOrWhiteSpace(objectName);
+        var selectedDatabases = SelectDatabases(provider, out var selectionNotice);
+        if (selectedDatabases.Count == 0)
+            return new DatabaseObjectDefinitionToolResult(objectName, null, selectionNotice);
 
-        if (_database.Provider == ProjectDatabaseProvider.SqlServer)
+        var matches = new List<DatabaseObjectDefinitionToolResult>();
+        foreach (var database in selectedDatabases)
         {
-            await using var connection = new SqlConnection(_database.ConnectionString);
-            await connection.OpenAsync(cancellationToken);
-            await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT OBJECT_DEFINITION(OBJECT_ID(@objectName));";
-            command.CommandTimeout = DatabaseCommandTimeoutSeconds;
-            command.Parameters.AddWithValue("@objectName", objectName.Trim());
-            var definition = (string?)await command.ExecuteScalarAsync(cancellationToken);
-            return definition is null
-                ? new DatabaseObjectDefinitionToolResult(
-                    objectName, null,
-                    $"找不到物件或該物件沒有可讀取的 SQL 定義（例如純資料表）：{objectName}；請先用 list_database_objects 確認正確名稱與種類。")
-                : new DatabaseObjectDefinitionToolResult(
-                    objectName, Truncate(definition, MaximumDatabaseDefinitionCharacters));
+            var result = database.Provider == ProjectDatabaseProvider.SqlServer
+                ? await GetSqlServerObjectDefinitionAsync(database, objectName, cancellationToken)
+                : await GetSqliteObjectDefinitionAsync(database, objectName, cancellationToken);
+            if (result.Definition is not null)
+                matches.Add(result);
         }
+        if (matches.Count == 1)
+            return matches[0];
+        if (matches.Count > 1)
+        {
+            return new DatabaseObjectDefinitionToolResult(
+                objectName,
+                null,
+                "多個資料庫來源存在同名物件；請指定 provider 為 SqlServer 或 Sqlite 後重試。");
+        }
+        return new DatabaseObjectDefinitionToolResult(
+            objectName,
+            null,
+            $"找不到物件或物件沒有可讀取的 SQL 定義：{objectName}；請先用 list_database_objects 確認正確名稱與來源。");
+    }
 
-        await using var sqlite = new SqliteConnection(_database.ConnectionString);
+    private static async Task<DatabaseObjectDefinitionToolResult> GetSqlServerObjectDefinitionAsync(
+        GraphDatabaseSource database,
+        string objectName,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(database.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT OBJECT_DEFINITION(OBJECT_ID(@objectName));";
+        command.CommandTimeout = DatabaseCommandTimeoutSeconds;
+        command.Parameters.AddWithValue("@objectName", objectName.Trim());
+        var definition = (string?)await command.ExecuteScalarAsync(cancellationToken);
+        return new DatabaseObjectDefinitionToolResult(
+            objectName,
+            definition is null ? null : Truncate(definition, MaximumDatabaseDefinitionCharacters),
+            Provider: database.Provider.ToString(),
+            DatabaseName: database.DatabaseName);
+    }
+
+    private static async Task<DatabaseObjectDefinitionToolResult> GetSqliteObjectDefinitionAsync(
+        GraphDatabaseSource database,
+        string objectName,
+        CancellationToken cancellationToken)
+    {
+        await using var sqlite = new SqliteConnection(database.ConnectionString);
         await sqlite.OpenAsync(cancellationToken);
         await using var sqliteCommand = sqlite.CreateCommand();
         sqliteCommand.CommandText = """
@@ -1502,155 +1614,18 @@ public sealed class ProjectAnalysisTools
             """;
         sqliteCommand.Parameters.AddWithValue("@name", objectName.Trim());
         var sqliteDefinition = (string?)await sqliteCommand.ExecuteScalarAsync(cancellationToken);
-        return sqliteDefinition is null
-            ? new DatabaseObjectDefinitionToolResult(
-                objectName, null, $"找不到物件：{objectName}；請先用 list_database_objects 確認正確名稱。")
-            : new DatabaseObjectDefinitionToolResult(
-                objectName, Truncate(sqliteDefinition, MaximumDatabaseDefinitionCharacters));
+        return new DatabaseObjectDefinitionToolResult(
+            objectName,
+            sqliteDefinition is null
+                ? null
+                : Truncate(sqliteDefinition, MaximumDatabaseDefinitionCharacters),
+            Provider: database.Provider.ToString(),
+            DatabaseName: database.DatabaseName);
     }
 
-    /// <summary>
-    /// 取得目前專案的可搜尋檔案清單。目錄遞迴只在快取失效時執行，
-    /// 同一專案的全文與符號工具共用同一份清單，避免每次工具呼叫重建目錄樹。
-    /// </summary>
-    private IReadOnlyList<string> GetSearchableFiles(string? extension)
-    {
-        var catalog = GetFileCatalog(_rootPath);
-        return extension is null
-            ? catalog.Files
-            : catalog.Files
-                .Where(file => Path.GetExtension(file).Equals(
-                    extension,
-                    StringComparison.OrdinalIgnoreCase))
-                .ToArray();
-    }
+    #endregion
 
-    private static FileCatalogSnapshot GetFileCatalog(string rootPath)
-    {
-        if (FileCatalogs.TryGetValue(rootPath, out var existing) &&
-            DateTime.UtcNow - existing.Value.CreatedAtUtc < FileCatalogLifetime)
-        {
-            return existing.Value;
-        }
-
-        FileCatalogs.TryRemove(rootPath, out _);
-        var created = new Lazy<FileCatalogSnapshot>(
-            () => BuildFileCatalog(rootPath),
-            LazyThreadSafetyMode.ExecutionAndPublication);
-        var selected = FileCatalogs.GetOrAdd(rootPath, created);
-        return selected.Value;
-    }
-
-    /// <summary>建立一次性目錄快照；遇到無法讀取的子目錄時保留其他可用檔案。</summary>
-    private static FileCatalogSnapshot BuildFileCatalog(string rootPath)
-    {
-        var files = new List<string>();
-        if (!Directory.Exists(rootPath))
-            return new FileCatalogSnapshot(DateTime.UtcNow, files);
-
-        var pending = new Stack<string>();
-        pending.Push(rootPath);
-        while (pending.Count > 0)
-        {
-            var directory = pending.Pop();
-            try
-            {
-                foreach (var child in Directory.EnumerateDirectories(directory))
-                {
-                    if (!ExcludedDirectories.Contains(Path.GetFileName(child)))
-                        pending.Push(child);
-                }
-                foreach (var file in Directory.EnumerateFiles(directory))
-                {
-                    if (SearchableExtensions.Contains(Path.GetExtension(file)))
-                        files.Add(Path.GetFullPath(file));
-                }
-            }
-            catch (Exception exception) when (
-                exception is IOException or UnauthorizedAccessException)
-            {
-                // 權限或檔案競態只略過當前目錄，不讓單一損壞資料夾阻斷整個 Agent。
-            }
-        }
-
-        files.Sort(StringComparer.OrdinalIgnoreCase);
-        return new FileCatalogSnapshot(DateTime.UtcNow, files);
-    }
-
-    /// <summary>依檔案修改時間重用原始碼內容與 Roslyn SyntaxTree，必要時才讀取磁碟。</summary>
-    private static async Task<CachedSource?> ReadCachedSourceAsync(
-        string file,
-        CancellationToken cancellationToken)
-    {
-        FileInfo info;
-        try
-        {
-            info = new FileInfo(file);
-            if (!info.Exists || info.Length > MaximumSearchFileBytes)
-                return null;
-        }
-        catch (IOException)
-        {
-            return null;
-        }
-
-        lock (SourceCacheGate)
-        {
-            if (SourceCache.TryGetValue(file, out var cached) &&
-                cached.LastWriteUtc == info.LastWriteTimeUtc &&
-                cached.ByteLength == info.Length)
-            {
-                cached.LastUsedUtc = DateTime.UtcNow;
-                return cached;
-            }
-        }
-
-        string content;
-        try
-        {
-            content = await File.ReadAllTextAsync(file, cancellationToken);
-        }
-        catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException)
-        {
-            return null;
-        }
-
-        var source = new CachedSource(
-            content,
-            info.LastWriteTimeUtc,
-            Encoding.UTF8.GetByteCount(content));
-        lock (SourceCacheGate)
-        {
-            if (SourceCache.Remove(file, out var previous))
-                _cachedSourceBytes -= previous.ByteLength;
-            SourceCache[file] = source;
-            _cachedSourceBytes += source.ByteLength;
-            TrimSourceCache();
-        }
-        return source;
-    }
-
-    private static void TrimSourceCache()
-    {
-        while (_cachedSourceBytes > MaximumCachedSourceBytes && SourceCache.Count > 0)
-        {
-            var oldest = SourceCache
-                .OrderBy(pair => pair.Value.LastUsedUtc)
-                .First();
-            SourceCache.Remove(oldest.Key);
-            _cachedSourceBytes -= oldest.Value.ByteLength;
-        }
-    }
-
-    private static bool IsInsideRoot(string rootPath, string candidatePath)
-    {
-        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
-        var candidate = Path.GetFullPath(candidatePath);
-        return candidate.Equals(root, StringComparison.OrdinalIgnoreCase) ||
-               candidate.StartsWith(root + Path.DirectorySeparatorChar,
-                   StringComparison.OrdinalIgnoreCase);
-    }
+    #region 版本驗證與結構化轉換
 
     private string ResolveProjectFile(string filePath)
     {
@@ -1772,19 +1747,6 @@ public sealed class ProjectAnalysisTools
     private static string NormalizeGraphName(string value) =>
         string.Concat(value.Where(char.IsLetterOrDigit));
 
-    private static string ClassifyIdentifier(SyntaxToken token) => token.Parent switch
-    {
-        BaseTypeDeclarationSyntax declaration when declaration.Identifier == token => "type-definition",
-        MethodDeclarationSyntax declaration when declaration.Identifier == token => "method-definition",
-        ConstructorDeclarationSyntax declaration when declaration.Identifier == token => "constructor-definition",
-        PropertyDeclarationSyntax declaration when declaration.Identifier == token => "property-definition",
-        EventDeclarationSyntax declaration when declaration.Identifier == token => "event-definition",
-        VariableDeclaratorSyntax declaration when declaration.Identifier == token => "variable-definition",
-        ParameterSyntax declaration when declaration.Identifier == token => "parameter-definition",
-        EnumMemberDeclarationSyntax declaration when declaration.Identifier == token => "enum-member-definition",
-        _ => "reference",
-    };
-
     private static string? GetContainerName(SyntaxNode? node)
     {
         var names = node?.AncestorsAndSelf()
@@ -1799,19 +1761,6 @@ public sealed class ProjectAnalysisTools
             .Reverse()
             .ToList();
         return names is { Count: > 0 } ? string.Join('.', names) : null;
-    }
-
-    private static bool QualifiedNameMatches(
-        string requested,
-        string? container,
-        string identifier)
-    {
-        var candidate = string.IsNullOrWhiteSpace(container)
-            ? identifier
-            : container.EndsWith(identifier, StringComparison.Ordinal)
-                ? container
-                : $"{container}.{identifier}";
-        return candidate.EndsWith(requested, StringComparison.Ordinal);
     }
 
     private static string Truncate(string value, int maximumLength) =>
@@ -1830,27 +1779,11 @@ public sealed class ProjectAnalysisTools
         DatabaseSchema,
     }
 
-    private sealed record FileCatalogSnapshot(
-        DateTime CreatedAtUtc,
-        IReadOnlyList<string> Files);
-
-    private sealed class CachedSource(
-        string content,
-        DateTime lastWriteUtc,
-        int byteLength)
-    {
-        public string Content { get; } = content;
-        public DateTime LastWriteUtc { get; } = lastWriteUtc;
-        public int ByteLength { get; } = byteLength;
-        public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
-        public SyntaxTree? SyntaxTree { get; set; }
-    }
-
     /// <summary>
-    /// 從 FBL 權威節點的描述屬性安全取得單一文字值；缺少或空白時回傳 null。
+    /// 從 ParallelExtractor 節點的描述屬性安全取得單一文字值；缺少或空白時回傳 null。
     /// </summary>
     private static string? GetNodeText(
-        FblAuthority.GraphNode node,
+        ExtractedGraph.GraphNode node,
         string propertyName)
     {
         if (!node.Properties.TryGetValue(propertyName, out var value) || value is null)
@@ -1863,7 +1796,7 @@ public sealed class ProjectAnalysisTools
     /// 取得權威節點可引用的第一個 Repository 相對路徑。
     /// 單一路徑優先使用 path；CodeClass 的 source_files 會安全取第一筆。
     /// </summary>
-    private static string? GetNodeFilePath(FblAuthority.GraphNode node)
+    private static string? GetNodeFilePath(ExtractedGraph.GraphNode node)
     {
         var path = GetNodeText(node, "path");
         if (!string.IsNullOrWhiteSpace(path))
@@ -1906,7 +1839,7 @@ public sealed class ProjectAnalysisTools
     /// <summary>
     /// 從節點描述屬性讀取一基行號；關係鏈另會優先補上直接 Evidence 的來源行號。
     /// </summary>
-    private static int? GetNodeLine(FblAuthority.GraphNode node)
+    private static int? GetNodeLine(ExtractedGraph.GraphNode node)
     {
         foreach (var key in new[] { "source_line", "start_line", "line" })
         {
@@ -1921,14 +1854,14 @@ public sealed class ProjectAnalysisTools
     }
 
     private static string? GetRelationshipText(
-        FblAuthority.GraphRelationship relationship,
+        ExtractedGraph.GraphRelationship relationship,
         string key) =>
         relationship.Properties.TryGetValue(key, out var value)
             ? value?.ToString()
             : null;
 
     private static int? GetRelationshipInt(
-        FblAuthority.GraphRelationship relationship,
+        ExtractedGraph.GraphRelationship relationship,
         string key) =>
         relationship.Properties.TryGetValue(key, out var value) &&
         value is not null &&
@@ -1940,6 +1873,10 @@ public sealed class ProjectAnalysisTools
         string NodeId,
         IReadOnlyList<GraphPathStepToolItem> Steps,
         int Depth);
+
+    #endregion
+
+    #region 工具結構化輸出
 
     /// <summary>Graph 搜尋工具的結構化輸出。</summary>
     public sealed record GraphSearchToolResult(
@@ -2062,7 +1999,9 @@ public sealed class ProjectAnalysisTools
     public sealed record DatabaseObjectSummary(
         string SchemaName,
         string ObjectName,
-        string Kind);
+        string Kind,
+        string Provider = "",
+        string DatabaseName = "");
 
     /// <summary>資料庫物件清單工具的結構化輸出。</summary>
     public sealed record DatabaseObjectListToolResult(
@@ -2086,14 +2025,18 @@ public sealed class ProjectAnalysisTools
         IReadOnlyList<DatabaseColumnSummary> Columns,
         IReadOnlyList<string> ForeignKeys,
         string? Notice = null,
-        ToolBudgetStatus? Budget = null);
+        ToolBudgetStatus? Budget = null,
+        string? Provider = null,
+        string? DatabaseName = null);
 
     /// <summary>資料庫物件定義查詢工具的結構化輸出。</summary>
     public sealed record DatabaseObjectDefinitionToolResult(
         string ObjectName,
         string? Definition,
         string? Notice = null,
-        ToolBudgetStatus? Budget = null);
+        ToolBudgetStatus? Budget = null,
+        string? Provider = null,
+        string? DatabaseName = null);
 
     /// <summary>工具預算耗盡時回傳給模型的可機器判讀狀態。</summary>
     public sealed record ToolBudgetStatus(
@@ -2106,4 +2049,6 @@ public sealed class ProjectAnalysisTools
         int CategoryLimit,
         string Message,
         string NextAction);
+
+    #endregion
 }

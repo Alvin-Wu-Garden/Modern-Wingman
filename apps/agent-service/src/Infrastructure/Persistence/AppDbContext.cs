@@ -12,6 +12,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 {
     public DbSet<ConversationEntity> Conversations => Set<ConversationEntity>();
     public DbSet<MessageEntity> Messages => Set<MessageEntity>();
+    public DbSet<ConversationTurnEntity> ConversationTurns => Set<ConversationTurnEntity>();
     public DbSet<ProviderSettingEntity> ProviderSettings => Set<ProviderSettingEntity>();
     public DbSet<ProjectRecord> Projects => Set<ProjectRecord>();
     public DbSet<ProjectDatabaseConfigurationRecord> ProjectDatabaseConfigurations =>
@@ -38,10 +39,35 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Role).HasConversion<string>();
             entity.Property(x => x.CreatedAt).HasConversion<string>();
+            entity.Property(x => x.TurnId).HasMaxLength(64);
             entity.HasOne(x => x.Conversation)
                 .WithMany(x => x.Messages)
                 .HasForeignKey(x => x.ConversationId)
                 .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.ConversationId, x.TurnId, x.Role })
+                .IsUnique()
+                .HasFilter("TurnId IS NOT NULL");
+        });
+
+        builder.Entity<ConversationTurnEntity>(entity =>
+        {
+            entity.ToTable("ConversationTurns");
+            entity.HasKey(x => new { x.ConversationId, x.Id });
+            entity.Property(x => x.Id).HasMaxLength(64);
+            entity.Property(x => x.ConversationId).HasMaxLength(64);
+            entity.Property(x => x.UserMessageId).HasMaxLength(64);
+            entity.Property(x => x.AssistantMessageId).HasMaxLength(64);
+            entity.Property(x => x.ProviderProfileId).HasMaxLength(100);
+            entity.Property(x => x.UserMessageHash).HasMaxLength(64);
+            entity.Property(x => x.Status).HasConversion<string>();
+            entity.Property(x => x.ErrorCode).HasMaxLength(80);
+            entity.Property(x => x.CreatedAt).HasConversion<string>();
+            entity.Property(x => x.UpdatedAt).HasConversion<string>();
+            entity.HasOne(x => x.Conversation)
+                .WithMany(x => x.Turns)
+                .HasForeignKey(x => x.ConversationId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.ConversationId, x.UpdatedAt });
         });
 
         builder.Entity<ProviderSettingEntity>(entity =>

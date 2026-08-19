@@ -16,7 +16,7 @@ namespace AgentService.Host.RestEndpoints;
 /// GET    /api/projects/{id}/index/progress   → 索引進度（輪詢）
 /// GET    /api/projects/{id}/summaries/progress → 查詢背景 AI 社群摘要進度
 /// POST   /api/projects/{id}/query            → GraphRAG 問答（auto/global/local）
-/// GET    /api/projects/{id}/repomap          → Repo Map
+/// GET    /api/projects/{id}/repomap          → 取得 Repo Map
 /// </summary>
 public static class ProjectEndpoints
 {
@@ -344,7 +344,22 @@ public static class ProjectEndpoints
         await indexService.CancelAndWaitAsync(id, ct);
         // 不可吞掉 Neo4j 刪除失敗；否則本機專案列消失後，遠端圖資料會變成
         // 無法再由 UI 清理的孤兒資料。Graph 與 SQLite 都完成後才刪受管工作樹。
-        await graphStore.DeleteProjectAsync(id, ct);
+        try
+        {
+            await graphStore.DeleteProjectAsync(id, ct);
+        }
+        catch (GraphStoreException exception)
+        {
+            return Results.Problem(
+                statusCode: StatusCodes.Status503ServiceUnavailable,
+                title: "專案圖譜無法刪除",
+                detail: "Neo4j 目前無法完成刪除，本機專案資料已保留，請確認服務後重試。",
+                extensions: new Dictionary<string, object?>
+                {
+                    ["code"] = "graph_delete_failed",
+                    ["failureKind"] = exception.FailureKind.ToString(),
+                });
+        }
         indexService.ForgetProjectState(id);
         ProjectSourceIndex.Forget(project.RootPath);
         await repo.DeleteAsync(id, ct);

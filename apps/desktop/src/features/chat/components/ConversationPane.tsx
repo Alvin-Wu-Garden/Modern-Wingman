@@ -58,14 +58,21 @@ export function ConversationPane({
           </div>
         </div>
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon" title="新增對話" onClick={() => void onNewConversation()}>
+          <Button
+            variant="ghost"
+            size="icon"
+            title={isStreaming ? '回答完成後才能新增對話' : '新增對話'}
+            disabled={isStreaming}
+            onClick={() => void onNewConversation()}
+          >
             <Plus className="h-4 w-4" />
           </Button>
           {onDeleteConversation && (
             <Button
               variant="ghost"
               size="icon"
-              title="刪除對話"
+              title={isStreaming ? '回答完成後才能刪除對話' : '刪除對話'}
+              disabled={isStreaming}
               onClick={() => void onDeleteConversation()}
             >
               <Trash2 className="h-4 w-4 text-red-400" />
@@ -156,7 +163,12 @@ export function ConversationPane({
             </p>
             <div className="mt-2 flex gap-2">
               {lastError.retryable && (
-                <Button size="sm" variant="outline" onClick={() => void retryLast()}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={isStreaming}
+                  onClick={() => void retryLast()}
+                >
                   重試
                 </Button>
               )}

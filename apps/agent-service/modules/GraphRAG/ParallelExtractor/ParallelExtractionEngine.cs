@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Globalization;
 using Microsoft.Build.Locator;
 
@@ -57,7 +56,10 @@ public sealed class ParallelExtractionEngine
         RegisterMsBuild();
 
         CodeGraphData? combined = null;
-        var backendFragments = new ConcurrentDictionary<string, CodeGraphData>(StringComparer.Ordinal);
+        // graphSink 由 BackendGraphExtractor 的 writeGate 串行呼叫。原版 Neo4j writer
+        // 依這個完成／寫入順序建立節點，SQL 階段對同名 Type 取第一筆時也會觀察
+        // 到相同順序，因此不能再按 Solution 順序重新排列。
+        var backendFragments = new List<CodeGraphData>();
         var backend = new BackendGraphExtractor(includeCodeChunkText);
         var backendResult = await backend.ExtractAsync(
             solutionPath,
@@ -69,23 +71,14 @@ public sealed class ParallelExtractionEngine
                     return Task.CompletedTask;
                 }
 
-                var projectId = fragment.Relationships
-                    .FirstOrDefault(edge => edge.Type.Equals("CONTAINS_FILE", StringComparison.Ordinal))
-                    ?.StartId;
-                projectId ??= fragment.Nodes
-                    .Select(node => node.Properties.TryGetValue("projectId", out var value)
-                        ? value?.ToString()
-                        : null)
-                    .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
-                if (!string.IsNullOrWhiteSpace(projectId))
-                    backendFragments[projectId] = fragment;
+                backendFragments.Add(fragment);
                 return Task.CompletedTask;
             },
             maxDegreeOfParallelism,
             cancellationToken);
         if (combined is null)
             throw new InvalidOperationException("ParallelExtractor 未產生 Solution 圖譜。");
-        combined = MergeBackendFragmentsInSolutionOrder(combined, backendFragments);
+        combined = MergeBackendFragmentsInWriteOrder(combined, backendFragments);
         var backendNodes = combined.Nodes.Count;
         var backendRelationships = combined.Relationships.Count;
 
@@ -286,39 +279,27 @@ public sealed class ParallelExtractionEngine
             : 0;
 
     /// <summary>
-    /// 抽取仍維持平行，但依 Solution 專案順序重現原始 DOP=1 的 Neo4j 寫入結果，
-    /// 避免 worker 完成順序讓跨專案 Method stub 的最後覆寫值每次漂移。
+    /// 依 BackendGraphExtractor 的 graphSink 寫入順序合併專案 fragment，重現原版
+    /// Neo4j writer 的節點建立順序與同名 Type 第一筆選擇語意。
     /// </summary>
-    internal static CodeGraphData MergeBackendFragmentsInSolutionOrder(
+    internal static CodeGraphData MergeBackendFragmentsInWriteOrder(
         CodeGraphData initialGraph,
-        ConcurrentDictionary<string, CodeGraphData> fragments)
+        IReadOnlyList<CodeGraphData> fragments)
     {
-        var projectOrder = initialGraph.Nodes
-            .Where(node => node.Label.Equals("Project", StringComparison.Ordinal))
-            .Select(node => node.Id)
-            .ToArray();
-        foreach (var projectId in projectOrder)
-        {
-            if (fragments.TryRemove(projectId, out var fragment))
-                Merge(initialGraph, fragment);
-        }
-        if (!fragments.IsEmpty)
-        {
-            throw new InvalidOperationException(
-                $"ParallelExtractor 有 {fragments.Count} 個專案 fragment 無法對應 Solution 專案順序。");
-        }
+        foreach (var fragment in fragments)
+            Merge(initialGraph, fragment);
         return initialGraph;
     }
 
     private static void Merge(CodeGraphData target, CodeGraphData source)
     {
-        foreach (var node in source.Nodes) target.AddNode(node.Label, node.Id, node.Properties);
+        foreach (var node in source.Nodes) target.ApplyParallelFragmentNode(node);
         foreach (var relationship in source.Relationships) target.ApplyNeo4jWrite(relationship);
     }
 
     private static void Merge(CodeGraphData target, RelationGraph source)
     {
-        foreach (var node in source.Nodes) target.AddNode(node.Label, node.Id, node.Properties);
+        foreach (var node in source.Nodes) target.ApplyParallelFragmentNode(node);
         foreach (var relationship in source.Relationships)
             target.ApplyNeo4jIntegrationWrite(relationship);
     }

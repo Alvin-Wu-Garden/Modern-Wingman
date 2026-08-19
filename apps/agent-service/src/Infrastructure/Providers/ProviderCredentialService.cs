@@ -81,7 +81,7 @@ public sealed class ProviderCredentialService(
             }
             catch
             {
-                // Runtime diagnostics are exposed separately; never persist the rejected candidate PAT.
+                // Runtime 診斷由其他介面提供；驗證失敗的候選 PAT 絕不可寫入資料庫。
             }
 
             if (ct.IsCancellationRequested)

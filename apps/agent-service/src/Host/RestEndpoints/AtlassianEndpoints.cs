@@ -31,18 +31,15 @@ public static class AtlassianEndpoints
 
     public sealed record PreviewJiraIssueRequest(string JiraKey);
 
+    /// <summary>啟動專案 JIRA 議題分析時使用的輸入資料。</summary>
+    /// <param name="JiraKey">待分析的 JIRA 議題鍵值。</param>
+    /// <param name="ProviderProfileId">指定的模型供應商設定識別碼。</param>
+    /// <param name="LocalFileKey">本機測試模式使用的檔案鍵值。</param>
+    /// <param name="ModelId">使用者選擇的模型；未提供時使用供應商預設值。</param>
     public sealed record AnalyzeJiraIssueRequest(
         string JiraKey,
         string? ProviderProfileId,
-        /// <summary>
-        /// 若設定此欄位且後端 LocalJiraFiles.Enabled = true，
-        /// 將略過 JIRA 連線直接從本機檔案讀取，供無法連線 JIRA 的測試環境使用。
-        /// </summary>
         string? LocalFileKey = null,
-        /// <summary>
-        /// 使用者在前端選擇的模型 ID。
-        /// 若未提供，則沿用供應商設定的預設模型（profile.ModelId）。
-        /// </summary>
         string? ModelId = null);
 
     public static IEndpointRouteBuilder MapAtlassianEndpoints(this IEndpointRouteBuilder app)
@@ -57,7 +54,7 @@ public static class AtlassianEndpoints
         return app;
     }
 
-    // ── GET /api/atlassian/settings ──────────────────────────────────────────
+    // ── 讀取 Atlassian 設定 ─────────────────────────────────────────────────
 
     private static async Task<IResult> GetSettings(
         IAtlassianConnectionRepository repo,
@@ -72,7 +69,7 @@ public static class AtlassianEndpoints
         });
     }
 
-    // ── POST /api/atlassian/connections/{type}/validate ──────────────────────
+    // ── 驗證指定類型的 Atlassian 連線 ───────────────────────────────────────
 
     private static async Task<IResult> ValidateAndSave(
         string serviceType,
@@ -143,7 +140,7 @@ public static class AtlassianEndpoints
         });
     }
 
-    // ── DELETE /api/atlassian/connections/{type} ─────────────────────────────
+    // ── 刪除指定類型的 Atlassian 連線 ───────────────────────────────────────
 
     private static async Task<IResult> DeleteConnection(
         string serviceType,
@@ -156,12 +153,12 @@ public static class AtlassianEndpoints
         return Results.NoContent();
     }
 
-    // ── GET /api/atlassian/jira/local-files ──────────────────────────────────
+    // ── 列出 JIRA 本機測試檔案 ──────────────────────────────────────────────
 
     private static IResult ListLocalFiles(LocalJiraFileRepository localFiles) =>
         Results.Ok(localFiles.ListFiles());
 
-    // ── POST /api/atlassian/jira/preview ─────────────────────────────────────
+    // ── 預覽 JIRA 議題 ──────────────────────────────────────────────────────
 
     private static async Task<IResult> PreviewIssue(
         PreviewJiraIssueRequest request,
@@ -194,7 +191,7 @@ public static class AtlassianEndpoints
         return Results.Ok(result.Value);
     }
 
-    // ── POST /api/projects/{projectId}/analysis/jira （SSE） ────────────────
+    // ── 以 SSE 串流分析專案的 JIRA 議題 ─────────────────────────────────────
 
     private static async Task AnalyzeIssue(
         string projectId,
@@ -447,7 +444,6 @@ public static class AtlassianEndpoints
         }
         catch (Exception ex)
         {
-            //Session error: 402 {"error":{"message":"You have exceeded your monthly quota","code":"quota_exceeded"}} (Request ID: 87C5:B58DB:1DC2C9F:21A0F96:6A6B009F)
             if (ex.Message.Contains("quota") && ex.Message.Contains("exceeded"))
             {
                 logger.LogInformation(

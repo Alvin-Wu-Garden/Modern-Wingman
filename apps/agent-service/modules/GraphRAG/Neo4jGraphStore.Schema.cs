@@ -4,7 +4,7 @@ using AgentService.Application.Models;
 namespace AgentService.Modules.GraphRAG;
 
 /// <summary>
-/// 集中保存 FBL authority graph 的 Neo4j envelope 與 Community schema 宣告。
+/// 集中保存專案圖譜的 Neo4j envelope 與 Community schema 宣告。
 /// 與查詢、發布流程分檔，避免核心持久化類別超過維護行數上限。
 /// </summary>
 public sealed partial class Neo4jGraphStore
@@ -20,7 +20,7 @@ public sealed partial class Neo4jGraphStore
             throw new InvalidOperationException("Neo4j V4 已停用。");
 
         var versions = await _manifests.ListSuccessfulAsync(projectId, cancellationToken);
-        var activeVersion = versions.FirstOrDefault(item => item.Status == IndexManifestStatus.Fresh)?.Version;
+        var activeVersion = (await _manifests.GetCurrentAsync(projectId, cancellationToken))?.Version;
         var previousVersion = versions.FirstOrDefault(item => item.Version != activeVersion)?.Version;
         if (activeVersion is null)
             return new GraphStorageAcceptanceDiagnostics(

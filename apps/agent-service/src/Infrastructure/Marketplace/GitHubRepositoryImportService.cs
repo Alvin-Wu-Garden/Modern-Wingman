@@ -8,7 +8,7 @@ using Wingman.Marketplace.Domain;
 
 namespace AgentService.Infrastructure.Marketplace;
 
-/// <summary>Resolves a user-supplied GitHub repository/ref to a commit SHA before importing its archive.</summary>
+/// <summary>先將使用者指定的 GitHub repository 與 ref 解析成 commit SHA，再匯入封存檔。</summary>
 public sealed class GitHubRepositoryImportService(
     IHttpClientFactory httpClientFactory,
     IProviderSettingStore providerSettings,

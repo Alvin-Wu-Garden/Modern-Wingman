@@ -20,12 +20,18 @@ public sealed record ConversationDto(
 /// <summary>建立一般或專案對話時使用的共用資料。</summary>
 public sealed record CreateConversationRequest(string? ProviderProfileId = null);
 
+/// <summary>送出單次對話訊息時使用的輸入資料。</summary>
+/// <param name="UserMessage">使用者輸入的訊息。</param>
+/// <param name="ProviderProfileId">本輪指定的模型供應商設定；未提供時沿用對話設定。</param>
+/// <param name="ModelId">選擇性模型 ID 覆寫；未提供時使用供應商預設模型。</param>
+/// <param name="Attachments">只在本輪使用、不寫入對話資料表的附件內容。</param>
+/// <param name="TurnId">用戶端回合冪等鍵；重試同一問題時必須沿用。</param>
 public sealed record SendMessageRequest(
     string UserMessage,
     string? ProviderProfileId = null,
-    /// <summary>選擇性模型 ID 覆蓋，例如 "gpt-4o"、"claude-sonnet-4-5"。null = 使用 profile 預設值。</summary>
     string? ModelId = null,
-    IReadOnlyList<AttachmentReference>? Attachments = null
+    IReadOnlyList<AttachmentReference>? Attachments = null,
+    string? TurnId = null
 );
 
 /// <summary>
@@ -41,15 +47,18 @@ public sealed record AttachmentReference(
 /// <summary>
 /// Provider API Key + 設定 狀態（GET /api/providers/{id}/key-status）。
 /// </summary>
+/// <param name="ProfileId">供應商設定識別碼。</param>
+/// <param name="DisplayName">前端顯示名稱。</param>
+/// <param name="HasStoredKey">是否已保存加密憑證。</param>
+/// <param name="StoredBaseUrl">自訂 BYOK 供應商目前保存的 BaseUrl。</param>
+/// <param name="SortOrder">目前套用的排序位置。</param>
+/// <param name="RuntimeStatus">Copilot PAT Runtime 狀態；其他供應商為 <see langword="null"/>。</param>
 public sealed record ProviderKeyStatusDto(
     string ProfileId,
     string DisplayName,
     bool HasStoredKey,
-    /// <summary>DB 中的自訂 BaseUrl（僅 custom-byok 使用）。</summary>
     string? StoredBaseUrl = null,
-    /// <summary>目前套用的排序位置。</summary>
     int SortOrder = 0,
-    /// <summary>Copilot PAT runtime 狀態；其他 provider 為 null。</summary>
     CopilotRuntimeStatusDto? RuntimeStatus = null
 );
 
@@ -83,10 +92,22 @@ public sealed record ValidateGithubAccessTokenResult(
 /// <summary>
 /// 單一模型資訊（GET /api/providers/{id}/models 回傳的陣列元素）。
 /// </summary>
+/// <param name="Id">供應商回傳的模型識別碼。</param>
+/// <param name="DisplayName">前端顯示名稱。</param>
+/// <param name="Group">分組標籤，例如 gpt-4 或 claude-3。</param>
 public sealed record ProviderModelDto(
     string Id,
     string DisplayName,
-    /// <summary>分組標籤，例如 "gpt-4"、"claude-3"。</summary>
     string Group
+);
+
+/// <summary>模型清單暫時或永久無法取得時的結構化錯誤。</summary>
+/// <param name="Code">供前端判斷重試策略的穩定錯誤碼。</param>
+/// <param name="Message">可安全顯示給使用者的繁體中文訊息。</param>
+/// <param name="Retryable">是否可能在不修改設定的情況下重試成功。</param>
+public sealed record ProviderModelsErrorDto(
+    string Code,
+    string Message,
+    bool Retryable
 );
 

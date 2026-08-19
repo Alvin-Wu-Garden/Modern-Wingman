@@ -144,7 +144,7 @@ public sealed class JiraPromptBuilderGraphRagTests
         Assert.DoesNotContain("Cookie:", prompt, StringComparison.OrdinalIgnoreCase);
     }
 
-    // ── BuildSystemPromptWithGraphRAG ───────────────────────────────────────
+    // ── 建立含 GraphRAG 的系統提示詞 ───────────────────────────────────────
 
     [Fact]
     public void BuildSystemPromptWithGraphRAG_ContainsPromptInjectionWarning()
@@ -172,7 +172,7 @@ public sealed class JiraPromptBuilderGraphRagTests
         Assert.Contains("繁體中文", systemPrompt);
     }
 
-    // ── JiraGraphRagContext.Degraded ────────────────────────────────────────
+    // ── Jira GraphRAG 降級情境 ─────────────────────────────────────────────
 
     [Fact]
     public void JiraGraphRagContext_Degraded_HasCorrectFlags()

@@ -28,12 +28,16 @@ public sealed class ModelProviderProfileConfig
     public ProviderKind Kind { get; set; } = ProviderKind.CopilotDefault;
     public string? ModelId { get; set; }
 
-    // CopilotByok 欄位
+    // BYOK 欄位；Protocol 是執行時唯一協定來源。
+    public ProviderProtocol Protocol { get; set; } = ProviderProtocol.OpenAI;
     public string? ProviderType { get; set; }
     public string? BaseUrl { get; set; }
 
     public string? AzureApiVersion { get; set; }
 
-    /// <summary>"completions" | "responses"。null = Copilot CLI 預設。</summary>
+    /// <summary>舊版設定的 "completions" | "responses" 字串。</summary>
     public string? WireApi { get; set; }
+
+    /// <summary>新設定使用的強型別 API 形態。</summary>
+    public ModelWireApi WireApiMode { get; set; } = ModelWireApi.ChatCompletions;
 }

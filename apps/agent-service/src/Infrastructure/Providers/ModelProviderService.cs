@@ -47,9 +47,7 @@ public sealed class ModelProviderService : IModelProviderService
             : profileId;
 
         var config = options.ModelProviders.FirstOrDefault(p => p.Id == targetId)
-            ?? options.ModelProviders.FirstOrDefault()
-            ?? throw new InvalidOperationException(
-                $"找不到 provider profile「{targetId}」，且 ModelProviders 清單為空。");
+            ?? throw new ProviderProfileNotFoundException(targetId);
 
         var dbSetting = await _settingStore.GetAsync(config.Id, ct);
         return MapToProfile(config, dbSetting);
@@ -66,10 +64,12 @@ public sealed class ModelProviderService : IModelProviderService
             DisplayName = c.DisplayName,
             Kind = c.Kind,
             ModelId = c.ModelId,
+            Protocol = c.Protocol,
             ProviderType = c.ProviderType,
             // DB BaseUrl 優先（只有 custom-byok 才會有 DB 值）
             BaseUrl = dbSetting?.BaseUrl ?? c.BaseUrl,
             AzureApiVersion = c.AzureApiVersion,
             WireApi = c.WireApi,
+            WireApiMode = c.WireApiMode,
         };
 }

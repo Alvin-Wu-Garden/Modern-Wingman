@@ -1,5 +1,5 @@
 using AgentService.Modules.GraphRAG;
-using AgentService.Modules.GraphRAG.FblAuthority;
+using AgentService.Modules.GraphRAG.ExtractedGraph;
 using Xunit;
 
 namespace AgentService.CoreRegression;

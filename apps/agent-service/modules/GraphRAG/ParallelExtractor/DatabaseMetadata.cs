@@ -2,7 +2,6 @@ namespace AgentService.Modules.GraphRAG.ParallelExtractor;
 
 using Microsoft.Data.SqlClient;
 
-/// <summary>定義「DatabaseMetadata」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class DatabaseMetadata
 {
     public string DatabaseName { get; init; } = string.Empty;
@@ -21,7 +20,6 @@ sealed class DatabaseMetadata
     public Dictionary<string, DbObjectInfo> ByQualifiedName { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, List<DbObjectInfo>> ByName { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>執行「IndexObjects」所代表的圖譜抽取或匯入工作。</summary>
     public void IndexObjects()
     {
         ByQualifiedName.Clear();
@@ -61,7 +59,6 @@ sealed class DatabaseMetadata
         return filtered.Count == 1 ? filtered[0] : filtered.FirstOrDefault();
     }
 
-    /// <summary>取得「LoadAsync」所代表的圖譜抽取或匯入工作。</summary>
     public static async Task<DatabaseMetadata> LoadAsync(
         string connectionString,
         CancellationToken cancellationToken = default)
@@ -79,9 +76,9 @@ sealed class DatabaseMetadata
         await LoadColumnsAsync(connection, metadata, cancellationToken);
         await LoadParametersAsync(connection, metadata, cancellationToken);
         await LoadForeignKeysAsync(connection, metadata, cancellationToken);
-        // FBL 業務表屬於同一個 capability。非 FBL 資料庫沒有這些表時，
-        // 仍保留通用 sys catalog；若表存在則完全沿用原始抽取器的資料列邏輯。
-        if (await HasFblSchemaAsync(connection, cancellationToken))
+        // 投資系統擴充表視為一組 capability。其他資料庫沒有這些表時，
+        // 仍保留通用 sys catalog；表結構完整時才啟用領域資料列抽取。
+        if (await HasInvestmentDomainSchemaAsync(connection, cancellationToken))
         {
             await LoadMenusAsync(connection, metadata, cancellationToken);
             await LoadReportTemplatesAsync(connection, metadata, cancellationToken);
@@ -94,7 +91,7 @@ sealed class DatabaseMetadata
         return metadata;
     }
 
-    private static async Task<bool> HasFblSchemaAsync(
+    private static async Task<bool> HasInvestmentDomainSchemaAsync(
         SqlConnection connection,
         CancellationToken cancellationToken)
     {
@@ -117,7 +114,6 @@ sealed class DatabaseMetadata
             System.Globalization.CultureInfo.InvariantCulture) == 1;
     }
 
-    /// <summary>取得「LoadObjectsAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task LoadObjectsAsync(SqlConnection connection, DatabaseMetadata metadata, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -157,7 +153,6 @@ sealed class DatabaseMetadata
         }
     }
 
-    /// <summary>取得「LoadColumnsAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task LoadColumnsAsync(SqlConnection connection, DatabaseMetadata metadata, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -216,7 +211,6 @@ sealed class DatabaseMetadata
         }
     }
 
-    /// <summary>取得「LoadParametersAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task LoadParametersAsync(SqlConnection connection, DatabaseMetadata metadata, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -252,7 +246,6 @@ sealed class DatabaseMetadata
         }
     }
 
-    /// <summary>取得「LoadForeignKeysAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task LoadForeignKeysAsync(SqlConnection connection, DatabaseMetadata metadata, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -289,7 +282,6 @@ sealed class DatabaseMetadata
         }
     }
 
-    /// <summary>取得「LoadMenusAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task LoadMenusAsync(SqlConnection connection, DatabaseMetadata metadata, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -319,7 +311,6 @@ sealed class DatabaseMetadata
         }
     }
 
-    /// <summary>取得「LoadReportTemplatesAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task LoadReportTemplatesAsync(SqlConnection connection, DatabaseMetadata metadata, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -353,7 +344,6 @@ sealed class DatabaseMetadata
         }
     }
 
-    /// <summary>取得「LoadReportDataSourcesAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task LoadReportDataSourcesAsync(SqlConnection connection, DatabaseMetadata metadata, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -380,7 +370,6 @@ sealed class DatabaseMetadata
         }
     }
 
-    /// <summary>取得「LoadCustomParameterDataSourcesAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task LoadCustomParameterDataSourcesAsync(SqlConnection connection, DatabaseMetadata metadata, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -406,7 +395,6 @@ sealed class DatabaseMetadata
         }
     }
 
-    /// <summary>取得「LoadCsvFormatsAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task LoadCsvFormatsAsync(SqlConnection connection, DatabaseMetadata metadata, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -429,7 +417,6 @@ sealed class DatabaseMetadata
         }
     }
 
-    /// <summary>取得「LoadSchedulesAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task LoadSchedulesAsync(SqlConnection connection, DatabaseMetadata metadata, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -461,7 +448,6 @@ sealed class DatabaseMetadata
         }
     }
 
-    /// <summary>取得「LoadScheduleTasksAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task LoadScheduleTasksAsync(SqlConnection connection, DatabaseMetadata metadata, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -483,7 +469,6 @@ sealed class DatabaseMetadata
         }
     }
 
-    /// <summary>執行「ScalarStringAsync」所代表的圖譜抽取或匯入工作。</summary>
     private static async Task<string> ScalarStringAsync(SqlConnection connection, string sql, CancellationToken cancellationToken)
     {
         await using var command = new SqlCommand(sql, connection);
@@ -491,7 +476,6 @@ sealed class DatabaseMetadata
     }
 }
 
-/// <summary>定義「DbObjectInfo」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class DbObjectInfo
 {
     public string SchemaName { get; init; } = string.Empty;
@@ -505,7 +489,6 @@ sealed class DbObjectInfo
     public string? Definition { get; init; }
 }
 
-/// <summary>定義「DbColumnInfo」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class DbColumnInfo
 {
     public string SchemaName { get; init; } = string.Empty;
@@ -522,7 +505,6 @@ sealed class DbColumnInfo
     public bool IsPrimaryKey { get; set; }
 }
 
-/// <summary>定義「DbParameterInfo」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class DbParameterInfo
 {
     public string SchemaName { get; init; } = string.Empty;
@@ -537,7 +519,6 @@ sealed class DbParameterInfo
     public bool IsReadonly { get; init; }
 }
 
-/// <summary>定義「DbForeignKeyInfo」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class DbForeignKeyInfo
 {
     public string ConstraintName { get; init; } = string.Empty;
@@ -550,7 +531,6 @@ sealed class DbForeignKeyInfo
     public int Ordinal { get; init; }
 }
 
-/// <summary>定義「MenuRecord」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class MenuRecord
 {
     public long Id { get; init; }
@@ -564,7 +544,6 @@ sealed class MenuRecord
     public bool? IsOpenNewTab { get; init; }
 }
 
-/// <summary>定義「ReportTemplateRecord」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class ReportTemplateRecord
 {
     public Guid TemplateId { get; init; }
@@ -584,7 +563,6 @@ sealed class ReportTemplateRecord
     public string? Xml { get; init; }
 }
 
-/// <summary>定義「ReportDataSourceRecord」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class ReportDataSourceRecord
 {
     public string Description { get; init; } = string.Empty;
@@ -598,7 +576,6 @@ sealed class ReportDataSourceRecord
     public bool IsSingleData { get; init; }
 }
 
-/// <summary>定義「CustomParameterDataSourceRecord」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class CustomParameterDataSourceRecord
 {
     public string Description { get; init; } = string.Empty;
@@ -611,7 +588,6 @@ sealed class CustomParameterDataSourceRecord
     public Guid SerialId { get; init; }
 }
 
-/// <summary>定義「CsvFormatRecord」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class CsvFormatRecord
 {
     public string FormatType { get; init; } = string.Empty;
@@ -622,7 +598,6 @@ sealed class CsvFormatRecord
     public string? ParentFormatType { get; init; }
 }
 
-/// <summary>定義「ScheduleRecord」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class ScheduleRecord
 {
     public long Id { get; init; }
@@ -640,7 +615,6 @@ sealed class ScheduleRecord
     public int ScheduleQueueId { get; init; }
 }
 
-/// <summary>定義「ScheduleTaskRecord」資料結構或服務職責，供圖譜抽取流程使用。</summary>
 sealed class ScheduleTaskRecord
 {
     public long ScheduleId { get; init; }

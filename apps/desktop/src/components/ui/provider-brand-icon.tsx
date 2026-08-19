@@ -6,7 +6,6 @@ const PROVIDER_ICON_BY_ID: Record<string, string> = {
   'openai-byok': '/assets/icons/ChatGPT-Logo.wine.svg',
   'anthropic-byok': '/assets/icons/anthropic.svg',
   'azure-openai-byok': '/assets/icons/azure-color.svg',
-  'azure-foundry-byok': '/assets/icons/microsoft-color.svg',
 }
 
 const FRAME_SIZE = {

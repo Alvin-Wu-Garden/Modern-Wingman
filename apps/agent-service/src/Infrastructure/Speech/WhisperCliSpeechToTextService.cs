@@ -140,7 +140,7 @@ public sealed class WhisperCliSpeechToTextService(
         }
         catch
         {
-            // Temporary audio cleanup should not mask transcription errors.
+            // 暫存音訊清理失敗不得遮蔽原本的語音轉錄錯誤。
         }
     }
 
@@ -152,7 +152,7 @@ public sealed class WhisperCliSpeechToTextService(
         }
         catch
         {
-            // Best effort cleanup.
+            // 採 best effort 清理，不影響主要流程結果。
         }
     }
 }

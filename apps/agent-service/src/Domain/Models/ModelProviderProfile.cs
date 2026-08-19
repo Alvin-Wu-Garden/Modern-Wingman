@@ -12,45 +12,53 @@ public sealed class ModelProviderProfile
     /// <summary>UI 顯示名稱。</summary>
     public required string DisplayName { get; init; }
 
-    /// <summary>供應商種類，決定 Infrastructure 層如何建構 SessionConfig。</summary>
+    /// <summary>供應商執行路徑；CopilotDefault 使用 Copilot SDK，其餘使用直接 BYOK。</summary>
     public ProviderKind Kind { get; init; } = ProviderKind.CopilotDefault;
 
     /// <summary>
-    /// 要求 Copilot CLI 使用的模型 ID，例如 "gpt-5"、"claude-sonnet-4-5"。
-    /// null = 由 CLI 使用預設模型。
+    /// 要求供應商使用的模型 ID，例如 "gpt-5"、"claude-sonnet-4-5"。
+    /// null = 由供應商使用預設模型。
     /// </summary>
     public string? ModelId { get; init; }
 
-    // ── CopilotByok 專用欄位 ─────────────────────────────────────────────────
+    // ── BYOK 端點欄位 ────────────────────────────────────────────────────────
     // 只有 Kind == CopilotByok 時以下欄位才有意義。
 
+    /// <summary>BYOK 端點的實際通訊協定。</summary>
+    public ProviderProtocol Protocol { get; init; } = ProviderProtocol.OpenAI;
+
     /// <summary>
-    /// Copilot SDK ProviderConfig.Type：
-    /// "openai" | "azure" | "anthropic"
-    /// （OpenAI-compatible endpoint 一律填 "openai"）
+    /// 舊版設定留下的顯示欄位；不得用來決定 BYOK 的通訊協定。
+    /// 執行時一律使用 <see cref="Protocol"/>。
     /// </summary>
     public string? ProviderType { get; init; }
 
     /// <summary>
-    /// API endpoint base URL。
-    /// - OpenAI:       "https://api.openai.com/v1"
-    /// - Anthropic:    "https://api.anthropic.com"
-    /// - Azure native: "https://&lt;resource&gt;.openai.azure.com"（不含 /openai/v1）
-    /// - Azure Foundry:"https://&lt;resource&gt;.openai.azure.com/openai/v1/"
-    /// - Ollama:       "http://localhost:11434/v1"
+    /// API endpoint 的基底 URL。
+    /// - OpenAI 範例："https://api.openai.com/v1"
+    /// - Anthropic 範例："https://api.anthropic.com"
+    /// - Azure OpenAI: "https://&lt;resource&gt;.openai.azure.com"（不含 /openai/v1）
+    /// - Ollama 範例："http://localhost:11434/v1"
     /// </summary>
     public string? BaseUrl { get; init; }
 
     /// <summary>
     /// Azure OpenAI API 版本，例如 "2024-10-21"。
-    /// 只有 ProviderType == "azure" 時才需設定。
+    /// 只有 Protocol == AzureOpenAI 時才需設定。
     /// </summary>
     public string? AzureApiVersion { get; init; }
 
     /// <summary>
-    /// Copilot SDK wireApi 選項："completions" | "responses"。
-    /// GPT-5 系列建議 "responses"；舊模型使用 "completions"。
-    /// null = 由 CLI 決定預設值。
+    /// 舊版 JSON 的 wireApi 字串；新程式會轉成 <see cref="WireApiMode"/>。
     /// </summary>
     public string? WireApi { get; init; }
+
+    /// <summary>強型別的 API 形態；未設定時預設 Chat Completions。</summary>
+    public ModelWireApi WireApiMode { get; init; } = ModelWireApi.ChatCompletions;
+
+    /// <summary>
+    /// 取得實際執行協定。這是唯一的協定來源；不能再從模糊的 ProviderType
+    /// 推測，避免同一個 profile 被送到錯誤的 SDK 或 HTTP endpoint。
+    /// </summary>
+    public ProviderProtocol EffectiveProtocol => Protocol;
 }

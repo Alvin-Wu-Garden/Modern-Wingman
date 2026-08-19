@@ -24,7 +24,7 @@ public sealed class SpeechSettingsStore(
         }
         catch
         {
-            // Corrupt settings should not disable speech input permanently.
+            // 設定檔損壞時回到預設值，避免語音輸入永久無法使用。
         }
 
         return Normalize(new SpeechRuntimeSettings(_options.DefaultLanguage, _options.DefaultModelId));

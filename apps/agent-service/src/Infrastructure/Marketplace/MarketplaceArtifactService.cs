@@ -69,8 +69,8 @@ public sealed class MarketplaceArtifactService(
         finally { if (Directory.Exists(staging)) await Task.Run(() => Directory.Delete(staging, recursive: true), CancellationToken.None); }
     }
 
-    // Registry snapshots must never retain a key that happened to be present in an imported MCP file.
-    // This is intentionally conservative: only names that look like credentials are rewritten.
+    // Registry Snapshot 絕不可保留匯入 MCP 檔案中原有的憑證值。
+    // 這裡刻意採保守規則，只改寫名稱明確像憑證的欄位。
     private static void SanitizeMcpSecrets(string snapshotRoot)
     {
         foreach (var file in Directory.EnumerateFiles(snapshotRoot, ".mcp.json", SearchOption.AllDirectories))

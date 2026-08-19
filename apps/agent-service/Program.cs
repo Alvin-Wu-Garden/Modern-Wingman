@@ -1,6 +1,7 @@
 using AgentService.Application.Contracts;
 using AgentService.Host.DependencyInjection;
 using AgentService.Infrastructure.Persistence;
+using AgentService.Infrastructure.Providers;
 using AgentService.Modules.GraphRAG;
 using Microsoft.EntityFrameworkCore;
 
@@ -16,18 +17,36 @@ builder.Services.AddAgentServices(builder.Configuration, builder.Environment);
 
 var app = builder.Build();
 
-// Modern Wingman 尚未發布，本次重構採乾淨 schema。
-// EF Core 負責核心資料表，少數不屬於 EF entity 的 GraphRAG／Marketplace 表由單一 migrator 建立。
+// Modern Wingman 尚未發布，因此設定資料庫採版本化的乾淨 schema。
+// EF Core 負責核心資料表；GraphRAG／Marketplace 的補充資料表由初始化器建立。
 using (var scope = app.Services.CreateScope())
 {
     var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AppDbContext>>();
     await using var db = await dbFactory.CreateDbContextAsync();
-    await db.Database.EnsureCreatedAsync();
     await AgentSchemaMigrator.ApplyAsync(db);
 
     // Provider 清單直接由 appsettings 定義；SQLite 只在使用者實際儲存 Key、
     // 自訂網址或排序時才建立資料列，因此全新安裝保持零設定資料。
 }
+
+// Provider ID 是外部輸入；找不到時回傳明確 404，絕不靜默套用第一個設定。
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (ProviderProfileNotFoundException exception) when (!context.Response.HasStarted)
+    {
+        context.Response.StatusCode = StatusCodes.Status404NotFound;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            error = $"找不到模型供應商設定「{exception.ProfileId}」。",
+            code = "provider_profile_not_found",
+            retryable = false,
+        });
+    }
+});
 
 app.MapAgentEndpoints();
 
