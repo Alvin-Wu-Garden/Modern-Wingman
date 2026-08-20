@@ -7,6 +7,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // 圖譜匯出使用 Tauri 原生檔案寫入，避免桌面應用只能依賴瀏覽器下載位置。
         .plugin(tauri_plugin_fs::init())
+        // 讓使用者可以直接用系統預設檢視器打開剛匯出的關聯圖快照。
+        .plugin(tauri_plugin_opener::init())
         .run(tauri::generate_context!())
         .expect("Modern Wingman 桌面應用程式啟動失敗");
 }

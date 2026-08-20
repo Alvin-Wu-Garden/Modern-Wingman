@@ -221,7 +221,7 @@ export function ChatPage() {
             </div>
             <h1 className="mt-5 text-2xl font-bold text-ink">Modern Wingman</h1>
             <p className="mt-2 text-sm leading-6 text-ink-secondary">
-              一般對話可以自由討論；專案解析則以已索引的知識圖譜回答程式碼問題。
+              一般對話可以自由討論；專案解析則以GraphRAG知識圖譜回答程式碼問題。
             </p>
             <div className="mt-6 flex justify-center gap-3">
               <Button onClick={() => void newGeneralConversation()}>

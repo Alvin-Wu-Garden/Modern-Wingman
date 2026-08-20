@@ -37,7 +37,8 @@ public static class ProjectEndpoints
         IReadOnlyList<string> NodeKeys,
         int? Depth,
         int? Limit,
-        string? Mode);
+        string? Mode,
+        IReadOnlyList<GraphViewerSearchFilter>? Filters = null);
     /// <summary>Viewer Contract 的 bounded 初始圖請求。</summary>
     public sealed record GraphViewRequest(
         IReadOnlyList<GraphViewerSearchFilter>? Filters,
@@ -683,6 +684,7 @@ public static class ProjectEndpoints
                 request.Depth ?? 1,
                 request.Limit ?? 1000,
                 request.Mode ?? "all",
+                request.Filters,
                 ct));
         }
         catch (ArgumentException ex)

@@ -14,6 +14,7 @@ import ForceGraph2D, {
 } from 'react-force-graph-2d'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
+import { openPath } from '@tauri-apps/plugin-opener'
 import {
   Braces,
   ChevronDown,
@@ -33,6 +34,7 @@ import {
   Table2,
   type LucideIcon,
   X,
+  Weight,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useResizablePanel } from '@/components/layout/use-resizable-panel'
@@ -427,7 +429,9 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   const [searchMessage, setSearchMessage] = useState<string | null>(null)
   const [activeSearchNodeId, setActiveSearchNodeId] = useState<string | null>(null)
   const [limit, setLimit] = useState(DEFAULT_LIMIT)
-  const [selectedFilters, setSelectedFilters] = useState<Record<string, string[]>>({})
+  // 記錄使用者「取消勾選」而隱藏的節點類型／關係類型 token；預設空陣列＝全部顯示。
+  // 只有在 focused 模式（搜尋後點選節點／Cypher 結果）才能互動；overview 模式僅供檢視。
+  const [hiddenFilters, setHiddenFilters] = useState<Record<string, string[]>>({})
   const [openFacets, setOpenFacets] = useState<Record<string, boolean>>({})
   const [tableEntity, setTableEntity] = useState<'nodes' | 'edges'>('nodes')
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({})
@@ -440,6 +444,8 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   const [activeGraphOperation, setActiveGraphOperation] = useState<GraphOperation | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [exportFeedback, setExportFeedback] = useState<string | null>(null)
+  // 只有「儲存關聯圖」成功後才會有值，供訊息列顯示「打開關聯圖」按鈕直接開啟該快照。
+  const [exportedPngPath, setExportedPngPath] = useState<string | null>(null)
   // Schema 是 active graph 的 readiness gate；未完成 schema 載入前不得並行
   // 啟動初始 graph/view，避免 Neo4j lifecycle 檢查與圖譜查詢競態。
   const [graphReadyProjectId, setGraphReadyProjectId] = useState<string | null>(null)
@@ -448,9 +454,18 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   const searching = activeGraphOperation === 'search'
   const openInspector = useCallback(() => inspectorPanel.expand(), [inspectorPanel.expand])
 
-  const activeFilters = useMemo(() => Object.entries(selectedFilters)
-    .filter(([, tokens]) => tokens.length > 0)
-    .map(([facetId, tokens]) => ({ facetId, tokens })), [selectedFilters])
+  // 有搜尋結果／Cypher 查詢結果時視為「focused」模式：統計改顯示「已載入/總數」，
+  // facet 清單只列出實際載入的類型，且可點擊隱藏；未進入 focused 模式前僅供檢視。
+  const isFocusedResult = !!queryResult || activeSearchNodeId !== null
+
+  const activeFilters = useMemo(() => (schema?.facets ?? []).flatMap((facet) => {
+    const hidden = hiddenFilters[facet.id] ?? []
+    if (hidden.length === 0) return []
+    const tokens = facet.values
+      .map((value) => value.token)
+      .filter((token) => !hidden.includes(token))
+    return [{ facetId: facet.id, tokens }]
+  }), [hiddenFilters, schema?.facets])
 
   const limitOptions = useMemo(
     // 載入級距描述的是完整圖譜的視覺化 budget，不應隨搜尋或 Cypher
@@ -460,12 +475,6 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     [schema?.totalNodes],
   )
   const nextLimit = limitOptions.find((value) => value > limit) ?? null
-  const selectedFilterLabels = useMemo(() => schema?.facets.flatMap((facet) =>
-    (selectedFilters[facet.id] ?? []).map((token) => ({
-      facetId: facet.id,
-      token,
-      label: facet.values.find((value) => value.token === token)?.label ?? token,
-    }))) ?? [], [schema?.facets, selectedFilters])
 
   useEffect(() => {
     if (!limitOptions.includes(limit)) setLimit(limitOptions[0])
@@ -489,6 +498,10 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       setQueryResult(null)
       setQueryMessage(null)
       setQueryError(null)
+      // 「重新載入」是唯一能把畫面帶回 overview 模式（整體統計＋完整 facet 清單）
+      // 的動作，因此一併清除 focused 狀態與先前的隱藏設定，避免卡在無法復原的狀態。
+      setActiveSearchNodeId(null)
+      setHiddenFilters({})
       setExpandedNeighborNodeIds(new Set())
       setNeighborExpansionFeedback(null)
       setSelectedNode(null)
@@ -504,6 +517,11 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       if (requestGeneration === graphRequestGenerationRef.current) setActiveGraphOperation(null)
     }
   }, [activeFilters, limit, project.id])
+
+  const loadGraphRef = useRef(loadGraph)
+  useEffect(() => {
+    loadGraphRef.current = loadGraph
+  }, [loadGraph])
 
   useEffect(() => {
     const node = canvasWrapRef.current
@@ -565,8 +583,9 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   }, [project.id])
 
   useEffect(() => {
-    // 種類、關係與載入上限都屬於即時篩選條件；任一條件改變便重抓圖譜，
-    // 避免 UI 顯示已選取條件，Canvas 卻仍停留在舊資料。
+    // node-category／edge-type 勾選改為純前端顯示/隱藏（見 visibleGraphData），
+    // 不應觸發後端重新查詢；只有初次就緒（schema/切換專案）或 limit（載入更多）
+    // 屬於明確要向後端要新資料的動作，才需要重新呼叫 loadGraph。
     if (suppressNextBrowseReloadRef.current) {
       // Cypher 成功後會清除舊的瀏覽篩選；這是 UI 狀態整理，不可反過來
       // 觸發一般圖譜載入並覆蓋剛取得的 Cypher 結果。
@@ -574,13 +593,14 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       return
     }
     if (graphReadyProjectId !== project.id) return
-    void loadGraph()
+    void loadGraphRef.current()
     return () => {
       // 條件切換或頁面卸載時，讓尚未完成的舊回應失效。
       graphRequestGenerationRef.current += 1
       graphAbortRef.current?.abort()
     }
-  }, [graphReadyProjectId, loadGraph, project.id])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graphReadyProjectId, limit, project.id])
 
   useEffect(() => {
     if (!schema) return
@@ -598,11 +618,65 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     })) as GraphLink[],
   }), [graph])
 
+  // node-category／edge-type 取消勾選（隱藏）只在前端即時顯示/隱藏已載入的圖，不重新打後端。
+  // 邊的兩端節點都必須可見才保留，避免出現懸空的線。
+  const visibleGraphData = useMemo(() => {
+    const nodeFacet = schema?.facets.find((facet) => facet.target === 'node')
+    const edgeFacet = schema?.facets.find((facet) => facet.target === 'edge')
+    const hiddenNodeTokens = nodeFacet ? hiddenFilters[nodeFacet.id] ?? [] : []
+    const hiddenEdgeTokens = edgeFacet ? hiddenFilters[edgeFacet.id] ?? [] : []
+
+    if (hiddenNodeTokens.length === 0 && hiddenEdgeTokens.length === 0) return graphData
+
+    const nodes = hiddenNodeTokens.length === 0
+      ? graphData.nodes
+      : graphData.nodes.filter((node) => !hiddenNodeTokens.includes(nodeCategory(node)))
+    const visibleNodeIds = new Set(nodes.map((node) => node.id))
+    const links = graphData.links.filter((link) => {
+      if (!visibleNodeIds.has(endpointId(link.source)) || !visibleNodeIds.has(endpointId(link.target)))
+        return false
+      return hiddenEdgeTokens.length === 0 || !hiddenEdgeTokens.includes(link.type)
+    })
+    return { nodes, links }
+  }, [graphData, schema?.facets, hiddenFilters])
+
+  // 目前「已載入」圖譜中各類型節點/關係的實際數量；取代 schema 建立當下的靜態統計，
+  // 讓搜尋、展開節點後左側面板的數字能即時反映畫面內容。
+  const loadedFacetCounts = useMemo(() => {
+    const nodeCounts = new Map<string, number>()
+    graphData.nodes.forEach((node) => {
+      const category = nodeCategory(node)
+      nodeCounts.set(category, (nodeCounts.get(category) ?? 0) + 1)
+    })
+    const edgeCounts = new Map<string, number>()
+    graphData.links.forEach((link) => {
+      edgeCounts.set(link.type, (edgeCounts.get(link.type) ?? 0) + 1)
+    })
+    return { nodeCounts, edgeCounts }
+  }, [graphData])
+
+  // Overview 模式顯示 schema 的完整清單（含尚未載入的類型，計數為全圖靜態值）；
+  // focused 模式只顯示目前已載入圖中實際出現（數量 > 0）的類型，計數改為即時值。
+  const facetDisplayValues = useMemo(() => {
+    const result = new Map<string, { token: string; label: string; count: number }[]>()
+    schema?.facets.forEach((facet) => {
+      if (!isFocusedResult) {
+        result.set(facet.id, facet.values)
+        return
+      }
+      const counts = facet.target === 'edge' ? loadedFacetCounts.edgeCounts : loadedFacetCounts.nodeCounts
+      result.set(facet.id, facet.values
+        .map((value) => ({ ...value, count: counts.get(value.token) ?? 0 }))
+        .filter((value) => value.count > 0))
+    })
+    return result
+  }, [isFocusedResult, loadedFacetCounts, schema?.facets])
+
   useEffect(() => {
     const graphApi = graphRef.current
-    if (!graphApi || graphData.nodes.length === 0) return
+    if (!graphApi || visibleGraphData.nodes.length === 0) return
 
-    const densityScale = Math.min(2.35, Math.max(1.2, Math.sqrt(graphData.nodes.length / 700)))
+    const densityScale = Math.min(2.35, Math.max(1.2, Math.sqrt(visibleGraphData.nodes.length / 700)))
     const charge = graphApi.d3Force('charge') as TunableForce | undefined
     charge?.strength?.(-420 * densityScale)
     charge?.distanceMin?.(32)
@@ -614,20 +688,20 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     link?.iterations?.(1)
 
     graphApi.d3ReheatSimulation()
-  }, [graphData.nodes.length, graphData.links.length])
+  }, [visibleGraphData.nodes.length, visibleGraphData.links.length])
 
   const selectedNeighborIds = useMemo(() => {
     const ids = new Set<string>()
-    if (!selectedNode || !graph) return ids
+    if (!selectedNode) return ids
     ids.add(selectedNode.id)
-    graph.edges.forEach((edge) => {
-      const source = endpointId(edge.source)
-      const target = endpointId(edge.target)
+    visibleGraphData.links.forEach((link) => {
+      const source = endpointId(link.source)
+      const target = endpointId(link.target)
       if (source === selectedNode.id) ids.add(target)
       if (target === selectedNode.id) ids.add(source)
     })
     return ids
-  }, [graph, selectedNode])
+  }, [visibleGraphData, selectedNode])
 
   const nodeColor = useCallback((node: GraphNode) => (
     styles.nodeColors[nodeCategory(node)] ?? '#9CA3AF'
@@ -657,7 +731,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       setSearchResult(null)
       setSearchMessage(null)
       setActiveSearchNodeId(null)
-      setSelectedFilters({})
+      setHiddenFilters({})
       setQueryResult(result)
       // 手動 Cypher 是一個新的檢視結果，不能殘留先前圖譜；只有「展開」才合併節點。
       setGraph(result.graph)
@@ -711,6 +785,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
         depth: 1,
         limit,
         mode,
+        filters: activeFilters,
       })
       if (requestGeneration !== graphRequestGenerationRef.current) return
       const addedNodes = nextGraph.nodes.filter((item) => !existingNodeIds.has(item.id)).length
@@ -744,7 +819,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     } finally {
       if (requestGeneration === graphRequestGenerationRef.current) setActiveGraphOperation(null)
     }
-  }, [graph?.edges, graph?.nodes, limit, project.id, selectedNode])
+  }, [activeFilters, graph?.edges, graph?.nodes, limit, project.id, selectedNode])
 
   const loadSearchHitGraph = useCallback(async (
     node: CodeGraphVisualNode,
@@ -758,6 +833,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
         depth: 1,
         limit,
         mode: 'all',
+        filters: activeFilters,
       })
       if (requestGeneration !== graphRequestGenerationRef.current) return
       const selected = nextGraph.nodes.find((item) => item.id === node.id) ?? node
@@ -778,7 +854,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     } finally {
       if (requestGeneration === graphRequestGenerationRef.current) setActiveGraphOperation(null)
     }
-  }, [limit, project.id])
+  }, [activeFilters, limit, project.id])
 
   const searchNode = useCallback(async () => {
     const query = searchText.trim()
@@ -856,9 +932,9 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     ctx.strokeStyle = selected ? canvasTheme.labelText : canvasTheme.nodeStroke
     ctx.stroke()
 
-    const labelZoomThreshold = graphData.nodes.length > 2500
+    const labelZoomThreshold = visibleGraphData.nodes.length > 2500
       ? 2.1
-      : graphData.nodes.length > 900
+      : visibleGraphData.nodes.length > 900
         ? 1.55
         : 1.15
     const shouldDrawLabel = selected || hovered || globalScale > labelZoomThreshold
@@ -880,7 +956,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     }
 
     ctx.restore()
-  }, [canvasTheme, graphData.nodes.length, hoverNode, nodeColor, selectedNeighborIds, selectedNode, styles.caption, styles.halo])
+  }, [canvasTheme, visibleGraphData.nodes.length, hoverNode, nodeColor, selectedNeighborIds, selectedNode, styles.caption, styles.halo])
 
   const paintNodePointer = useCallback((
     node: NodeObject<GraphNode>,
@@ -935,6 +1011,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
   const exportJson = async () => {
     try {
       setExportFeedback(null)
+      setExportedPngPath(null)
       const content = JSON.stringify({ project, schema, graph: cleanGraphData(graph) }, null, 2)
       const path = await saveExportFile(
         `${exportFilename(project.name)}-knowledge-graph.json`,
@@ -957,6 +1034,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
     }
     try {
       setExportFeedback(null)
+      setExportedPngPath(null)
       const computedBackground = getComputedStyle(canvasWrap).backgroundColor
       const backgroundColor = computedBackground && computedBackground !== 'rgba(0, 0, 0, 0)'
         ? computedBackground
@@ -971,17 +1049,18 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
       setExportFeedback(path
         ? `已儲存關聯圖（${width}×${height}）：${path}`
         : '已取消儲存關聯圖。')
+      setExportedPngPath(path)
     } catch (reason) {
       setExportFeedback(reason instanceof Error ? `儲存失敗：${reason.message}` : '儲存關聯圖失敗')
     }
   }
 
-  const toggleFacet = (facetId: string, token: string, selection: 'single' | 'multiple') => {
-    setSelectedFilters((current) => {
-      const selected = current[facetId] ?? []
-      const next = selected.includes(token)
-        ? selected.filter((item) => item !== token)
-        : selection === 'single' ? [token] : [...selected, token]
+  const toggleFacet = (facetId: string, token: string) => {
+    setHiddenFilters((current) => {
+      const hidden = current[facetId] ?? []
+      const next = hidden.includes(token)
+        ? hidden.filter((item) => item !== token)
+        : [...hidden, token]
       return { ...current, [facetId]: next }
     })
   }
@@ -1123,7 +1202,12 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
               setFilterPanelHoverExpanded(false)
               filterPanel.toggleCollapsed()
             }}
-            className="absolute right-0 top-4 z-30 flex h-7 w-7 translate-x-1/2 items-center justify-center rounded-full border border-border bg-surface text-ink-secondary shadow-sm transition-colors hover:bg-surface-alt hover:text-ink"
+            className={cn(
+              'absolute top-4 z-30 flex h-7 w-7 items-center justify-center rounded-full border border-border bg-surface text-ink-secondary shadow-sm transition-colors hover:bg-surface-alt hover:text-ink',
+              filterPanel.collapsed && !filterPanelHoverExpanded
+                ? 'left-1/2 -translate-x-1/2'
+                : 'right-0 translate-x-1/2',
+            )}
           >
             {filterPanel.collapsed
               ? <ChevronRight className="h-3.5 w-3.5" />
@@ -1139,25 +1223,41 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
           {!filterPanel.collapsed || filterPanelHoverExpanded ? (
           <div className="h-full overflow-y-auto p-4 space-y-4">
             <section className="space-y-2">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-ink-secondary">
+              <div
+                className="flex cursor-pointer items-center gap-2 text-xs font-semibold uppercase tracking-wide text-ink-secondary"
+                onDoubleClick={() => {
+                  filterPanel.expand()
+                  setFilterPanelHoverExpanded(false)
+                }}
+                title="雙擊固定展開側欄"
+              >
                 <Database className="w-3.5 h-3.5" />
                 圖譜概覽
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div className="rounded-lg border border-border bg-surface-alt px-3 py-2">
-                  <p className="text-[10px] text-ink-subtle">節點總數</p>
-                  <p className="text-lg font-semibold">{schema?.totalNodes ?? graph?.totalNodes ?? 0}</p>
+                  <p className="text-[10px] text-ink-subtle">{isFocusedResult ? '節點數 / 節點總數' : '節點總數'}</p>
+                  <p className="text-lg font-semibold">
+                    {isFocusedResult
+                      ? `${graphData.nodes.length} / ${schema?.totalNodes ?? 0}`
+                      : schema?.totalNodes ?? 0}
+                  </p>
                 </div>
                 <div className="rounded-lg border border-border bg-surface-alt px-3 py-2">
-                  <p className="text-[10px] text-ink-subtle">關係總數</p>
-                  <p className="text-lg font-semibold">{schema?.totalEdges ?? graph?.loadedEdges ?? 0}</p>
+                  <p className="text-[10px] text-ink-subtle">{isFocusedResult ? '關係數 / 關係總數' : '關係總數'}</p>
+                  <p className="text-lg font-semibold">
+                    {isFocusedResult
+                      ? `${graphData.links.length} / ${schema?.totalEdges ?? 0}`
+                      : schema?.totalEdges ?? 0}
+                  </p>
                 </div>
               </div>
             </section>
 
             {schema?.facets.map((facet, facetIndex) => {
-              const selected = selectedFilters[facet.id] ?? []
+              const hidden = hiddenFilters[facet.id] ?? []
               const isEdge = facet.target === 'edge'
+              const displayValues = facetDisplayValues.get(facet.id) ?? facet.values
               return (
                 <details
                   key={facet.id}
@@ -1173,35 +1273,46 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                   <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-2 py-2 text-xs font-semibold uppercase tracking-wide text-ink-secondary hover:bg-surface-alt">
                     {isEdge ? <Network className="w-3.5 h-3.5" /> : <Filter className="w-3.5 h-3.5" />}
                     <span className="min-w-0 flex-1 truncate">{facet.label}</span>
-                    {selected.length > 0 && <span className="rounded-full bg-brand/15 px-1.5 py-0.5 text-[10px] text-brand">{selected.length}</span>}
+                    {isFocusedResult && hidden.length > 0 && (
+                      <span className="rounded-full bg-brand/15 px-1.5 py-0.5 text-[10px] text-brand">已隱藏 {hidden.length}</span>
+                    )}
                     <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
                   </summary>
                   <div className="space-y-2 px-2 pb-2">
-                    <p className="text-[10px] leading-relaxed text-ink-subtle">{facet.description}</p>
+                    <p className="text-[10px] leading-relaxed text-ink-subtle">
+                      {isFocusedResult ? facet.description : '搜尋並點選節點後，才能顯示/隱藏類型。'}
+                    </p>
                   <button
                     type="button"
-                    onClick={() => setSelectedFilters((current) => ({ ...current, [facet.id]: [] }))}
+                    disabled={!isFocusedResult}
+                    onClick={() => setHiddenFilters((current) => ({ ...current, [facet.id]: [] }))}
+                    title={!isFocusedResult ? '搜尋並點選節點後，才能顯示/隱藏類型' : undefined}
                     className={cn(
                       'w-full rounded-lg px-3 py-1.5 text-left text-xs transition-colors',
-                      selected.length === 0 ? 'bg-brand/15 text-brand' : 'text-ink-secondary hover:bg-surface-alt',
+                      !isFocusedResult
+                        ? 'cursor-not-allowed text-ink-subtle opacity-60'
+                        : hidden.length === 0 ? 'bg-brand/15 text-brand' : 'text-ink-secondary hover:bg-surface-alt',
                     )}
                   >
-                    不限
+                    全部顯示
                   </button>
                   <div className="space-y-1.5">
-                    {facet.values.map((value, valueIndex) => {
+                    {displayValues.map((value, valueIndex) => {
                       const palette = isEdge ? REL_PALETTE : NODE_PALETTE
                       const colors = isEdge ? styles.relationColors : styles.nodeColors
                       const color = colors[value.token] ?? palette[(facetIndex + valueIndex) % palette.length]
-                      const active = selected.length === 0 || selected.includes(value.token)
+                      const active = !isFocusedResult || !hidden.includes(value.token)
                       return (
                         <div key={value.token} className="flex items-center gap-2 rounded-lg border border-border bg-surface-alt px-2 py-1.5">
                           <button
                             type="button"
-                            onClick={() => toggleFacet(facet.id, value.token, facet.selection)}
+                            disabled={!isFocusedResult}
+                            onClick={() => toggleFacet(facet.id, value.token)}
                             aria-pressed={active}
+                            title={!isFocusedResult ? '搜尋並點選節點後，才能顯示/隱藏類型' : undefined}
                             className={cn(
                               'min-w-0 flex flex-1 items-center gap-2 rounded px-1 py-0.5 text-left text-xs transition-opacity',
+                              !isFocusedResult && 'cursor-not-allowed',
                               active ? 'text-ink opacity-100' : 'text-ink-subtle opacity-55',
                             )}
                           >
@@ -1287,8 +1398,8 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                 className="h-8 w-full rounded-lg border border-border bg-input-bg pl-8 pr-3 text-xs text-ink placeholder:text-ink-subtle focus:outline-none focus:ring-2 focus:ring-brand/30"
               />
             </div>
-            <Button variant="ghost" size="sm" className="shrink-0" onClick={() => void searchNode()} title="搜尋" isLoading={searching}>
-              <Search className="w-3.5 h-3.5" />
+            <Button variant="ghost" size="min" className="shrink-0" onClick={() => void searchNode()} title="搜尋" isLoading={searching}>
+              <Search className="w-3 h-3" />
             </Button>
             <select
               value={limit}
@@ -1299,7 +1410,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                 <option key={value} value={value}>{value} nodes</option>
               ))}
             </select>
-            {nextLimit && (
+            {/* {nextLimit && (
               <Button
                 variant="outline"
                 size="sm"
@@ -1310,17 +1421,21 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
               >
                 載入更多
               </Button>
-            )}
-            {(schema?.totalNodes ?? 0) > 5000 && (
-              <span className="whitespace-nowrap text-[10px] text-ink-subtle">搜尋涵蓋全部 {schema?.totalNodes} 筆</span>
-            )}
-            {searchMessage && (
-              <span className={cn(
-                'whitespace-nowrap text-[10px]',
-                searchResult?.items.length ? 'text-brand' : 'font-medium text-error',
-              )}>
-                {searchMessage}
-              </span>
+            )} */}
+            {((schema?.totalNodes ?? 0) > 5000 || searchMessage) && (
+              <div className="flex shrink-0 flex-col leading-tight">
+                {(schema?.totalNodes ?? 0) > 5000 && (
+                  <span className="whitespace-nowrap text-[10px] text-ink-subtle">搜尋涵蓋全部 {schema?.totalNodes} 筆</span>
+                )}
+                {searchMessage && (
+                  <span className={cn(
+                    'whitespace-nowrap text-[10px]',
+                    searchResult?.items.length ? 'text-brand' : 'font-medium text-error',
+                  )}>
+                    {searchMessage}
+                  </span>
+                )}
+              </div>
             )}
             <div className="ml-auto flex shrink-0 items-center gap-1 rounded-lg border border-border bg-surface p-0.5">
               {VIEW_TABS.map(({ value, icon: Icon, label }) => (
@@ -1392,11 +1507,31 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
           )}
 
           {exportFeedback && (
-            <div className="shrink-0 border-b border-border bg-surface px-3 py-1.5 text-[10px] text-brand flex items-center justify-between">
-              <span>{exportFeedback}</span>
-              <button type="button" onClick={() => setExportFeedback(null)} className="text-ink-subtle hover:text-ink" title="關閉訊息">
-                <X className="h-3 w-3" />
-              </button>
+            <div className="shrink-0 border-b border-border bg-surface px-3 py-1.5 text-[10px] text-brand flex items-center justify-between gap-2">
+              <span className="min-w-0 truncate">{exportFeedback}</span>
+              <div className="flex shrink-0 items-center gap-2">
+                {exportedPngPath && (
+                  <button
+                    type="button"
+                    onClick={() => void openPath(exportedPngPath)}
+                    className="whitespace-nowrap text-brand underline-offset-2 hover:underline"
+                    title="以系統預設檢視器開啟剛剛儲存的關聯圖"
+                  >
+                    打開關聯圖
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportFeedback(null)
+                    setExportedPngPath(null)
+                  }}
+                  className="text-ink-subtle hover:text-ink"
+                  title="關閉訊息"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
             </div>
           )}
 
@@ -1416,27 +1551,6 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
               >
                 返回一般瀏覽
               </Button>
-            </div>
-          )}
-
-          {selectedFilterLabels.length > 0 && (
-            <div className="shrink-0 border-b border-border bg-surface px-3 py-1.5 flex items-center gap-2 overflow-x-auto">
-              <span className="shrink-0 text-[10px] font-medium text-ink-subtle">目前條件</span>
-              {selectedFilterLabels.map((item) => (
-                <button
-                  key={`${item.facetId}:${item.token}`}
-                  type="button"
-                  onClick={() => toggleFacet(item.facetId, item.token, 'multiple')}
-                  className="flex shrink-0 items-center gap-1 rounded-full border border-brand/25 bg-brand/10 px-2 py-1 text-[10px] text-brand"
-                  title="移除此條件"
-                >
-                  {item.label}
-                  <X className="h-3 w-3" />
-                </button>
-              ))}
-              <button type="button" onClick={() => setSelectedFilters({})} className="shrink-0 text-[10px] text-ink-subtle hover:text-ink">
-                清除全部
-              </button>
             </div>
           )}
 
@@ -1464,8 +1578,8 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
                     )}
                   >
                     <span className="block truncate text-xs font-medium text-ink">{node.caption}</span>
-                    <span className="block truncate text-[10px] text-ink-subtle">
-                      {nodeCategory(node)} · score {score.toFixed(2)}
+                    <span className="block truncate text-[11px] text-ink-subtle">
+                      <span style={{ fontWeight: 'bold' }}>{nodeCategory(node)} </span>· score {score.toFixed(2)}
                     </span>
                   </button>
                 ))}
@@ -1476,7 +1590,7 @@ export function KnowledgeGraphPage({ project, onClose }: KnowledgeGraphPageProps
           <div ref={canvasWrapRef} className={cn('relative min-h-0 flex-1 overflow-hidden bg-surface-alt', viewMode !== 'graph' && 'hidden')}>
             <ForceGraph2D<GraphNode, GraphLink>
               ref={graphRef}
-              graphData={graphData}
+              graphData={visibleGraphData}
               nodeId="id"
               linkSource="source"
               linkTarget="target"

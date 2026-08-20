@@ -1011,6 +1011,8 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         string nodeId,
         int limit,
         string direction,
+        IReadOnlyList<string>? kinds,
+        IReadOnlyList<string>? relationshipTypes,
         CancellationToken cancellationToken)
     {
         if (_driver is null) return [];
@@ -1018,6 +1020,10 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
             throw new ArgumentException("方向查詢只允許 in 或 out。", nameof(direction));
         var graphVersion = await GetActiveManifestAsync(projectId, cancellationToken);
         if (graphVersion is null) return [];
+        var normalizedKinds = kinds?.Where(value => !string.IsNullOrWhiteSpace(value))
+            .ToArray() ?? [];
+        var normalizedRelationshipTypes = relationshipTypes?.Where(
+            value => !string.IsNullOrWhiteSpace(value)).ToArray() ?? [];
 
         var cypher = direction == "in"
             ? """
@@ -1029,6 +1035,8 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                   graphVersion: $graphVersion,
                   id: $nodeId
               })
+              WHERE (size($kinds) = 0 OR any(label IN labels(neighbor) WHERE label IN $kinds))
+                AND (size($relationshipTypes) = 0 OR type(relationship) IN $relationshipTypes)
               RETURN neighbor, relationship,
                      startNode(relationship).id AS sourceId,
                      endNode(relationship).id AS targetId
@@ -1044,6 +1052,8 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
                   wingmanProjectId: $projectId,
                   graphVersion: $graphVersion
               })
+              WHERE (size($kinds) = 0 OR any(label IN labels(neighbor) WHERE label IN $kinds))
+                AND (size($relationshipTypes) = 0 OR type(relationship) IN $relationshipTypes)
               RETURN neighbor, relationship,
                      startNode(relationship).id AS sourceId,
                      endNode(relationship).id AS targetId
@@ -1057,7 +1067,15 @@ public sealed partial class Neo4jGraphStore : IGraphStore, IAsyncDisposable
         {
             var cursor = await transaction.RunAsync(
                 cypher,
-                new { projectId, graphVersion, nodeId, limit });
+                new
+                {
+                    projectId,
+                    graphVersion,
+                    nodeId,
+                    limit,
+                    kinds = normalizedKinds,
+                    relationshipTypes = normalizedRelationshipTypes,
+                });
             var result = new List<GraphNeighbor>();
             while (await cursor.FetchAsync())
             {

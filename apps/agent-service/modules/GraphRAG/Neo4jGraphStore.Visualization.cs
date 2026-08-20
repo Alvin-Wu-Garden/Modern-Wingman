@@ -539,6 +539,7 @@ public sealed partial class Neo4jGraphStore
         int depth,
         int limit,
         string mode,
+        IReadOnlyList<GraphViewerSearchFilter>? filters = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
@@ -546,6 +547,7 @@ public sealed partial class Neo4jGraphStore
         depth = Math.Clamp(depth, 1, 4);
         limit = Math.Clamp(limit, 1, 5_000);
         var normalizedMode = NormalizeVisualNeighborMode(mode);
+        var (kinds, relationships) = ResolveViewerFilters(filters);
 
         // same-file 不是關係方向的別名，必須以中心節點的 filePath 查找同檔案節點；
         // 若錯誤映射成 all，UI 看似有結果，實際上卻會混入其他檔案的一般鄰居。
@@ -579,12 +581,20 @@ public sealed partial class Neo4jGraphStore
                 // 篩選，高 degree 節點可能剛好被另一方向填滿，造成 callers/callees 漏資料。
                 var neighbors = normalizedMode == "all"
                     ? await GetNeighborsAsync(
-                        projectId, id, Math.Min(limit, 500), cancellationToken)
+                        projectId,
+                        id,
+                        Math.Min(limit, 500),
+                        graphVersion: null,
+                        kinds,
+                        relationships,
+                        cancellationToken)
                     : await GetDirectionalNeighborsAsync(
                         projectId,
                         id,
                         Math.Min(limit, 500),
                         normalizedMode,
+                        kinds,
+                        relationships,
                         cancellationToken);
                 foreach (var neighbor in neighbors)
                 {

@@ -827,6 +827,8 @@ export async function expandProjectGraphNeighbors(
     depth?: number
     limit?: number
     mode?: 'all' | 'in' | 'out' | 'callers' | 'callees' | 'same-file'
+    /** UI-improvement Viewer 使用的 schema-driven facet 篩選。 */
+    filters?: CodeGraphSearchFilter[]
   },
   signal?: AbortSignal,
 ): Promise<CodeGraphVisualData> {
@@ -840,6 +842,7 @@ export async function expandProjectGraphNeighbors(
         depth: options?.depth ?? 1,
         limit: options?.limit ?? 1000,
         mode: options?.mode ?? 'all',
+        filters: options?.filters ?? [],
       }),
     },
     signal,

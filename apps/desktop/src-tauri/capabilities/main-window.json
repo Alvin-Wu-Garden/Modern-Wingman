@@ -9,7 +9,19 @@
       "core:webview:allow-set-webview-zoom",
       "dialog:allow-open",
       "dialog:allow-save",
-      "fs:allow-write-file"
+      "fs:allow-write-file",
+      {
+        "identifier": "opener:allow-open-path",
+        "allow": [
+          { "path": "$HOME/**" },
+          { "path": "$DOWNLOAD/**" },
+          { "path": "$DOCUMENT/**" },
+          { "path": "$DESKTOP/**" },
+          { "path": "$APPDATA/**" },
+          { "path": "$APPLOCALDATA/**" },
+          { "path": "$TEMP/**" }
+        ]
+      }
     ]
   }
 ]

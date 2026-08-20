@@ -28,11 +28,33 @@ public sealed partial class Neo4jGraphStore
         string nodeId,
         int limit,
         string? graphVersion,
+        CancellationToken cancellationToken = default) =>
+        await GetNeighborsAsync(
+            projectId,
+            nodeId,
+            limit,
+            graphVersion,
+            kinds: null,
+            relationshipTypes: null,
+            cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<GraphNeighbor>> GetNeighborsAsync(
+        string projectId,
+        string nodeId,
+        int limit,
+        string? graphVersion,
+        IReadOnlyList<string>? kinds,
+        IReadOnlyList<string>? relationshipTypes,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
         limit = Math.Clamp(limit, 1, 500);
+        var normalizedKinds = kinds?.Where(value => !string.IsNullOrWhiteSpace(value))
+            .ToArray() ?? [];
+        var normalizedRelationshipTypes = relationshipTypes?.Where(
+            value => !string.IsNullOrWhiteSpace(value)).ToArray() ?? [];
         if (_driver is null)
         {
             throw new GraphStoreException(
@@ -57,6 +79,8 @@ public sealed partial class Neo4jGraphStore
                     wingmanProjectId: $projectId,
                     graphVersion: $graphVersion
                 })
+                WHERE (size($kinds) = 0 OR any(label IN labels(neighbor) WHERE label IN $kinds))
+                  AND (size($relationshipTypes) = 0 OR type(relationship) IN $relationshipTypes)
                 RETURN neighbor, relationship,
                        startNode(relationship).id AS sourceId,
                        endNode(relationship).id AS targetId,
@@ -81,7 +105,15 @@ public sealed partial class Neo4jGraphStore
                     neighbor.id
                 LIMIT $limit
                 """,
-                new { projectId, nodeId, limit, graphVersion });
+                new
+                {
+                    projectId,
+                    nodeId,
+                    limit,
+                    graphVersion,
+                    kinds = normalizedKinds,
+                    relationshipTypes = normalizedRelationshipTypes,
+                });
             var result = new List<GraphNeighbor>();
             while (await cursor.FetchAsync())
             {

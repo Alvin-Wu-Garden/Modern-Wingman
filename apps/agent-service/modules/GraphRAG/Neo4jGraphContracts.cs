@@ -432,6 +432,21 @@ public interface IGraphStore
         GetNeighborsAsync(projectId, nodeId, limit, cancellationToken);
 
     /// <summary>
+    /// 以 Viewer facet（node-category／edge-type）套用鄰居白名單篩選；
+    /// 舊 store 預設忽略 kinds／relationshipTypes 並退回未過濾查詢，
+    /// 只有正式 Neo4j store 需要覆寫以套用實際篩選。
+    /// </summary>
+    Task<IReadOnlyList<GraphNeighbor>> GetNeighborsAsync(
+        string projectId,
+        string nodeId,
+        int limit,
+        string? graphVersion,
+        IReadOnlyList<string>? kinds,
+        IReadOnlyList<string>? relationshipTypes,
+        CancellationToken cancellationToken = default) =>
+        GetNeighborsAsync(projectId, nodeId, limit, graphVersion, cancellationToken);
+
+    /// <summary>
     /// 批次取得多個 active graph 節點的一階鄰接關係。
     /// 預設實作保留測試 store 與非 Neo4j store 的相容性；正式 Neo4j store 必須覆寫此方法，
     /// 以單一查詢處理同一層 frontier，避免 Local Search 形成逐節點 N+1 round trip。
@@ -626,6 +641,7 @@ public interface IGraphStore
         int depth,
         int limit,
         string mode,
+        IReadOnlyList<GraphViewerSearchFilter>? filters = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>執行強制 project/version scoped 的 read-only V4 Cypher。</summary>
